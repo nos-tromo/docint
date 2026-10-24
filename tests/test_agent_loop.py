@@ -20,18 +20,27 @@ import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    CLIP,
     LEDGER_CAP,
+    LOOP_FINAL_NOTE,
+    LOOP_LEGEND,
     PROGRAMME,
+    ScriptedSearch,
     ThumbnailStore,
+    answer_round,
+    call_round,
     chunk,
     frame_passage,
     programme_passage,
+    scripted_loop,
     shown_numbers,
     streaming_tool_llm,
     text_chunks,
     thumbnail,
     thumbnail_url,
+    tool_call,
     tool_call_delta,
+    tool_context,
     turn_budget,
 )
 from assessment_fakes import bad_request, join_threads, llm_view, scored_node
@@ -67,8 +76,9 @@ from docint.agents.turn.history import ConversationTurn, ConversationWindow
 from docint.agents.turn.image_tools import SearchImagesTool
 from docint.agents.turn.images import TurnImages
 from docint.agents.turn.loop import NOTE_CHARS, OVERFLOW_REPLY_SHARE, AgentLoop, AgentResult, ToolsUnavailable
+from docint.agents.turn.passages import NO_NEW_PASSAGES
 from docint.agents.turn.scope import PASSAGES_FENCE, EvidenceDoesNotFit
-from docint.agents.turn.stream import Provisional
+from docint.agents.turn.stream import Provisional, ToolCall
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
     PassageReply,
@@ -82,9 +92,10 @@ from docint.agents.turn.tools import (
     error_reply,
     trail_detail,
 )
+from docint.agents.turn.toolsets import toolset_for
 from docint.agents.types import AgentProgress
-from docint.core.retrieval.visual import VISUAL_IMAGES_ATTACHED_KEY, render_legend
-from docint.utils.text_budget import fit_with_marker
+from docint.core.retrieval.visual import VISUAL_IMAGE_TOKEN_ESTIMATE, VISUAL_IMAGES_ATTACHED_KEY, render_legend
+from docint.utils.text_budget import MATCH_SPANS_KEY, fit_with_marker
 
 QUESTION = "zzsecretzz Wann öffnen die Stände beim Hafenfest?"
 SYSTEM_PROMPT = "Beantworte Fragen zur Sammlung mit den Werkzeugen und belege jede Aussage mit [n]."
@@ -306,6 +317,7 @@ def _turn(
     window: ConversationWindow | None = None,
     ledger: EvidenceLedger | None = None,
     pinned: Sequence[NodeWithScore] | None = None,
+    carried: Sequence[NodeWithScore] = (),
 ) -> Iterator[AgentProgress | str | AgentResult]:
     """Run one turn of the user's invented question.
 
@@ -314,6 +326,7 @@ def _turn(
         window (ConversationWindow | None): The conversation before it; none by default.
         ledger (EvidenceLedger | None): The turn's evidence; an empty one by default.
         pinned (Sequence[NodeWithScore] | None): The passages the user pinned; no scope by default.
+        carried (Sequence[NodeWithScore]): The passages earlier answers cite; none by default.
 
     Returns:
         Iterator[AgentProgress | str | AgentResult]: The turn's output.
@@ -324,6 +337,7 @@ def _turn(
         # An empty ledger is falsy, so only a missing one is replaced.
         ledger=EvidenceLedger(cap=LEDGER_CAP) if ledger is None else ledger,
         pinned=pinned,
+        carried=carried,
     )
 
 
@@ -665,7 +679,7 @@ def test_every_call_gets_a_reply_even_on_timeout(held: threading.Event) -> None:
 
     replies = _tool_replies(llm, 2)
     assert list(replies) == ["call_a", "call_b", "call_c", "call_d", "call_e"]
-    assert replies["call_b"] == error_reply("search", LATE_REPLY).text
+    assert replies["call_b"] == error_reply("search", LATE_REPLY, kind="late").text
     assert shown_numbers(replies["call_c"]) == [1]
     assert replies["call_d"].startswith("Error: there is no tool named 'keyframes'")
     assert replies["call_e"].startswith("Error: the arguments for read must be a JSON object")
@@ -725,7 +739,7 @@ def test_a_search_back_in_time_is_answered_while_one_that_is_late_is_not(
     progress, _, result = _drain(_turn(loop))
 
     replies = _tool_replies(llm, 1)
-    assert replies["call_a"] == error_reply("search", LATE_REPLY).text
+    assert replies["call_a"] == error_reply("search", LATE_REPLY, kind="late").text
     assert shown_numbers(replies["call_b"]) == [1]
     assert (_steps(progress), result.reason) == ([("search", "Wetter", 1)], "time_budget")
 
@@ -981,7 +995,7 @@ def test_extra_calls_in_a_round_are_skipped_with_a_reply() -> None:
     assert sorted(search.queries) == ["Programm", "Wetter"]
     replies = _tool_replies(llm, 1)
     assert list(replies) == ["call_a", "call_b", "call_c"]
-    assert replies["call_c"] == error_reply("search", SKIPPED_REPLY.format(limit=2)).text
+    assert replies["call_c"] == error_reply("search", SKIPPED_REPLY.format(limit=2), kind="skipped").text
     assert _steps(progress) == [("search", "Programm", 1), ("search", "Wetter", 1)]
 
 
@@ -1167,7 +1181,7 @@ def test_a_search_that_outlives_the_time_left_keeps_its_slot_until_it_ends(
         )
     )
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY, kind="late").text}
     assert len(ledger) == 0
     assert slots.acquire(blocking=False) is False
     held.set()
@@ -1216,8 +1230,8 @@ def test_abandoned_searches_are_capped_at_the_slot_count(held: threading.Event) 
         _drain(_turn(_loop(llm, _documents(_search), time_budget_s=0.05, clock=lambda: 0.0)))
         replies.extend(_tool_replies(llm, 1).values())
 
-    assert replies == [error_reply("search", LATE_REPLY).text] * SEARCH_SLOTS + [
-        error_reply("search", NO_CAPACITY_REPLY).text
+    assert replies == [error_reply("search", LATE_REPLY, kind="late").text] * SEARCH_SLOTS + [
+        error_reply("search", NO_CAPACITY_REPLY, kind="no_capacity").text
     ]
     assert len(calls) == SEARCH_SLOTS
     assert _alive_searches() == SEARCH_SLOTS
@@ -1259,7 +1273,7 @@ def test_no_free_search_slot_answers_the_call_without_starting_it(
 
     assert slots.waits == [wait]
     assert (search.queries, started) == ([], [])
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", NO_CAPACITY_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", NO_CAPACITY_REPLY, kind="no_capacity").text}
     assert (_steps(progress), result.reason) == ([], "research_failed")
     assert loguru_caplog.messages == ["No search slot came free for 1 of an agent round's tool calls"]
 
@@ -1294,7 +1308,7 @@ def test_a_search_thread_that_cannot_start_is_answered_with_an_error(
 
     _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch({})), search_slots=slots)))
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY, kind="failed").text}
     assert ("".join(texts), result.reason) == (ANSWER, "research_failed")
     assert loguru_caplog.messages == ["An agent's 'search' call could not start: RuntimeError"]
     assert slots.acquire(blocking=False) is True
@@ -1357,7 +1371,7 @@ def test_a_search_raising_its_own_timeout_is_a_failed_call_not_a_spent_budget(
 
     _, _, result = _drain(_turn(_loop(llm, _documents(_search))))
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", FAILED_REPLY, kind="failed").text}
     assert result.reason == "research_failed"
     assert loguru_caplog.messages == ["An agent's 'search' call failed: TimeoutError"]
 
@@ -1416,7 +1430,7 @@ def test_the_slot_wait_comes_out_of_the_time_budget(held: threading.Event, monke
     )
 
     assert waits == [pytest.approx(0.1)]
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("search", LATE_REPLY, kind="late").text}
 
 
 def test_calls_from_a_reply_after_the_time_budget_are_answered_without_running() -> None:
@@ -1434,7 +1448,7 @@ def test_calls_from_a_reply_after_the_time_budget_are_answered_without_running()
 
     assert search.queries == []
     replies = _tool_replies(llm, 1)
-    assert replies["call_a"] == error_reply("search", NO_TIME_REPLY).text
+    assert replies["call_a"] == error_reply("search", NO_TIME_REPLY, kind="no_time").text
     assert replies["call_b"].startswith("Error: there is no passage [4]")
     assert _steps(progress) == []
     assert llm.stream_chat.call_args_list[1].kwargs["tool_choice"] == "none"
@@ -2257,7 +2271,7 @@ def test_a_call_without_room_for_its_reply_is_never_run() -> None:
     assert search.queries == ["Programm"]
     replies = _tool_replies(llm, 1)
     assert shown_numbers(replies["call_a"]) == [1]
-    assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY).text
+    assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY, kind="no_room").text
     assert _steps(progress) == [("search", "Programm", 1)]
 
 
@@ -2314,7 +2328,7 @@ def test_every_calls_reply_is_reserved_before_any_call_runs() -> None:
     _drain(_turn(_loop(llm, _documents(search), budget=TIGHT, max_calls_per_round=16)))
 
     assert search.queries == []
-    assert _tool_replies(llm, 1)["call_a"] == error_reply("search", NO_ROOM_REPLY).text
+    assert _tool_replies(llm, 1)["call_a"] == error_reply("search", NO_ROOM_REPLY, kind="no_room").text
 
 
 @pytest.mark.parametrize(("count", "withdrawn"), [(20, True), (2, False)], ids=["too-many", "fits"])
@@ -2414,7 +2428,9 @@ class _Counter:
                 ToolReply: The count, which admits no passage; an error reply when the tool errs.
             """
             if self._error:
-                return replace(error_reply(self.name, self._text, detail=detail), informative=self._informative)
+                return replace(
+                    error_reply(self.name, self._text, kind="failed", detail=detail), informative=self._informative
+                )
             return PassageReply(
                 text=self._text,
                 found=0,
@@ -2690,6 +2706,345 @@ def test_a_reply_longer_than_one_reply_may_be_is_cut(loguru_caplog: LogCaptureFi
     assert loguru_caplog.messages == ["A 'verbose' tool reply ran past 3000 characters and was cut"]
 
 
+# --- Making room: replies the model has read are cleared, and put back for a forced answer ---------
+
+#: A section long enough that a read of it fills a reply; a search shows ``passage_chars`` of it.
+SECTION = (HARBOUR_PLAN * 2)[:2900]
+#: A turn whose room holds two full replies and a little more: 1940 tokens once the final note is paid.
+TWO_REPLIES = _budget_with_room(2000)
+#: What a reply cleared to make room says, for the passages it showed.
+CLEARED = "Cleared to make room: this reply showed {refs}; read(n) shows a passage again."
+#: What a picture message retired to make room says, for the passages whose pictures it showed.
+RETIRED = "The pictures of {refs} were shown above and are no longer attached, to make room; read(n) shows one again."
+
+
+def _sections(*pages: int) -> list[NodeWithScore]:
+    """Build sections of the invented harbour plan, one per page, each long enough that a read of it fills a reply.
+
+    Args:
+        *pages (int): Their pages.
+
+    Returns:
+        list[NodeWithScore]: The sections.
+    """
+    return [scored_node(f"section-{page}", SECTION, filename="hafenplan.pdf", page=page) for page in pages]
+
+
+def _room_lines(captured: LogCaptureFixture) -> list[str]:
+    """Pick the lines a turn logs when it clears replies or retires pictures to make room, or puts replies back.
+
+    Args:
+        captured (LogCaptureFixture): Bridged INFO capture.
+
+    Returns:
+        list[str]: The lines, in the order they were logged.
+    """
+    return [
+        line
+        for line in captured.messages
+        if any(part in line for part in ("picture messages to go on", "for its answer"))
+    ]
+
+
+def test_a_turn_out_of_room_clears_its_oldest_seen_reply_and_goes_on(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Short of room for one more full reply, the turn cuts the oldest reply the model has read to a stub, and goes on.
+
+    Each search reply shows one section, 383 tokens with its round's message: after three, 791 of
+    the 1940 tokens of room are left, under the 938 one more full reply needs. The first reply's
+    stub frees 262.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    pages = {"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2), "Hafenplan drei": _sections(3)}
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei")),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch(pages)), budget=TWO_REPLIES)))
+
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+    assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "auto"
+    before, after = _tool_replies(llm, 2), _tool_replies(llm, 3)
+    assert after["call_a"] == "Cleared to make room: this reply showed [1]; read(n) shows a passage again."
+    assert after["call_b"] == before["call_b"]
+    assert shown_numbers(after["call_c"]) == [3]
+    freed = message_cost(before["call_a"], 3.5) - message_cost(after["call_a"], 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {freed} tokens"
+    ]
+
+
+def test_the_round_just_answered_is_never_cleared_at_the_limit_check() -> None:
+    """Between rounds only replies a model call has read may be cleared, so the round just answered stays whole.
+
+    A search reply (383 tokens with its round's message) and a read (947) leave 610 of the 1940
+    tokens of room. Clearing the search reply would free 262, short of the 938 one more full reply
+    needs, so the model answers: the read, whose stub would free 832, no call has read yet.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1)})
+    llm = streaming_tool_llm(
+        [_calls(_search_call("call_a", "Hafenplan eins")), _calls(_read_call("call_b", 1)), _answer()]
+    )
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(search), budget=TWO_REPLIES)))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps) == ("context_budget", 2)
+    replies = _tool_replies(llm, 2)
+    assert replies["call_a"] == _tool_replies(llm, 1)["call_a"]
+    assert shown_numbers(replies["call_b"]) == [1]
+
+
+def test_a_round_short_of_room_clears_seen_replies_instead_of_withdrawing() -> None:
+    """A round whose own calls do not fit the room left gets room from replies its call has read, and its calls run.
+
+    Its search and eleven calls to a tool the turn does not offer cost 282 tokens to ask and at
+    least 849 to answer: more than the 1030 left, so it would be withdrawn. The two earlier
+    replies, which this round's call has read, free 1094, room for every reply at its longest.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1)})
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(11)]
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_read_call("call_b", 1)),
+            _calls(_search_call("call_c", "Hafenplan zwei"), *unoffered),
+            _answer(),
+        ]
+    )
+
+    progress, texts, result = _drain(_turn(_loop(llm, _documents(search), budget=_budget_with_room(2420))))
+
+    assert search.queries == ["Hafenplan eins", "Hafenplan zwei"]
+    assert _steps(progress)[-1] == ("search", "Hafenplan zwei", 0)
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+    replies = _tool_replies(llm, 3)
+    assert len(replies) == 2 + 1 + len(unoffered)
+    assert [replies["call_a"], replies["call_b"]] == [CLEARED.format(refs="[1]")] * 2
+
+
+def test_a_round_whose_longest_replies_will_not_fit_gets_room_for_its_shortest_instead(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Clearing that cannot hold a round's longest replies still makes room for its shortest, and the round runs.
+
+    The first search reply shows one section, 383 tokens with its round's message, leaving 1557 of
+    the 1940 tokens of room. The second round's search and seventeen calls to a tool the turn does
+    not offer cost 404 tokens to ask and 1287 at the least to answer, 2112 at the most. The first
+    reply's stub frees 262: 1819 tokens, room for the least (1691) and not for the most (2516). The
+    stub is cut and the round is not withdrawn; its search, left with no room for a full reply, is
+    never run.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2)})
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(17)]
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei"), *unoffered),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(search), budget=TWO_REPLIES)))
+
+    assert search.queries == ["Hafenplan eins"]
+    assert (result.reason, result.steps, "".join(texts)) == ("context_budget", 2, ANSWER)
+    replies = _tool_replies(llm, 2)
+    assert len(replies) == 2 + len(unoffered)
+    assert replies["call_a"] == CLEARED.format(refs="[1]")
+    assert replies["call_b"] == error_reply("search", NO_ROOM_REPLY, kind="no_room").text
+    freed = message_cost(_tool_replies(llm, 1)["call_a"], 3.5) - message_cost(replies["call_a"], 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {freed} tokens"
+    ]
+
+
+def test_clearing_that_cannot_make_room_changes_nothing(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Clearing is priced first: when every reply it may clear would still leave a round short, none is cleared.
+
+    Twenty-four calls to a tool the turn does not offer cost 527 tokens to ask and 1716 to answer.
+    The 1557 tokens left, with the 262 the first reply's stub would free, do not hold them: the
+    round is withdrawn, and the answer is sent the transcript as it was.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1)})
+    unoffered = [(f"call_{number}", "keyframes", {"file": "harbour_walk.webm"}) for number in range(24)]
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Hafenplan eins")), _calls(*unoffered), _answer()])
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(search), budget=TWO_REPLIES)))
+
+    assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps) == ("context_budget", 1)
+    assert _sent(llm, 2)[:-1] == _sent(llm, 1)
+    assert _room_lines(loguru_caplog_info) == []
+
+
+def test_a_read_repeated_after_its_reply_was_cleared_shows_the_passage_again() -> None:
+    """A read cleared with its reply is forgotten too, so reading the passage again shows its text, not a reference.
+
+    After a search, a read and a second search, 627 of the 2340 tokens of room are left, under the
+    938 one more full reply needs; the first search reply's stub frees 262, so the read's is
+    cleared too.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2)})
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_read_call("call_b", 1)),
+            _calls(_search_call("call_c", "Hafenplan zwei")),
+            _calls(_read_call("call_d", 1)),
+            _answer(),
+        ]
+    )
+
+    progress, _, _ = _drain(_turn(_loop(llm, _documents(search), budget=_budget_with_room(2400))))
+
+    replies = _tool_replies(llm, 4)
+    assert replies["call_b"] == CLEARED.format(refs="[1]")
+    assert shown_numbers(replies["call_d"]) == [1]
+    assert not replies["call_d"].startswith("Already called")
+    assert replies["call_d"] == _tool_replies(llm, 2)["call_b"]
+    assert _steps(progress)[-1] == ("read", "1", 0)
+
+
+def test_error_replies_are_never_cleared() -> None:
+    """An error reply says why a call was not answered, so clearing passes it by for the replies after it.
+
+    After three searches, 626 of the 1860 tokens of room are left. The first search reply's stub
+    frees 262 of the 312 the turn is short, so the second search reply is cleared next, past the
+    error reply between them.
+    """
+    pages = {"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2), "Hafenplan drei": _sections(3)}
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins"), ("call_x", "keyframes", {"file": "harbour_walk.webm"})),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei")),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch(pages)), budget=_budget_with_room(1920))))
+
+    replies = _tool_replies(llm, 3)
+    assert replies["call_x"].startswith("Error: ")
+    assert replies["call_x"] == _tool_replies(llm, 1)["call_x"]
+    assert [replies["call_a"], replies["call_b"]] == [CLEARED.format(refs="[1]"), CLEARED.format(refs="[2]")]
+    assert shown_numbers(replies["call_c"]) == [3]
+
+
+def test_a_forced_answer_restores_cleared_replies_newest_first_while_they_fit(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Before a forced answer, cleared replies are put back newest first, until the first that does not fit.
+
+    Two searches each fill a reply with three sections, 920 tokens with their round's message,
+    leaving 200 of the 2040 tokens of room. The first reply is cleared between rounds 2 and 3, and
+    the second inside round 3, whose note and one full reply need 1112. Its search finds nothing
+    new, so 1533 tokens are left for the answer: room for the second reply again (796), and then
+    not for the first.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    search = QuerySearch({"Hafenplan eins": _sections(1, 2, 3), "Hafenplan zwei": _sections(4, 5, 6)})
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei"), text=LONG_PREFACE),
+            _answer(),
+        ]
+    )
+
+    _, _, result = _drain(_turn(_loop(llm, _documents(search), budget=_budget_with_room(2100), max_rounds=3)))
+
+    assert llm.stream_chat.call_args_list[3].kwargs["tool_choice"] == "none"
+    assert (result.reason, result.steps, result.raw_text) == ("round_budget", 3, ANSWER)
+    first, second = _tool_replies(llm, 1)["call_a"], _tool_replies(llm, 2)["call_b"]
+    replies = _tool_replies(llm, 3)
+    assert replies["call_a"] == CLEARED.format(refs="[1], [2], [3]")
+    assert replies["call_b"] == second
+    assert replies["call_c"] == NO_NEW_PASSAGES
+    freed = [
+        message_cost(first, 3.5) - message_cost(CLEARED.format(refs="[1], [2], [3]"), 3.5),
+        message_cost(second, 3.5) - message_cost(CLEARED.format(refs="[4], [5], [6]"), 3.5),
+    ]
+    assert _room_lines(loguru_caplog_info) == [
+        *(
+            f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {tokens} tokens"
+            for tokens in freed
+        ),
+        "An agent turn restored 1 of its 2 cleared tool replies for its answer",
+    ]
+
+
+def test_a_turn_cut_after_an_overflow_neither_clears_nor_restores(loguru_caplog_info: LogCaptureFixture) -> None:
+    """After the overflow cut the answer reads what the cut left: no stub is put back, and nothing more is cleared.
+
+    The first reply is cleared as in a turn that goes on; the next round overflows the context window.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    pages = {"Hafenplan eins": _sections(1), "Hafenplan zwei": _sections(2), "Hafenplan drei": _sections(3)}
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Hafenplan eins")),
+            _calls(_search_call("call_b", "Hafenplan zwei")),
+            _calls(_search_call("call_c", "Hafenplan drei")),
+            bad_request(OVERFLOW),
+            _answer(),
+        ]
+    )
+
+    _, texts, result = _drain(_turn(_loop(llm, _documents(QuerySearch(pages)), budget=TWO_REPLIES)))
+
+    assert (result.reason, "".join(texts)) == ("context_budget", ANSWER)
+    assert _tool_replies(llm, 3)["call_a"] == CLEARED.format(refs="[1]")
+    assert _sent(llm, 4)[:-1] == turn_loop._shortened(_sent(llm, 3))
+    freed = message_cost(_tool_replies(llm, 2)["call_a"], 3.5) - message_cost(CLEARED.format(refs="[1]"), 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 1 earlier tool replies and 0 picture messages to go on, freeing {freed} tokens"
+    ]
+
+
+def test_the_most_a_rounds_replies_can_take_is_a_full_reply_for_each_call_with_work() -> None:
+    """At their longest, a call answered when prepared costs its reply, one with work a full reply.
+
+    A call past the round's limit costs the longest short reply, as in the least, where a call
+    with work costs that too.
+    """
+    ctx = tool_context()
+    round_calls = RoundCalls(
+        registry=_documents(QuerySearch({})),
+        result_chars=ctx.budget.result_chars,
+        max_calls_per_round=2,
+        char_token_ratio=3.5,
+        search_slots=threading.BoundedSemaphore(2),
+    )
+    calls = [tool_call("search", query="Programm"), tool_call("read", n="drei"), tool_call("search", query="Wetter")]
+
+    prepared = round_calls.prepare(calls, ctx)
+
+    refused = prepared.calls[1].reply
+    assert refused is not None and refused.error
+    answered = message_cost(refused.text, 3.5)
+    assert round_calls.most(prepared) == round_calls.full_reply + answered + round_calls.short_reply
+    assert round_calls.least(prepared) == round_calls.short_reply + answered + round_calls.short_reply
+
+
 # --- The trail and the transcript -------------------------------------------------------------
 
 
@@ -2808,7 +3163,7 @@ def test_a_call_whose_answer_fails_gets_its_reply_and_marks_research_failed(
 
     progress, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Brittle()]))))
 
-    assert _tool_replies(llm, 1) == {"call_a": error_reply("brittle", FAILED_REPLY).text}
+    assert _tool_replies(llm, 1) == {"call_a": error_reply("brittle", FAILED_REPLY, kind="failed").text}
     assert (progress, result.reason) == ([], "research_failed")
     assert loguru_caplog.messages == ["An agent's 'brittle' call failed: RuntimeError"]
 
@@ -2848,7 +3203,7 @@ def test_a_call_whose_prepare_raises_gets_its_reply_and_the_turn_answers(loguru_
 
     progress, texts, result = _drain(_turn(_loop(llm, registry)))
 
-    assert _tool_replies(llm, 2)["call_b"] == error_reply("unpreparable", FAILED_REPLY).text
+    assert _tool_replies(llm, 2)["call_b"] == error_reply("unpreparable", FAILED_REPLY, kind="failed").text
     assert _steps(progress) == [("search", "Programm", 1)]
     assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
     assert (result.reason, "".join(texts)) == ("research_failed", ANSWER)
@@ -2897,7 +3252,10 @@ def test_a_call_past_the_rounds_limit_is_never_prepared(loguru_caplog: LogCaptur
 
     progress, _, result = _drain(_turn(_loop(llm, registry, max_calls_per_round=1)))
 
-    assert _tool_replies(llm, 1)["call_b"] == error_reply("unpreparable", SKIPPED_REPLY.format(limit=1)).text
+    assert (
+        _tool_replies(llm, 1)["call_b"]
+        == error_reply("unpreparable", SKIPPED_REPLY.format(limit=1), kind="skipped").text
+    )
     assert (_steps(progress), result.reason) == ([("search", "Programm", 1)], None)
     assert loguru_caplog.messages == []
 
@@ -2948,6 +3306,229 @@ def test_a_call_to_a_tool_the_turn_does_not_offer_gets_a_reply_but_no_step() -> 
 
     assert _tool_replies(llm, 1)["call_a"].startswith("Error: there is no tool named 'keyframes'")
     assert (progress, result.actions, result.steps) == ([], [], 1)
+
+
+# --- Error replies name their kind, and a round logs them ----------------------------------
+
+
+def _round_replies(
+    registry: ToolRegistry,
+    calls: Sequence[ToolCall],
+    *,
+    max_calls: int = 4,
+    slots: threading.Semaphore | None = None,
+    tight: bool = False,
+    time_left: Callable[[], float] = lambda: 60.0,
+) -> list[ToolReply]:
+    """Answer one round's calls through ``RoundCalls`` and return the replies, in call order.
+
+    Args:
+        registry (ToolRegistry): The tools offered.
+        calls (Sequence[ToolCall]): The round's calls.
+        max_calls (int): Calls the round may run.
+        slots (threading.Semaphore | None): The search slots; two free ones when not given.
+        tight (bool): Whether the room is the least the replies can take, so no call has room to run.
+        time_left (Callable[[], float]): Reads the seconds the turn has left.
+
+    Returns:
+        list[ToolReply]: One reply per call.
+    """
+    ctx = tool_context()
+    round_calls = RoundCalls(
+        registry=registry,
+        result_chars=ctx.budget.result_chars,
+        max_calls_per_round=max_calls,
+        char_token_ratio=3.5,
+        search_slots=slots or threading.BoundedSemaphore(2),
+    )
+    prepared = round_calls.prepare(calls, ctx)
+    room = round_calls.least(prepared) if tight else 10_000
+    return round_calls.answer(prepared, ctx, room=room, time_left=time_left).replies
+
+
+@pytest.mark.parametrize(
+    ("overrides", "kinds"),
+    [
+        pytest.param({"max_calls": 1}, ["", "skipped"], id="past-the-limit"),
+        pytest.param({"tight": True}, ["no_room", "no_room"], id="no-room"),
+        pytest.param({"time_left": lambda: 0.0}, ["no_time", "no_time"], id="no-time"),
+        pytest.param({"slots": _Recording()}, ["no_capacity", "no_capacity"], id="no-search-slot"),
+    ],
+)
+def test_a_call_the_round_did_not_run_names_why_in_its_kind(overrides: dict[str, Any], kinds: list[str]) -> None:
+    """A call past the limit, without room or time, or without a search slot has its own kind; an answer has none.
+
+    Args:
+        overrides (dict[str, Any]): What differs from a round with room, time and slots to spare.
+        kinds (list[str]): The kind of each reply, in call order.
+    """
+    registry = _documents(QuerySearch({"Programm": [programme_passage()], "Wetter": [weather_passage()]}))
+    calls = [tool_call("search", query="Programm"), tool_call("search", query="Wetter")]
+
+    replies = _round_replies(registry, calls, **overrides)
+
+    assert [reply.kind for reply in replies] == kinds
+
+
+def test_a_search_that_outlives_the_time_left_has_the_late_kind(held: threading.Event) -> None:
+    """A search still running when the time is up is answered late, and says so by its kind.
+
+    Args:
+        held (threading.Event): Holds the search.
+    """
+
+    def _search(query: str) -> list[NodeWithScore]:
+        """Hold the search until the test ends.
+
+        Args:
+            query (str): What the tool searched for.
+
+        Returns:
+            list[NodeWithScore]: The passage.
+        """
+        held.wait(timeout=30)
+        return [programme_passage()]
+
+    # The first reading lets the search start, the second leaves it no time to end.
+    readings = iter([5.0, 0.0])
+
+    replies = _round_replies(
+        _documents(_search), [tool_call("search", query="Programm")], time_left=lambda: next(readings, 0.0)
+    )
+
+    assert [(reply.error, reply.kind) for reply in replies] == [(True, "late")]
+
+
+@pytest.mark.parametrize("cause", ["prepare", "start", "fetch", "answer"])
+def test_a_call_that_failed_has_the_failed_kind(cause: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call that could not be prepared or started, whose fetch failed, or whose answer raised has one kind.
+
+    Args:
+        cause (str): Where the call failed.
+        monkeypatch (pytest.MonkeyPatch): Makes the search thread's start fail.
+    """
+    failing: dict[str, tuple[ToolRegistry, ToolCall]] = {
+        "prepare": (ToolRegistry([_Unpreparable()]), tool_call("unpreparable")),
+        "start": (_documents(QuerySearch({})), tool_call("search", query="Programm")),
+        "fetch": (_documents(_failing_on("Programm", {})), tool_call("search", query="Programm")),
+        "answer": (ToolRegistry([_Brittle()]), tool_call("brittle")),
+    }
+    registry, call = failing[cause]
+    if cause == "start":
+        real_start = threading.Thread.start
+
+        def _start(thread: threading.Thread) -> None:
+            """Fail a search thread's start as a process out of threads does; start any other thread.
+
+            Args:
+                thread (threading.Thread): The thread.
+
+            Raises:
+                RuntimeError: For a search thread.
+            """
+            if thread.name == SEARCH_THREAD_NAME:
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", _start)
+
+    replies = _round_replies(registry, [call])
+
+    assert [(reply.error, reply.kind) for reply in replies] == [(True, "failed")]
+
+
+def _error_lines(captured: LogCaptureFixture) -> list[str]:
+    """Pick the lines a round logs about its error replies.
+
+    Args:
+        captured (LogCaptureFixture): Bridged INFO capture.
+
+    Returns:
+        list[str]: The lines, in the order they were logged.
+    """
+    return [message for message in captured.messages if "got error replies" in message]
+
+
+def test_a_round_logs_its_error_replies_by_tool_and_kind(loguru_caplog_info: LogCaptureFixture) -> None:
+    """One INFO line names a round's error replies, a tool the turn does not offer by its kind alone.
+
+    The model wrote that tool's name and its arguments, so neither reaches the log.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(("call_a", "read", {"n": 7}), ("call_b", "Geheimwerkzeug", {"q": "zzsecretzz Hafenfest"})),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({})))))
+
+    assert _error_lines(loguru_caplog_info) == [
+        "An agent round's 2 of 2 tool calls got error replies: 'read' no_such_passage, unknown_tool"
+    ]
+    assert "Geheimwerkzeug" not in loguru_caplog_info.text
+    assert "zzsecretzz" not in loguru_caplog_info.text
+
+
+def test_a_round_without_error_replies_logs_no_error_line(loguru_caplog_info: LogCaptureFixture) -> None:
+    """A round whose calls were all answered leaves nothing to say about error replies.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Programm"), ("call_b", "read", {"n": 1})), _answer()])
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+
+    assert _error_lines(loguru_caplog_info) == []
+
+
+def test_each_round_with_error_replies_logs_its_own_line(loguru_caplog_info: LogCaptureFixture) -> None:
+    """The count of error replies and of calls are the round's own, and each round logs one line.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Programm"), ("call_b", "read", {"n": 9})),
+            _calls(("call_c", "read", {"n": "drei"})),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})))))
+
+    assert _error_lines(loguru_caplog_info) == [
+        "An agent round's 1 of 2 tool calls got error replies: 'read' no_such_passage",
+        "An agent round's 1 of 1 tool calls got error replies: 'read' bad_argument",
+    ]
+
+
+def test_a_call_past_the_rounds_limit_is_logged_by_its_tool_only_when_the_turn_offers_it(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """A skipped call to an offered tool is named; one to a name the turn does not offer is its kind alone.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    llm = streaming_tool_llm(
+        [
+            _calls(_search_call("call_a", "Programm"), ("call_b", "read", {"n": 1}), ("call_c", "Geheimwerkzeug", {})),
+            _answer(),
+        ]
+    )
+
+    _drain(_turn(_loop(llm, _documents(QuerySearch({"Programm": [programme_passage()]})), max_calls_per_round=1)))
+
+    assert _error_lines(loguru_caplog_info) == [
+        "An agent round's 2 of 3 tool calls got error replies: 'read' skipped, skipped"
+    ]
+    assert "Geheimwerkzeug" not in loguru_caplog_info.text
 
 
 def test_the_transcript_echoes_each_call_and_answers_it_by_id() -> None:
@@ -3755,6 +4336,22 @@ def test_a_picture_shown_before_is_not_attached_again() -> None:
     assert (result.images_attached, _stamped(result)) == (2, [1, 2])
 
 
+def test_a_shown_picture_a_later_round_only_names_is_not_attached_a_second_time() -> None:
+    """A round that finds nothing but a frame the turn already showed names it as shown before and attaches nothing."""
+    store = ThumbnailStore(0)
+    registry = _pictures({"Regenjacken": [frame_passage(0)], "Schirm": [frame_passage(0)]})
+    llm = streaming_tool_llm(
+        [_calls(_image_call("call_a", "Regenjacken")), _calls(_image_call("call_b", "Schirm")), _answer()]
+    )
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store)))
+
+    assert "shown before" in _tool_replies(llm, 2)["call_b"]
+    assert store.fetches == [["frame-0"]]
+    assert _pictures_by_call(llm) == [0, 1, 1]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
 def test_a_retried_tool_round_that_fails_too_makes_the_model_answer_from_what_it_found() -> None:
     """The retry without pictures is the round's one: a tool round failing it too ends research, as any does."""
     store = ThumbnailStore(0)
@@ -3844,3 +4441,481 @@ def test_an_overflow_with_pictures_is_taken_as_their_refusal_first() -> None:
     assert _tool_replies(llm, 2) == _tool_replies(llm, 1)
     assert llm.stream_chat.call_args_list[2].kwargs["tool_choice"] == "auto"
     assert (result.reason, result.images_attached, "".join(texts)) == (None, 0, ANSWER)
+
+
+# --- Retiring pictures to make room, and reading one in ---------------------------------------
+
+#: The calls of a visual turn whose image search finds one new frame a round.
+FRAME_CALLS = (
+    ("call_a", "search_images", {"description": "Regenjacken"}),
+    ("call_b", "search_images", {"description": "Schirm"}),
+    ("call_c", "search_images", {"description": "Fischkutter"}),
+)
+#: A turn whose room, 2200 tokens once the final note is paid, holds two rounds of one frame (61 or 62
+#: tokens to ask, 66 to 70 to answer, 656 for the picture) but not one more full reply besides.
+TWO_FRAMES = _budget_with_room(2260)
+
+
+def _frames(llm: Any, store: ThumbnailStore, *, frames: int, **overrides: Any) -> AgentLoop:
+    """Build a visual loop whose image search finds one new frame a run, frame 0 first.
+
+    Args:
+        llm (Any): The model double.
+        store (ThumbnailStore): The thumbnail fetcher.
+        frames (int): How many runs the image search answers.
+        **overrides (Any): Further loop arguments, such as the budget, the rounds or the most pictures.
+
+    Returns:
+        AgentLoop: The loop, over the visual target's tools.
+    """
+    search = ScriptedSearch(*([frame_passage(index)] for index in range(frames)))
+    return scripted_loop(llm, target="visual", search_images=search, fetch_thumbnails=store, **overrides)
+
+
+def _picture_turns(llm: Any, call: int) -> list[str | list[str]]:
+    """Read the user messages one model call was sent after the question: pictures, retired lines and notes.
+
+    Args:
+        llm (Any): The model double.
+        call (int): The call's position, from zero.
+
+    Returns:
+        list[str | list[str]]: Per message, in order, its pictures' URLs, or its text when it carries none.
+    """
+    return [
+        [str(block.url) for block in message.blocks if isinstance(block, ImageBlock)] or str(message.content)
+        for message in _sent(llm, call)[2:]
+        if message.role == MessageRole.USER
+    ]
+
+
+def _pictures_by_call(llm: Any) -> list[int]:
+    """Count the pictures each model call carried.
+
+    Args:
+        llm (Any): The model double.
+
+    Returns:
+        list[int]: The pictures in each prompt, in call order.
+    """
+    return [
+        sum(isinstance(block, ImageBlock) for message in call.args[0] for block in message.blocks)
+        for call in llm.stream_chat.call_args_list
+    ]
+
+
+def _picture_cost(*numbers: int) -> int:
+    """Return what a picture message of the scripted loop costs as it is sent.
+
+    Args:
+        *numbers (int): The numbers its pictures are cited by.
+
+    Returns:
+        int: Its legend with the message's envelope, and each picture's estimate.
+    """
+    legend = render_legend(LOOP_LEGEND, [(number, *thumbnail(0)) for number in numbers])
+    return message_cost(legend, 3.5) + VISUAL_IMAGE_TOKEN_ESTIMATE * len(numbers)
+
+
+def test_a_visual_turn_retires_seen_pictures_only_after_clearing_replies(loguru_caplog_info: LogCaptureFixture) -> None:
+    """Short of room, every reply the model has read is cleared before the oldest picture it has seen is retired.
+
+    After three rounds, 642 of the 3000 tokens of room are left, 296 short of one more full reply.
+    The two seen replies' stubs free 12, so the first picture message is retired too, freeing
+    586; the second stays, since that is enough.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    store = ThumbnailStore(0, 1, 2)
+    llm = streaming_tool_llm([*(call_round(call) for call in FRAME_CALLS), answer_round(ANSWER)])
+
+    _, texts, result = _drain(_turn(_frames(llm, store, frames=3, max_images=6, budget=_budget_with_room(3060))))
+
+    assert (result.reason, result.steps, "".join(texts)) == (None, 3, ANSWER)
+    before, after = _tool_replies(llm, 2), _tool_replies(llm, 3)
+    assert [after["call_a"], after["call_b"]] == [CLEARED.format(refs="[1]"), CLEARED.format(refs="[2]")]
+    assert shown_numbers(after["call_c"]) == [3]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], [thumbnail_url(2)]]
+    assert (result.images_attached, _stamped(result)) == (3, [1, 2, 3])
+    freed = sum(message_cost(before[call], 3.5) - message_cost(after[call], 3.5) for call in ("call_a", "call_b"))
+    freed += _picture_cost(1) - message_cost(RETIRED.format(refs="[1]"), 3.5)
+    assert _room_lines(loguru_caplog_info) == [
+        f"An agent turn cleared 2 earlier tool replies and 1 picture messages to go on, freeing {freed} tokens"
+    ]
+
+
+def test_retiring_frees_the_per_prompt_picture_cap() -> None:
+    """The cap bounds the pictures one prompt carries: once one is retired, a later round attaches a third.
+
+    After two rounds, 629 of the 2200 tokens of room are left, 309 short of one more full reply:
+    the first reply's stub frees 8, and retiring the first picture message 586. Under a cap of
+    two, the third round's frame then joins the second, and the forced answer carries both.
+    """
+    store = ThumbnailStore(0, 1, 2)
+    llm = streaming_tool_llm([*(call_round(call) for call in FRAME_CALLS), answer_round(ANSWER)])
+    loop = _frames(llm, store, frames=3, max_images=2, max_rounds=3, budget=TWO_FRAMES)
+
+    _, _, result = _drain(_turn(loop))
+
+    assert _pictures_by_call(llm) == [0, 1, 1, 2]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], [thumbnail_url(2)]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 3, [1, 2, 3])
+
+
+def test_a_refusal_after_retiring_keeps_the_retired_pictures_shown(loguru_caplog: LogCaptureFixture) -> None:
+    """A refusal takes back the pictures still attached: a retired one was seen, so it stays shown and stamped.
+
+    The turn retires its first picture as in the test above; its forced answer, carrying the other
+    two, is refused before its first event and sent again without them.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    store = ThumbnailStore(0, 1, 2)
+    calls = [call_round(call) for call in FRAME_CALLS]
+    llm = streaming_tool_llm([*calls, bad_request(REFUSED_PICTURES), answer_round(ANSWER)])
+    loop = _frames(llm, store, frames=3, max_images=2, max_rounds=3, budget=TWO_FRAMES)
+
+    _, texts, result = _drain(_turn(loop))
+
+    assert _pictures_by_call(llm) == [0, 1, 1, 2, 0]
+    assert _picture_turns(llm, 4) == [RETIRED.format(refs="[1]"), LOOP_FINAL_NOTE]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 1, [1])
+    assert "".join(texts) == ANSWER
+    assert loguru_caplog.messages == [
+        "An agent round carrying 2 pictures failed before its first event (BadRequestError); "
+        "it is sent again without them"
+    ]
+
+
+def test_a_read_shows_the_picture_of_a_passage_the_turn_has_not_shown() -> None:
+    """A read of a picture passage the turn holds but has not shown attaches its picture after the round's replies."""
+    store = ThumbnailStore(0)
+    ledger = EvidenceLedger(cap=8)
+    ledger.add([frame_passage(0)])
+    llm = streaming_tool_llm([call_round(("call_a", "read", {"n": 1})), answer_round(ANSWER)])
+
+    _, _, result = _drain(
+        _turn(scripted_loop(llm, target="visual", fetch_thumbnails=store, max_images=6), ledger=ledger)
+    )
+
+    assert store.fetches == [["frame-0"]]
+    assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [1]
+    assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
+def test_a_read_shows_a_retired_picture_again() -> None:
+    """A read of a passage whose picture was retired fetches the picture again and shows it after the round's replies.
+
+    The turn retires its first picture as in the tests above, then reads its passage. The picture
+    comes back in a message of its own, the forced answer carries both, and the turn counts the
+    first picture once.
+    """
+    store = ThumbnailStore(0, 1)
+    calls = [call_round(call) for call in FRAME_CALLS[:2]]
+    llm = streaming_tool_llm([*calls, call_round(("call_c", "read", {"n": 1})), answer_round(ANSWER)])
+    loop = _frames(llm, store, frames=2, max_images=6, max_rounds=3, budget=TWO_FRAMES)
+
+    _, _, result = _drain(_turn(loop))
+
+    assert store.fetches == [["frame-0"], ["frame-1"], ["frame-0"]]
+    assert shown_numbers(_tool_replies(llm, 3)["call_c"]) == [1]
+    assert _tool_replies(llm, 3)["call_a"] == _tool_replies(llm, 1)["call_a"]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)], [thumbnail_url(0)]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+def test_a_search_that_finds_a_retired_picture_again_does_not_show_it() -> None:
+    """Only a read brings a retired picture back: a search that finds its frame again names it and fetches nothing.
+
+    The turn retires its first picture as in the tests above; its third search finds the first
+    frame again, which its reply names as shown before. Only the forced answer puts the picture
+    back, where it stood, with no fetch.
+    """
+    store = ThumbnailStore(0, 1)
+    search = ScriptedSearch([frame_passage(0)], [frame_passage(1)], [frame_passage(0)])
+    llm = streaming_tool_llm([*(call_round(call) for call in FRAME_CALLS), answer_round(ANSWER)])
+    loop = scripted_loop(
+        llm,
+        target="visual",
+        search_images=search,
+        fetch_thumbnails=store,
+        max_images=6,
+        max_rounds=3,
+        budget=TWO_FRAMES,
+    )
+
+    _, _, result = _drain(_turn(loop))
+
+    assert "Also matched, shown before: [1]." in _tool_replies(llm, 3)["call_c"]
+    assert store.fetches == [["frame-0"], ["frame-1"]]
+    assert _picture_turns(llm, 3) == [[thumbnail_url(0)], [thumbnail_url(1)], LOOP_FINAL_NOTE]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+#: An invented caption long enough that a search shows only part of it, and a read most of a reply.
+LONG_CAPTION = ("Zwei Personen in Regenjacken stehen am Hafen unter bedecktem Himmel, Möwen kreisen. " * 30).strip()
+#: The calls of a visual turn that finds two long-captioned frames and reads the second.
+LONG_FRAME_CALLS = (*FRAME_CALLS[:2], ("call_c", "read", {"n": 2}))
+#: A turn whose forced answer, after those calls, has 639 tokens left with its first picture retired.
+LONG_FRAMES = _budget_with_room(2760)
+
+
+def _long_frame(index: int) -> NodeWithScore:
+    """Build a frame of the invented clip, as ``frame_passage`` does, with a caption that runs long.
+
+    Args:
+        index (int): The frame's place in the clip; its thumbnail is fetched by ``frame-{index}``.
+
+    Returns:
+        NodeWithScore: The frame.
+    """
+    return scored_node(
+        f"frame-{index}",
+        LONG_CAPTION,
+        filename=CLIP,
+        image_id=f"harbour-walk-image-{index}",
+        source_file=CLIP,
+        keyframe_index=index,
+    )
+
+
+def _long_frames(llm: Any, store: ThumbnailStore) -> AgentLoop:
+    """Build a visual loop whose image search finds a long-captioned frame a run, frame 0 first.
+
+    Args:
+        llm (Any): The model double.
+        store (ThumbnailStore): The thumbnail fetcher.
+
+    Returns:
+        AgentLoop: The loop: three rounds, six pictures a prompt, the room of ``LONG_FRAMES``.
+    """
+    search = ScriptedSearch([_long_frame(0)], [_long_frame(1)])
+    return scripted_loop(
+        llm,
+        target="visual",
+        search_images=search,
+        fetch_thumbnails=store,
+        max_images=6,
+        max_rounds=3,
+        budget=LONG_FRAMES,
+    )
+
+
+def test_a_forced_answer_puts_a_retired_picture_back_before_a_cleared_reply(
+    loguru_caplog_info: LogCaptureFixture,
+) -> None:
+    """Before a forced answer the retired pictures come back first, where they stood, and then the cleared replies.
+
+    Between the second and third rounds the turn clears its first reply (261 tokens) and retires
+    its first picture (586). Its forced answer then has 639 tokens left: the picture comes back
+    first, and the reply, which would take 261 more, stays a stub. Put back first, the reply would
+    have left no room for the picture.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+    """
+    store = ThumbnailStore(0, 1)
+    llm = streaming_tool_llm([*(call_round(call) for call in LONG_FRAME_CALLS), answer_round(ANSWER)])
+
+    _, _, result = _drain(_turn(_long_frames(llm, store)))
+
+    assert _picture_turns(llm, 2) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)]]
+    assert _picture_turns(llm, 3) == [[thumbnail_url(0)], [thumbnail_url(1)], LOOP_FINAL_NOTE]
+    assert _tool_replies(llm, 3)["call_a"] == CLEARED.format(refs="[1]")
+    assert store.fetches == [["frame-0"], ["frame-1"]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+    assert _room_lines(loguru_caplog_info) == [
+        "An agent turn cleared 1 earlier tool replies and 1 picture messages to go on, freeing 847 tokens",
+        "An agent turn restored 1 of its 1 retired picture messages for its answer",
+    ]
+
+
+def test_a_refusal_after_a_restore_keeps_the_restored_picture_shown(loguru_caplog: LogCaptureFixture) -> None:
+    """A forced answer refused with pictures takes them back: a restored one returns to its line and stays shown.
+
+    The turn runs as in the test above; its forced answer, carrying the restored picture and the
+    second one, is refused before its first event and sent again without them.
+
+    Args:
+        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
+    """
+    store = ThumbnailStore(0, 1)
+    calls = [call_round(call) for call in LONG_FRAME_CALLS]
+    llm = streaming_tool_llm([*calls, bad_request(REFUSED_PICTURES), answer_round(ANSWER)])
+
+    _, texts, result = _drain(_turn(_long_frames(llm, store)))
+
+    assert _pictures_by_call(llm) == [0, 1, 1, 2, 0]
+    assert _picture_turns(llm, 4) == [RETIRED.format(refs="[1]"), LOOP_FINAL_NOTE]
+    assert (result.reason, result.images_attached, _stamped(result), "".join(texts)) == (
+        "round_budget",
+        1,
+        [1],
+        ANSWER,
+    )
+    assert loguru_caplog.messages == [
+        "An agent round carrying 2 pictures failed before its first event (BadRequestError); "
+        "it is sent again without them"
+    ]
+
+
+def test_a_read_answered_from_memory_shows_the_picture_the_cap_kept_back() -> None:
+    """A repeated read answered from memory is still a read: once the cap has room, it shows the picture kept back.
+
+    The search finds two frames, and a cap of one shows the first. Reading the second finds the
+    cap full. After those two rounds, 867 of the 1800 tokens of room are left, 71 short of one
+    more full reply: the search reply's stub frees 33, so the first picture is retired too
+    (586). The same read, answered from memory, then shows the second frame.
+    """
+    store = ThumbnailStore(0, 1)
+    search = ScriptedSearch([frame_passage(0), frame_passage(1)])
+    calls = [FRAME_CALLS[0], ("call_b", "read", {"n": 2}), ("call_c", "read", {"n": 2})]
+    llm = streaming_tool_llm([*(call_round(call) for call in calls), answer_round(ANSWER)])
+    budget = _budget_with_room(1860)
+    loop = scripted_loop(
+        llm, target="visual", search_images=search, fetch_thumbnails=store, max_images=1, max_rounds=3, budget=budget
+    )
+
+    _, _, result = _drain(_turn(loop))
+
+    assert _tool_replies(llm, 3)["call_c"] == "Already called read with these arguments; see [2]."
+    assert store.fetches == [["frame-0", "frame-1"], ["frame-1"]]
+    assert _pictures_by_call(llm) == [0, 1, 0, 1]
+    assert _picture_turns(llm, 3) == [RETIRED.format(refs="[1]"), [thumbnail_url(1)]]
+    assert (result.reason, result.images_attached, _stamped(result)) == ("round_budget", 2, [1, 2])
+
+
+#: A passage the turn's own search finds, after the carried ones.
+MUSIC = "Die Musik beginnt am Mittag auf der Bühne am Kai."
+
+
+def test_carried_passages_open_the_turn_as_its_first_numbers() -> None:
+    """A follow-up starts out holding what its earlier answers cite, as [1] and [2], and its trail says so first.
+
+    The ``carried`` step goes out with the first model call's first event and is stored as the
+    trail's first entry. The carried passages are sent in no message of their own, and a passage
+    the turn then finds is numbered after them.
+    """
+    found = scored_node("music", MUSIC, filename="hafenfest_programm.pdf", page=2)
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Musik")), _answer()])
+    pulled = _pulls(llm)
+    loop = _loop(llm, _documents(QuerySearch({"Musik": [found]})))
+    turn = _turn(loop, carried=[programme_passage(), weather_passage()])
+
+    first = next(turn)
+    begun = len(pulled)
+    progress, texts, result = _drain([first, *turn])
+
+    numbered = [(scored.node.node_id, scored.node.metadata["citation_index"]) for scored in result.nodes]
+    assert (first, begun > 0) == (AgentProgress(step=0, action="carried", detail="", found=2), True)
+    assert result.actions[0] == {"action": "carried", "detail": "", "found": 2}
+    assert _steps(progress) == [("carried", "", 2), ("search", "Musik", 1)]
+    assert numbered == [("programme", 1), ("weather", 2), ("music", 3)]
+    assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [3]
+    assert [message.role for message in _sent(llm, 0)] == [MessageRole.SYSTEM, MessageRole.USER]
+    assert (result.steps, "".join(texts)) == (1, ANSWER)
+
+
+def test_a_refusal_before_any_event_still_falls_back_with_carried_passages() -> None:
+    """The carried step waits for an event, so a first call refused as sent has shown nothing: the caller falls back."""
+    rejection = bad_request(TOOL_CHOICE_REJECTED)
+    llm = streaming_tool_llm([rejection])
+
+    shown, raised = _until_raised(_turn(_loop(llm, _documents(QuerySearch({}))), carried=[programme_passage()]))
+
+    assert (shown, type(raised), raised.__cause__) == ([], ToolsUnavailable, rejection)
+
+
+#: An invented harbour regulation kept as one section, longer than one reply shows.
+HARBOUR_RULES = " ".join(
+    f"Absatz {line}: Die Hafenordnung regelt Liegeplätze, Gebühren und Fristen für Anmeldungen am Kai."
+    for line in range(1, 71)
+)
+
+
+def test_a_search_finding_a_carried_section_again_extends_it() -> None:
+    """A window deep in a carried section merges into it and is shown, never refused as shown before.
+
+    The section is carried counting its opening as its match, as the window counts its own.
+    """
+    section = scored_node("hafenordnung-4", HARBOUR_RULES, filename="hafenordnung.pdf", page=4)
+    anchor = "Absatz 60:"
+    start = HARBOUR_RULES.index(anchor) - 200
+    window = scored_node(
+        "hafenordnung-4",
+        HARBOUR_RULES[start : start + 500],
+        filename="hafenordnung.pdf",
+        page=4,
+        **{MATCH_SPANS_KEY: [[200, 200 + len(anchor)]]},
+    )
+    llm = streaming_tool_llm([_calls(_search_call("call_a", "Fristen")), _answer(SHORT_ANSWER)])
+    loop = _loop(llm, _documents(QuerySearch({"Fristen": [window]})))
+
+    progress, _, result = _drain(_turn(loop, carried=[section]))
+
+    reply = _tool_replies(llm, 1)["call_a"]
+    assert _steps(progress) == [("carried", "", 1), ("search", "Fristen", 1)]
+    assert (shown_numbers(reply), anchor in reply, "shown before" in reply) == ([1], True, False)
+    assert [scored.node.get_content() for scored in result.nodes] == [HARBOUR_RULES]
+
+
+def test_a_read_of_a_carried_frame_shows_it_and_its_picture() -> None:
+    """A carried frame reaches a visual turn's model by a read: its passage, then its picture after the reply."""
+    store = ThumbnailStore(0)
+    llm = streaming_tool_llm([call_round(("call_a", "read", {"n": 1})), answer_round(ANSWER)])
+    loop = scripted_loop(llm, target="visual", fetch_thumbnails=store, max_images=6)
+
+    progress, _, result = _drain(_turn(loop, carried=[frame_passage(0)]))
+
+    assert _steps(progress)[0] == ("carried", "", 1)
+    assert store.fetches == [["frame-0"]]
+    assert shown_numbers(_tool_replies(llm, 1)["call_a"]) == [1]
+    assert _pictures_by_call(llm) == [0, 1]
+    assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
+@pytest.mark.parametrize(
+    "call",
+    [("call_a", "search_images", {"description": "Regenjacken"}), ("call_a", "keyframes", {"file": CLIP})],
+    ids=["search-images", "keyframes"],
+)
+def test_a_carried_picture_found_again_is_shown_to_the_model(call: tuple[str, str, Any]) -> None:
+    """A carried frame that an image search or the clip's listing finds again reaches the model as a picture.
+
+    The frame is held, so the reply admits nothing and names it as shown before. Only naming its
+    passage can bring the picture, which the turn has not shown yet.
+
+    Args:
+        call (tuple[str, str, Any]): The call that finds the carried frame again.
+    """
+    store = ThumbnailStore(0)
+    registry = toolset_for(
+        "visual",
+        search=ScriptedSearch(),
+        search_images=ScriptedSearch([frame_passage(0)]),
+        list_keyframes=ScriptedSearch([frame_passage(0)]),
+    )
+    llm = streaming_tool_llm([call_round(call), answer_round(ANSWER)])
+
+    _, _, result = _drain(_turn(_visual(llm, registry, store), carried=[frame_passage(0)]))
+
+    reply = _tool_replies(llm, 1)["call_a"]
+    assert ("shown before" in reply, shown_numbers(reply)) == (True, [])
+    assert store.fetches == [["frame-0"]]
+    assert _picture_turns(llm, 1) == [[thumbnail_url(0)]]
+    assert (result.images_attached, _stamped(result)) == (1, [1])
+
+
+def test_a_scoped_turn_ignores_carried_passages() -> None:
+    """A pinned scope is the whole evidence: passages handed in as carried are neither held nor announced."""
+    llm = streaming_tool_llm([_answer(SHORT_ANSWER)])
+    loop = _loop(llm, _documents(QuerySearch({})))
+
+    progress, _, result = _drain(_turn(loop, pinned=[programme_passage()], carried=[weather_passage()]))
+
+    assert progress == [AgentProgress(step=0, action="seed", detail="", found=1)]
+    assert [scored.node.node_id for scored in result.nodes] == ["programme"]

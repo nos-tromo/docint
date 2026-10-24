@@ -1031,6 +1031,111 @@ describe('ChatTurn', () => {
     expect(seed).not.toBe(search)
   })
 
+  it('renders a carried step in the live and the finished trail', async () => {
+    const live = renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 0, action: 'carried', detail: '', found: 2 },
+        { step: 1, action: 'search', detail: 'Hafen', found: 1 }
+      ]
+    })
+    expect(trailRows('agent-trail-live')).toEqual([
+      'Carried over 2 passages from earlier answers',
+      'Searched “Hafen”: 1 new passage'
+    ])
+    // Drawn as passages, as a seed and a read are, never as a search.
+    const [carried] = within(screen.getByTestId('agent-trail-live')).getAllByRole('listitem')
+    expect(carried.querySelector('svg')?.innerHTML).toBe(innerMarkup(<DocumentsIcon />))
+    live.unmount()
+
+    // Stored, a follow-up's trail opens with the step, and unlike a pinned seed it stays behind the disclosure.
+    const stored: AgentTrail = {
+      ...LOOKUP_TRAIL,
+      actions: [
+        { action: 'carried', detail: '', found: 2 },
+        { action: 'search', detail: 'Hafen', found: 1 }
+      ]
+    }
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(trailRows('agent-trail')).toEqual([
+      'Carried over 2 passages from earlier answers',
+      'Searched “Hafen”: 1 new passage'
+    ])
+  })
+
+  it('shows a follow-up that only carried passages as one line, with no search disclosure', () => {
+    const stored: AgentTrail = { ...LOOKUP_TRAIL, actions: [{ action: 'carried', detail: '', found: 2 }] }
+
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
+
+    // It searched nothing, so there is no title or toggle naming searches to put the row behind.
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(screen.queryByText('Searches behind this answer')).not.toBeInTheDocument()
+    expect(trailRows('agent-trail')).toEqual(['Carried over 2 passages from earlier answers'])
+    // The row is the trail's own: the passages icon, in the small muted text.
+    const trail = screen.getByTestId('agent-trail')
+    expect(trail).toHaveClass('text-xs', 'text-muted-foreground')
+    expect(within(trail).getByRole('listitem').querySelector('svg')?.innerHTML).toBe(innerMarkup(<DocumentsIcon />))
+  })
+
+  it('folds the carried row behind the disclosure when the follow-up also searched', async () => {
+    const stored: AgentTrail = {
+      ...LOOKUP_TRAIL,
+      actions: [
+        { action: 'carried', detail: '', found: 2 },
+        { action: 'search', detail: 'Hafen', found: 1 }
+      ]
+    }
+
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
+
+    // Shut, the disclosure holds both rows: the carried one is not also a line under the answer.
+    expect(screen.queryByText(/Carried over/)).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(trailRows('agent-trail')).toEqual([
+      'Carried over 2 passages from earlier answers',
+      'Searched “Hafen”: 1 new passage'
+    ])
+  })
+
+  it('keeps the carried line of a follow-up whose stream failed before it searched', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: true,
+      meta: null,
+      error: 'Internal server error',
+      agentSteps: [{ step: 0, action: 'carried', detail: '', found: 2 }]
+    })
+
+    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(trailRows('agent-trail')).toEqual(['Carried over 2 passages from earlier answers'])
+  })
+
+  it.each([
+    ['en', 1, 'Carried over 1 passage from earlier answers'],
+    ['en', 3, 'Carried over 3 passages from earlier answers'],
+    ['de', 1, '1 Passage aus früheren Antworten übernommen'],
+    ['de', 3, '3 Passagen aus früheren Antworten übernommen']
+  ] as const)('words a carried step in %s for %i passage(s)', (lang, found, label) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [{ step: 0, action: 'carried', detail: '', found }]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual([label])
+  })
+
   it('marks the steps that read the collection with an icon, and a note with none', () => {
     renderTurn({ user: 'Was zeigt der Clip?', assistant: '', done: false, meta: null, agentSteps: NEW_STEPS })
 

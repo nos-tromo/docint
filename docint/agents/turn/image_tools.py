@@ -344,6 +344,7 @@ class KeyframesTool:
                 return error_reply(
                     self.name,
                     "index is the number of one frame, the n of its #n label, such as 3.",
+                    kind="bad_argument",
                     detail=trail_detail(clip.name),
                 )
         suffix = "" if index is None else f" #{index}"
@@ -404,19 +405,26 @@ class KeyframesTool:
                 return error_reply(
                     self.name,
                     "keyframes needs file: a clip's filename, or the number of a passage from it, such as 3.",
+                    kind="missing_argument",
                     detail=trail_detail(raw),
                 )
             return _Clip(key=name, name=name)
         held = len(ctx.ledger)
         if not 1 <= number <= held:
             return error_reply(
-                self.name, f"there is no passage [{number}]; {passage_range(held)}.", detail=trail_detail(raw)
+                self.name,
+                f"there is no passage [{number}]; {passage_range(held)}.",
+                kind="no_such_passage",
+                detail=trail_detail(raw),
             )
         metadata = ctx.ledger.entries()[number - 1].node.metadata
         media_hash, source_file = _text(metadata.get("media_file_hash")), _text(metadata.get("source_file"))
         if not (media_hash or source_file):
             return error_reply(
-                self.name, f"passage [{number}] is not from a clip; {_clips_seen(ctx)}.", detail=trail_detail(raw)
+                self.name,
+                f"passage [{number}] is not from a clip; {_clips_seen(ctx)}.",
+                kind="not_a_clip",
+                detail=trail_detail(raw),
             )
         return _Clip(key=media_hash or source_file, name=source_file or media_hash)
 
@@ -441,19 +449,29 @@ class KeyframesTool:
         numbered = [(number, frame) for frame in fetched or () if (number := _frame_number(frame)) is not None]
         if not numbered:
             seen = _clips_seen(ctx, refused=clip.key)
-            return error_reply(self.name, f"no keyframes are stored for {_quoted(clip.name)}; {seen}.", detail=detail)
+            return error_reply(
+                self.name,
+                f"no keyframes are stored for {_quoted(clip.name)}; {seen}.",
+                kind="no_keyframes",
+                detail=detail,
+            )
         hashes = list(
             dict.fromkeys(
                 media_hash for _, frame in numbered if (media_hash := _text(frame.node.metadata.get("media_file_hash")))
             )
         )
         if len(hashes) > 1:
-            return error_reply(self.name, _ambiguous(clip.name, hashes, ctx), detail=detail)
+            return error_reply(self.name, _ambiguous(clip.name, hashes, ctx), kind="ambiguous_clip", detail=detail)
         if index is not None:
             chosen = [frame for number, frame in numbered if number == index]
             if not chosen:
                 known = _frame_range([number for number, _ in numbered])
-                return error_reply(self.name, f"{_quoted(clip.name)} has no frame #{index}; {known}.", detail=detail)
+                return error_reply(
+                    self.name,
+                    f"{_quoted(clip.name)} has no frame #{index}; {known}.",
+                    kind="no_such_frame",
+                    detail=detail,
+                )
             return passage_reply(chosen[:1], ctx, action=self.name, detail=detail, hint=KEYFRAMES_HINT)
         frames = [frame for _, frame in numbered]
         note = f"{len(frames)} frames in all; {KEYFRAMES_HINT}." if len(frames) > MAX_FRAMES else ""

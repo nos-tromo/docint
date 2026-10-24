@@ -212,6 +212,8 @@ def streaming_tool_llm(script: Sequence[ScriptedRound]) -> MagicMock:
 #: What the plan budgets for the tool schemas of an 8k turn; budgets built here take it as given.
 #: test_agent_toolsets measures the real schemas against the window.
 PLANNED_SCHEMA_TOKENS = 630
+#: What the plan budgets for the rendered system prompt of an 8k turn, at 3.5 characters per token.
+PLANNED_SYSTEM_TOKENS = 962
 
 
 def turn_budget(*, reasoning: bool = False) -> TurnBudget:
@@ -227,6 +229,7 @@ def turn_budget(*, reasoning: bool = False) -> TurnBudget:
         ctx_window=8192,
         reasoning=reasoning,
         char_token_ratio=3.5,
+        # A sizing fake for tool replies, deliberately not the planned prompt size (PLANNED_SYSTEM_TOKENS).
         system_tokens=900,
         tool_schema_tokens=PLANNED_SCHEMA_TOKENS,
         history_tokens=1300,

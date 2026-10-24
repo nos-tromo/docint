@@ -690,7 +690,8 @@ A reply numbers only what it shows:
   with narrower words.
 
 A call made before is answered from memory and never run again; a `read` only
-while its passage is unchanged. A call is the same call when it names the same
+while its passage is unchanged and its reply not cleared to make room (see
+[Making room](#making-room)). A call is the same call when it names the same
 tool and its arguments are equal, compared on one line and case-folded. A tool
 may key its own repeats instead (`recall_key`): `keyword` keys a call by its
 field and the index tokens or exact values of its words, and `keyframes` by its
@@ -858,19 +859,26 @@ the head of each tool reply. The validator is given the same counts (see
 
 ### Evidence and sources
 
-The turn's evidence is everything its tool replies showed, numbered in the
-order it was found. The windows of one section are one passage, which keeps its
-number as it grows. The evidence holds at most 64 passages, or as many as a
-larger pinned scope holds. The answer's sources are this evidence in number
-order, so the model's `[n]` is the number on the source card.
+The turn's evidence is the passages it carried from earlier answers, numbered
+first (see [Carried evidence](#carried-evidence)), then everything its tool
+replies showed, numbered in the order it was found. The windows of one section
+are one passage, which keeps its number as it grows. The evidence holds at most
+64 passages, or as many as a larger pinned scope holds. The answer's sources
+are this evidence in number order, so the model's `[n]` is the number on the
+source card.
 
-The trail (`agent.actions`) holds one `{action, detail, found}` per note, and
-one per call its tool answered. A keyword step adds `field`, `matches` and,
+The trail (`agent.actions`) opens with a `carried` step when the turn carried
+passages, then holds one `{action, detail, found}` per note, and one per call
+its tool answered. A keyword step adds `field`, `matches` and,
 where the keyword index leaves chunks out, `unchecked`. The `agent` frames in
 [api-reference.md](api-reference.md#post-stream_query) say when each is absent,
 and [ui-guide.md](ui-guide.md#chat-srcrouteschattsx) shows how the SPA reads
 them. A call that was not answered gets its reply but no step: one skipped,
-refused for room or time, failed, or carrying an argument error.
+refused for room or time, failed, or carrying an argument error. Each round that
+got such replies logs one INFO line naming them by tool and kind (`An agent
+round's 2 of 3 tool calls got error replies: 'read' no_such_passage,
+unknown_tool`), never their arguments, and never the name of a tool the turn
+does not offer.
 
 ### Limits and reasons
 
@@ -882,7 +890,7 @@ failure before it, so it replaces whatever reason stood.
 |---|---|
 | `round_budget` | The turn ran `AGENT_MAX_ROUNDS` tool rounds (default 6). |
 | `time_budget` | `AGENT_TIME_BUDGET_S` ran out (default 120 s). Limits are checked between rounds, so an answer already streaming is never cut, and a search that outlives the time left gets a "no reply in time" reply. |
-| `context_budget` | No room is left for one more full reply. A round whose own calls do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
+| `context_budget` | No room is left for one more full reply, even after clearing seen replies and retiring seen pictures (see [Making room](#making-room)). A round whose own calls still do not fit the room left is withdrawn, its shown text withdrawn by its note. The reason is also set when an overflow is retried once as the answer with every tool reply halved. |
 | `idle` | Two rounds in a row added no passage and told the model nothing new (see below). |
 | `research_failed` | Evidence may be missing; the answer is still written. A call could not be prepared, a search failed or found no search slot, or a later round failed or found no model slot. |
 | `answer_cut` | The endpoint cut the answer at its length limit (`finish_reason: "length"`), so it may be incomplete. The answer is kept as written. This covers every round whose text is the answer: one answering by choice, the forced answer and its resend without tools, and a pinned round. |
@@ -896,6 +904,65 @@ A reply is informative when it told the model something about the collection
 without admitting a passage, as a keyword count does, a 0 included, and as a
 `read` does, which shows a passage's text. A reply answered from memory is never
 informative, so reading an unchanged passage again still counts toward `idle`.
+
+### Making room
+
+At a small context window the room for tool replies holds only a few full
+replies. Rather than stop there, the loop cuts replies the model has already
+read down to stubs, then retires pictures it has already seen, and research
+goes on.
+
+- **Two triggers.** Between rounds, when the room left cannot hold one more
+  full reply (with its envelope, and a search note still due), replies are
+  cleared until it can; the limits are then checked again. Inside a round,
+  when the room left cannot hold the round's replies at their longest (a full
+  reply for each call that runs), replies are cleared for that, or else for
+  the least the replies need. Only a round that cannot reach even the least is
+  withdrawn.
+- **What counts as seen.** A reply has been seen once a model call that began
+  carried it, and so has a picture. Between rounds, that is every round before
+  the one just answered, so its replies and the pictures shown after it are
+  never touched there. Inside a round, the round's own model call has carried
+  every round before it.
+- **What is cleared.** Seen replies that showed or named passages, oldest
+  first, while the room is still short. An error reply is never cleared: it
+  says why a call was not answered. Neither is a reply its stub would not
+  shorten.
+- **Then pictures.** On the [visual target](#visual-target), only once every
+  seen reply that may be cleared is cleared, the picture messages the model has
+  seen are retired, oldest first, while the room is still short. Replies go
+  first, since a visual answer rests on the pictures. A retired message reads
+  `The pictures of [2], [5] were shown above and are no longer attached, to make room; read(n) shows one again.`
+  where the pictures stood, and a `read(n)` of one of those passages shows its
+  picture again (see [Visual target](#visual-target)).
+- **The stub.** A cleared reply reads `Cleared to make room: this reply showed [1], [3]; read(n) shows a passage again.`,
+  or `Cleared to make room: this reply showed no passages.` when it showed
+  none. A keyword reply keeps its count ahead of that line, since no `read`
+  shows a count again. The stub keeps the reply's role and call id.
+- **A cleared read is forgotten.** A call made before is answered from memory
+  (`Already called …`). Once a `read`'s reply is cleared, the same read is
+  answered anew with the passage's text.
+- **Priced first.** When clearing every reply that may be cleared, and
+  retiring every picture that may be retired, would still leave the room
+  short, nothing changes and the limit stands.
+- **Restored before a forced answer.** When a limit makes the model answer,
+  what making room took out is put back before it answers. The retired
+  pictures come first, each where it stood, newest first, while each fits the
+  room left and the prompt's cap. Then the cleared replies, newest first,
+  while each fits the room still left. For either, the first that does not fit
+  stops it. Pictures go first because making room took them out last: a visual
+  answer rests on them. A picture message holding a picture that a `read(n)`
+  already showed again stays retired, so no picture is shown twice. An answer
+  the model writes by choice while some replies are stubs stands as written,
+  and validation still checks the passages it cites.
+- **Nothing after an overflow cut.** Once the overflow retry has cut every
+  tool reply, nothing is cleared, retired or put back.
+
+Each clearing logs one INFO line with counts only (`An agent turn cleared 2
+earlier tool replies and 1 picture messages to go on, freeing 605 tokens`), and
+so does each kind of restore (`An agent turn restored 1 of its 1 retired
+picture messages for its answer`, `An agent turn restored 1 of its 2 cleared
+tool replies for its answer`). The SPA shows neither.
 
 ### Fallback to the plain path
 
@@ -966,20 +1033,51 @@ the target, so no picture is shown.
 ### Visual target
 
 On the `visual` target the loop shows the model the pictures themselves. After
-each tool round, the passages the round admitted that are pictures have their
-stored thumbnails fetched, in one call. They are shown in one user message after
-the round's tool replies: a legend (`agent_image_legend.txt`) tying each
-picture to its citation number, then the images.
+each tool round, the passages the round admitted, showed or named that are
+pictures the turn has not shown have their stored thumbnails fetched, in one
+call. They are shown in one user message after the round's tool replies: a
+legend (`agent_image_legend.txt`) tying each picture to its citation number,
+then the images.
 
-- A turn shows at most `VISUAL_ANSWER_MAX_IMAGES` pictures, and no more than
-  its room holds. A picture costs about 600 tokens, plus its legend line.
-- A picture is shown once per turn.
+- A prompt carries at most `VISUAL_ANSWER_MAX_IMAGES` pictures, and no more
+  than the turn's room holds. A picture costs about 600 tokens, plus its
+  legend line.
+- A passage counts when a reply shows it or names it by number, whether the
+  round admitted it or the turn already held it: a `read(n)`, a search or
+  keyframe listing that finds a held frame again and names it as shown before,
+  and a repeated call answered from memory (`Already called …`) all count. Its
+  picture is attached within the prompt's cap and the room left, as a
+  search's new pictures are, unless the prompt carries it or it was retired
+  (see below). So a picture the room or the cap kept back when a search found
+  it is shown once a later round names its passage and the room and the cap
+  allow, and a carried frame (see
+  [Carried evidence](#carried-evidence)) that a search or keyframe listing
+  finds again is shown, though the reply admitted nothing.
+- Short of room, the pictures the model has seen are retired after every
+  seen reply that may be cleared is cleared (see [Making room](#making-room)).
+  A retired picture message becomes one line naming its passages, where it
+  stood. Its pictures no longer count toward the prompt's cap, so later rounds
+  may attach others.
+- A picture the prompt carries is never attached twice. While the turn
+  researches, a retired picture comes back only when a `read(n)` shows its
+  passage, fresh or answered from memory, and the prompt's cap and the room
+  left allow: it is shown in a message of
+  its own after that round's replies. A search or keyframe listing that finds
+  it again only names it, so the room just freed is not spent again on every
+  mention. Before a forced answer, retired pictures are put back where they
+  stood, as far as the room and the cap allow (see [Making room](#making-room)).
 - A round that carries pictures and fails before its first event is taken as
-  refusing them. Every picture is taken back, and the round is sent once more
-  without them.
+  refusing them. The pictures still attached are taken back, and the round is
+  sent once more without them. A retired picture was seen by calls that began,
+  so its line stays and it still counts as shown. So does a picture a forced
+  answer put back: its line returns where it stood.
 
-The response reports `visual: {"images_attached": n}`, where `0` means the
-model saw no pixels. Only the visual target shows pictures; turns on `all` and
+The response reports `visual: {"images_attached": n}`: the pictures retired to
+make room plus those still attached when the turn ended, each counted once, so
+a picture retired and shown again by a read counts once. Pictures a refusal
+took back are not counted, even when an earlier call carried them; retired
+pictures stay counted. So `0` means that no picture was retired and none was
+attached at the end. Only the visual target shows pictures; turns on `all` and
 `documents` see captions.
 
 ### Answer, validation and storage
@@ -1037,17 +1135,80 @@ is stored (`agents/turn/history.py`). It holds:
 
 - the last two exchanges, as real messages, or one when reasoning is on;
 - the user's earlier questions, newest first;
-- the newest part of the rolling summary.
+- the newest part of the rolling summary;
+- the carried list: the passages those exchanges' answers cite, one numbered
+  line each (see [Carried evidence](#carried-evidence)).
 
 All of it fits within 1300 tokens, or 750 with reasoning. Citation numbers are
-dropped from earlier answers, since they number earlier sources. An earlier
-assessment shows its two parts, each labelled. A stateless turn reads none.
+dropped from earlier answers, since they number earlier sources, except the
+numbers of carried passages, which are renumbered to their place in the carried
+list. That list holds up to 8 passages, oldest cited first, and takes at most
+200 tokens of the allowance. It claims that share before the earlier questions
+and the summary do, but is listed after them. When its lines do not all fit, the
+oldest give way and their markers are dropped. An earlier assessment shows its
+two parts, each labelled. A stateless turn reads none.
 The model writes its own searches, so an agent turn runs no history rewrite and
 no turn-level graph expansion.
 
 A plain lookup that follows an assessment (a fallback, or any turn while agent
 turns are off) receives only the source-backed part of that answer as its prior
 turn. The model's judgement is never restated as sourced fact.
+
+### Carried evidence
+
+A follow-up starts out holding the passages its earlier answers cite, so a
+question such as "Are those all?" can cite the frame the last answer cited
+without finding it again (`SessionManager._agent_window`,
+`RAG.agent_carried_evidence`).
+
+- **Which answers.** The exchanges the window sends as messages (see
+  [Conversation history](#conversation-history)): the last two, or one with
+  reasoning on. An answer's markers (`[3]`, `[3, 4]`, `[3–5]`) name its stored
+  citations by position, as replay numbers them. One query reads the citations
+  of the last two answered turns, even when reasoning cuts the window to one;
+  only the exchanges the window sends carry passages.
+- **How many.** At most 8 passages: the ones cited last, a passage cited twice
+  counted once, at its latest citation. Their list takes at most 200 tokens of
+  the history allowance, and when its lines do not all fit, the oldest give
+  way. The newest win both cuts.
+- **Where they come from.** The request's collection only, by the turn's
+  target. A `documents` or `all` turn reads the main collection's docstore
+  first, the only place an oversize parent section is kept, then its points.
+  An `all` or `visual` turn reads the ids still missing from the
+  `{collection}_images` companion, each picture built as the image tools build
+  it. So a `documents` turn carries no picture, and a `visual` turn no text.
+- **Filters.** The request's filter rules judge each passage by its own
+  metadata. A filter on a field only a section's chunks carry, such as hate
+  speech, leaves that section out: it fails closed. Filters active without
+  rules carry nothing.
+- **Loading never fails a turn.** A store or index failure carries nothing,
+  with one warning naming the exception's type, and the turn goes on. One INFO
+  line counts the outcome (`An agent turn carries 2 of the 3 passages its
+  earlier answers cite (1 not found, 0 outside its target or filters)`), never
+  an id, a label or a text.
+- **The list.** The conversation block of the system prompt ends with
+  `Passages the earlier answers cite, carried into this turn (read(n) shows one)`
+  and one line `[n] label` per passage. The label is the passage's header as
+  the model reads it, on one line, defused, at most 120 characters. An earlier
+  answer keeps a marker only for a carried passage, renumbered to its line in
+  the list; every other marker is dropped. The summary and the earlier
+  questions carry none.
+- **The turn.** The loop seeds the passages into the evidence as `[1..k]`
+  before its first round, so they are the answer's first sources. The first
+  model call that gets an event opens the trail with a `carried` step (step 0,
+  `found` the count). A call refused before any event has shown nothing, so
+  the turn still falls back to the plain path.
+- **Reading one.** `read(n)` shows a carried passage, and on the
+  [visual target](#visual-target) attaches its picture, as does a search or
+  keyframe listing that finds a carried frame again and names it as shown
+  before. A carried section counts its opening as its match, so `read(n)`
+  shows its start, not the window the earlier answer cited. A search that
+  finds that window again extends the passage, which keeps its number and
+  shows the window.
+- **What carries nothing.** A scoped turn, whose scope is the whole evidence;
+  a stateless turn, which has no earlier answer; and a passage the store no
+  longer holds. A turn written over an earlier one carries from the turns
+  before it.
 
 ## Citation numbering
 

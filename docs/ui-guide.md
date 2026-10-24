@@ -144,12 +144,19 @@ While it works, the turn lists each step as it happens:
   again. Whatever of that text had already streamed into the answer moves into
   the trail, and the answer starts afresh;
 - "Started from n passages", on a scoped turn: the pinned selection it
-  answers from.
+  answers from;
+- "Carried over n passages from earlier answers", on a follow-up: the passages
+  its earlier answers cite, which it starts out holding as its first sources.
+  The row opens the trail, ahead of any search, and stays in it once the turn
+  is done: in the disclosure below with the turn's other steps, or, when the
+  turn took no other step, alone as a line under the answer.
 
 When the turn finishes, its steps fold behind a **Searches behind this
 answer** disclosure where the live list stood. Every agent turn with a step
-besides its starting passages gets one, lookups included. A turn whose stream
-failed keeps the steps it showed behind the same disclosure, above the error.
+besides its pinned selection and its carried passages gets one, lookups
+included. A follow-up that only carried passages took no other step, so its row
+stands as a line under the answer, with no disclosure. A turn whose stream
+failed keeps the steps it showed, in the same form, above the error.
 
 A muted note says when a turn stopped searching at one of its limits: the
 round limit, the time for the turn, the room for evidence in the model's

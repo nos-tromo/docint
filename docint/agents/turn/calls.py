@@ -12,8 +12,9 @@ missing. One that ran out of time is not; the turn's time limit says so.
 
 Room. A round first reserves the least reply every call needs (:meth:`RoundCalls.least`), which
 the loop has already checked fits; a call then runs only while a full reply, ``result_chars`` at
-the turn's ratio plus its envelope, still fits in place of its short one. No reply leaves here
-longer than ``result_chars``.
+the turn's ratio plus its envelope, still fits in place of its short one. :meth:`RoundCalls.most`
+is what the replies take at their longest, the room the loop makes before a round when it can. No
+reply leaves here longer than ``result_chars``.
 
 Nothing here logs a query, a tool argument or document text: only counts, tool names and
 exception types.
@@ -113,15 +114,15 @@ class RoundCalls:
         #: What a full reply costs: ``result_chars`` at the ratio, and its envelope.
         self.full_reply = math.ceil(result_chars / char_token_ratio) + MESSAGE_OVERHEAD_TOKENS
         short = (
-            SKIPPED_REPLY.format(limit=max_calls_per_round),
-            NO_ROOM_REPLY,
-            NO_TIME_REPLY,
-            LATE_REPLY,
-            FAILED_REPLY,
-            NO_CAPACITY_REPLY,
+            error_reply("", SKIPPED_REPLY.format(limit=max_calls_per_round), kind="skipped"),
+            error_reply("", NO_ROOM_REPLY, kind="no_room"),
+            error_reply("", NO_TIME_REPLY, kind="no_time"),
+            error_reply("", LATE_REPLY, kind="late"),
+            error_reply("", FAILED_REPLY, kind="failed"),
+            error_reply("", NO_CAPACITY_REPLY, kind="no_capacity"),
         )
         #: What the longest reply written here costs.
-        self.short_reply = max(message_cost(error_reply("", text).text, char_token_ratio) for text in short)
+        self.short_reply = max(message_cost(reply.text, char_token_ratio) for reply in short)
 
     def prepare(self, calls: Sequence[ToolCall], ctx: ToolContext) -> PreparedRound:
         """Prepare a round's calls on the loop thread, in call order.
@@ -150,7 +151,8 @@ class RoundCalls:
             except Exception as exc:
                 logger.warning("An agent tool call could not be prepared: {}", type(exc).__name__)
                 failed += 1
-                prepared.append(PreparedCall(action=action, detail="", reply=error_reply(action, FAILED_REPLY)))
+                reply = error_reply(action, FAILED_REPLY, kind="failed")
+                prepared.append(PreparedCall(action=action, detail="", reply=reply))
         return PreparedRound(calls=prepared, failed=failed)
 
     def _skipped(self, action: str, detail: str) -> ToolReply:
@@ -163,7 +165,7 @@ class RoundCalls:
         Returns:
             ToolReply: The skipped reply, an error reply.
         """
-        return error_reply(action, SKIPPED_REPLY.format(limit=self._max_calls), detail=detail)
+        return error_reply(action, SKIPPED_REPLY.format(limit=self._max_calls), kind="skipped", detail=detail)
 
     def answer(
         self, prepared: PreparedRound, ctx: ToolContext, *, room: int, time_left: Callable[[], float]
@@ -214,6 +216,37 @@ class RoundCalls:
         if position < self._max_calls and ready.reply is not None:
             return message_cost(ready.reply.text, self._ratio)
         return self.short_reply
+
+    def most(self, prepared: PreparedRound) -> int:
+        """Return the most tokens a round's replies can take: one reply per call, each as long as it can be.
+
+        A call answered when prepared costs its reply, and a call past the round's limit the
+        longest reply written here, as in :meth:`least`; a call with work, a full reply.
+
+        Args:
+            prepared (PreparedRound): The round's calls, prepared.
+
+        Returns:
+            int: The tokens.
+        """
+        return sum(self._most(position, ready) for position, ready in enumerate(prepared.calls))
+
+    def _most(self, position: int, ready: PreparedCall) -> int:
+        """Return the most tokens one call's reply can take.
+
+        Args:
+            position (int): The call's place in its round, from zero.
+            ready (PreparedCall): The call, prepared.
+
+        Returns:
+            int: Its reply's cost when it was answered at prepare within the round's limit, a full
+            reply when it has work within that limit, else the cost of the longest reply written here.
+        """
+        if position >= self._max_calls:
+            return self.short_reply
+        if ready.reply is not None:
+            return message_cost(ready.reply.text, self._ratio)
+        return self.full_reply
 
     def _admitted(self, prepared: Sequence[PreparedCall], room: int) -> list[bool | None]:
         """Decide which calls may run: within the round's limit, and while a full reply still fits.
@@ -271,11 +304,11 @@ class RoundCalls:
             if runs is None:
                 replies[position] = self._skipped(ready.action, ready.detail)
             elif not runs:
-                replies[position] = error_reply(ready.action, NO_ROOM_REPLY, detail=ready.detail)
+                replies[position] = error_reply(ready.action, NO_ROOM_REPLY, kind="no_room", detail=ready.detail)
             elif ready.fetch is not None:
                 left = time_left()
                 if left <= 0:
-                    replies[position] = error_reply(ready.action, NO_TIME_REPLY, detail=ready.detail)
+                    replies[position] = error_reply(ready.action, NO_TIME_REPLY, kind="no_time", detail=ready.detail)
                     continue
                 try:
                     started[position] = start_bounded(
@@ -286,11 +319,13 @@ class RoundCalls:
                     )
                 except NoSlot:
                     no_slot += 1
-                    replies[position] = error_reply(ready.action, NO_CAPACITY_REPLY, detail=ready.detail)
+                    replies[position] = error_reply(
+                        ready.action, NO_CAPACITY_REPLY, kind="no_capacity", detail=ready.detail
+                    )
                 except Exception as exc:
                     logger.warning("An agent's '{}' call could not start: {}", ready.action, type(exc).__name__)
                     failed += 1
-                    replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
+                    replies[position] = error_reply(ready.action, FAILED_REPLY, kind="failed", detail=ready.detail)
         if no_slot:
             logger.warning("No search slot came free for {} of an agent round's tool calls", no_slot)
         if started:
@@ -305,13 +340,13 @@ class RoundCalls:
             if future is not None:
                 if not future.done():
                     late += 1
-                    replies[position] = error_reply(ready.action, LATE_REPLY, detail=ready.detail)
+                    replies[position] = error_reply(ready.action, LATE_REPLY, kind="late", detail=ready.detail)
                     continue
                 failure = future.exception()
                 if failure is not None:
                     logger.warning("An agent's '{}' call failed: {}", ready.action, type(failure).__name__)
                     failed += 1
-                    replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
+                    replies[position] = error_reply(ready.action, FAILED_REPLY, kind="failed", detail=ready.detail)
                     continue
                 fetched = future.result()
             try:
@@ -319,7 +354,7 @@ class RoundCalls:
             except Exception as exc:
                 logger.warning("An agent's '{}' call failed: {}", ready.action, type(exc).__name__)
                 failed += 1
-                replies[position] = error_reply(ready.action, FAILED_REPLY, detail=ready.detail)
+                replies[position] = error_reply(ready.action, FAILED_REPLY, kind="failed", detail=ready.detail)
         if late:
             logger.warning("{} of an agent round's tool calls outlived the turn's time budget", late)
         return [cast(ToolReply, reply) for reply in replies], no_slot + failed

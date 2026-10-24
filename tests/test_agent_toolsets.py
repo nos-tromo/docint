@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from agent_fakes import ScriptedSearch, programme_passage, shown_numbers, tool_call, tool_context
+from agent_fakes import PLANNED_SYSTEM_TOKENS, ScriptedSearch, programme_passage, shown_numbers, tool_call, tool_context
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.gate import MIN_CTX_WINDOW
@@ -22,8 +22,7 @@ CLIP = "harbour_walk.webm"
 MAX_DESCRIPTION_WORDS = 60
 #: Characters per token the budget is measured with.
 RATIO = 3.5
-#: The system prompt a plain model is sized for, and a thinking model's, which German text may push up.
-PLAIN_SYSTEM_TOKENS = 900
+#: The system prompt a thinking model is sized for, past the planned one, as German text may push it up.
 THINKING_SYSTEM_TOKENS = 1200
 MESSAGE_TOKENS = 300
 REMEDY = "shorten a tool description or raise the context window"
@@ -391,7 +390,7 @@ def _keyword_schema_tokens(fields: tuple[str, ...]) -> int:
 def _budget_with_keyword(*, reasoning: bool, fields: tuple[str, ...]) -> TurnBudget:
     """Build the budget of an ``all`` turn that offers keyword, in the smallest window.
 
-    The system prompt is the one planned for the model (see ``PLAIN_SYSTEM_TOKENS`` and
+    The system prompt is the one planned for the model (see ``PLANNED_SYSTEM_TOKENS`` and
     ``THINKING_SYSTEM_TOKENS``) with keyword's lines added.
 
     Args:
@@ -401,7 +400,7 @@ def _budget_with_keyword(*, reasoning: bool, fields: tuple[str, ...]) -> TurnBud
     Returns:
         TurnBudget: The budget.
     """
-    planned = THINKING_SYSTEM_TOKENS if reasoning else PLAIN_SYSTEM_TOKENS
+    planned = THINKING_SYSTEM_TOKENS if reasoning else PLANNED_SYSTEM_TOKENS
     return _budget_for(
         "all",
         reasoning=reasoning,
@@ -433,7 +432,7 @@ def test_a_plain_model_keeps_room_for_three_full_results_in_the_smallest_window(
     Args:
         target (str): The retrieval target whose schemas are measured.
     """
-    budget = _budget_for(target, reasoning=False, system=PLAIN_SYSTEM_TOKENS)
+    budget = _budget_for(target, reasoning=False, system=PLANNED_SYSTEM_TOKENS)
     three_results = 3 * budget.result_chars / budget.char_token_ratio
 
     assert budget.round_room >= three_results, (

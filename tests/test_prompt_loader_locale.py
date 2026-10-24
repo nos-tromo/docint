@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agent_fakes import LEDGER_CAP, ScriptedSearch, shown_numbers, tool_call, tool_context
+from agent_fakes import LEDGER_CAP, PLANNED_SYSTEM_TOKENS, ScriptedSearch, shown_numbers, tool_call, tool_context
 from assessment_fakes import llm_view, scored_node
 from llama_index.core.schema import NodeWithScore
 
@@ -30,7 +30,7 @@ from docint.agents.turn.history import (
 from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
-from docint.agents.turn.tools import ReadTool, SearchTool, ToolRegistry
+from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, cleared_text
 from docint.agents.turn.toolsets import toolset_for
 from docint.core.rag import RAG
 from docint.utils.embed_chunking import estimate_tokens
@@ -64,8 +64,6 @@ INFERENCE_LABELS = {"en": "Inference:", "de": "Schlussfolgerung:"}
 ANSWER_PROMPTS = ("agent_system", "grounded_qa", "grounded_refine")
 #: The prompts that judge an answer: they accept every label, since an answer follows the user's language.
 VALIDATOR_PROMPTS = ("response_validator", "response_validator_assessment")
-#: Tokens the turn budget plans for the rendered system prompt, at 3.5 characters per token.
-SYSTEM_PROMPT_TOKENS = 900
 CHAR_TOKEN_RATIO = 3.5
 #: The texts the system prompt must describe, each by a phrase it quotes from them.
 DESCRIBED = (
@@ -75,6 +73,7 @@ DESCRIBED = (
     "grown",
     "did not fit",
     "repeated call",
+    "cleared reply",
     "earlier assessment",
 )
 
@@ -393,8 +392,8 @@ def _named_tools(text: str) -> set[str]:
 def _written() -> dict[str, str]:
     """Render each text the system prompt describes, by the code that writes it.
 
-    The passage and the repeated call come from real tool calls; every note after a
-    search's passages comes from ``_trailer``, the one function that writes them.
+    The passage, the repeated call and the cleared reply come from real tool calls; every
+    note after a search's passages comes from ``_trailer``, the one function that writes them.
 
     Returns:
         dict[str, str]: By kind (see ``DESCRIBED``), the text as the model reads it.
@@ -403,7 +402,9 @@ def _written() -> dict[str, str]:
     plan = scored_node("plan", text, filename="plan.pdf", page=1)
     registry = ToolRegistry([SearchTool(ScriptedSearch([plan])), ReadTool()])
     ctx = tool_context()
-    header, _, body = registry.call(tool_call("search", query="Hafenverein"), ctx).text.partition("\n\n")
+    found = registry.call(tool_call("search", query="Hafenverein"), ctx)
+    assert isinstance(found, PassageReply)
+    header, _, body = found.text.partition("\n\n")
     note = functools.partial(
         _trailer, shown=True, again=(), grown=(), left_out=0, full=False, hint=search_hint("search"), note=""
     )
@@ -414,6 +415,7 @@ def _written() -> dict[str, str]:
         "grown": note(grown=(1,)),
         "did not fit": note(left_out=2),
         "repeated call": registry.call(tool_call("search", query="Hafenverein"), ctx).text,
+        "cleared reply": cleared_text(found),
         "earlier assessment": labelled_lines((ANSWER_SOURCED_LABEL, ANSWER_ASSESSMENT_LABEL), ("Teil 1", "Teil 2")),
     }
 
@@ -637,10 +639,11 @@ def test_the_search_note_names_no_tool_since_every_target_is_sent_it(code: str) 
 
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_every_rule_on_citing_names_the_line_pinned_passages_show_too(code: str) -> None:
-    """Each line of the system prompt about [n] ties it to the ``citation_index:`` line a scoped round shows too.
+    """Every rule on [n] but the earlier-answers one ties it to the ``citation_index:`` line a scoped round shows too.
 
     A scoped round sends the same system prompt with its passages in the user message, not
-    in a tool reply, so a rule tied to tool replies would forbid the citations its note asks for.
+    in a tool reply, so a rule tying numbers to tool replies alone would forbid the citations
+    its note asks for.
 
     Args:
         code (str): The locale.
@@ -655,7 +658,12 @@ def test_every_rule_on_citing_names_the_line_pinned_passages_show_too(code: str)
         budget_tokens=1000,
         char_token_ratio=CHAR_TOKEN_RATIO,
     )
-    rules = [line for line in _prompt("agent_system", code).splitlines() if "[n]" in line]
+    # Exempt: it numbers carried passages, and a scoped turn carries none, so its earlier answers hold no numbers.
+    rules = [
+        line
+        for line in _prompt("agent_system", code).splitlines()
+        if "[n]" in line and "`Previous assistant answer`" not in line
+    ]
 
     assert shown_numbers(message) == [1]
     assert rules
@@ -710,7 +718,7 @@ def test_the_rendered_agent_system_prompt_fits_its_planned_tokens(code: str, tar
     """
     rendered = _system_prompt(code, target)
 
-    assert estimate_tokens(rendered, CHAR_TOKEN_RATIO) <= SYSTEM_PROMPT_TOKENS, (
+    assert estimate_tokens(rendered, CHAR_TOKEN_RATIO) <= PLANNED_SYSTEM_TOKENS, (
         f"{code}/{target}: {len(rendered)} chars"
     )
 

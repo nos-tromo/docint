@@ -1,10 +1,14 @@
 """The conversation behind an agent turn: a bounded window the model reads before the new message.
 
-The window has three parts, all drawn from a session's stored turns and rolling summary. The last
+The window has four parts, all drawn from a session's stored turns and rolling summary. The last
 exchanges are sent as real user and assistant messages, so a follow-up can quote them. The user's
 earlier questions and the newest part of the summary go into the system prompt, so a question left
-open several turns back still reaches the model. Citation numbers are dropped from everything an
-earlier turn wrote, because they number that turn's sources, not this one's.
+open several turns back still reaches the model. So do the carried passages, the ones those last
+answers cite, each listed under the number the turn will know it by.
+
+Citation numbers are dropped from everything an earlier turn wrote, because they number that turn's
+sources, not this one's. The exception is a number naming a carried passage: it stays, renumbered
+to the passage's number in the list.
 
 The session's own context string cannot serve: it drops the raw turns right after a summary fold and
 its summary grows without bound.
@@ -13,7 +17,7 @@ its summary grows without bound.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
@@ -35,14 +39,23 @@ RECENT_EXCHANGES = 2
 EARLIER_QUESTIONS_TOKENS = 150
 #: Tokens the newest part of the summary may take, its heading included.
 SUMMARY_TOKENS = 250
+#: Tokens the carried passages may take, their heading included.
+CARRIED_TOKENS = 200
+#: Passages carried into a turn at most: the ones cited last by the exchanges the window sends.
+CARRIED_MAX_PASSAGES = 8
+#: Most numbers a range in a citation marker names in full; a wider one names only its two ends.
+CITED_RANGE_MAX = 10
 #: Least text an exchange sent as messages is worth its envelopes for; below it the oldest one gives way.
 MIN_EXCHANGE_TOKENS = 200
 
-#: What the system prompt shows when there is no summary and no earlier question.
+#: What the system prompt shows when there is no summary, no earlier question and no carried passage.
 NO_HISTORY = "(none)"
-#: Headings of the two sections of :meth:`ConversationWindow.summary_block`.
+#: Headings of the three sections of :meth:`ConversationWindow.summary_block`.
 SUMMARY_HEADER = "Summary of the earlier conversation"
 QUESTIONS_HEADER = "Earlier questions, newest first (their answers are not shown)"
+CARRIED_HEADER = "Passages the earlier answers cite, carried into this turn (read(n) shows one)"
+#: What joins the sections of the block.
+_SECTION_SEPARATOR = "\n\n"
 
 #: How an earlier assessment's two parts are labelled in the window's messages.
 ANSWER_SOURCED_LABEL = "Previous assistant answer, source-backed part"
@@ -70,11 +83,30 @@ class ConversationTurn:
             assessment, as the turn's trail recorded it; ``None`` when the whole answer is
             source-backed. A turn in a built window carries ``None``: its parts are already
             rendered, labelled, into ``assistant_text``.
+        sources (tuple[str | None, ...]): The stored node each citation number of the answer
+            names, ``sources[n - 1]`` being ``[n]``; ``None`` where the store keeps no id for
+            it. Empty when the turn's citations were not read. A turn in a built window carries
+            ``()``: its markers are already renumbered.
     """
 
     user_text: str
     assistant_text: str
     evidence_chars: int | None = None
+    sources: tuple[str | None, ...] = ()
+
+
+@dataclass(frozen=True)
+class CarriedPassage:
+    """A passage an earlier answer cited, which the window lists and the turn starts out holding.
+
+    Attributes:
+        node_id (str): The stored node the earlier answer cited.
+        label (str): What the window lists for it: a description of the passage on one line.
+            Whitespace is collapsed when it is listed, so a label cannot open a line of its own.
+    """
+
+    node_id: str
+    label: str
 
 
 @dataclass(frozen=True)
@@ -87,26 +119,35 @@ class ConversationWindow:
         earlier_questions (tuple[str, ...]): The user's questions from before the recent
             exchanges, newest first, each on one line.
         recent (tuple[ConversationTurn, ...]): The last exchanges, oldest first, cut to fit
-            their share of the allowance and with citation numbers dropped.
+            their share of the allowance. A citation number survives in an answer only where it
+            names a carried passage, renumbered to that passage's number in ``carried``.
+        carried (tuple[CarriedPassage, ...]): The passages the block lists, the first being
+            ``[1]``: the newest run of those asked for that fits their share of the allowance,
+            in the order asked for.
     """
 
     summary: str = ""
     earlier_questions: tuple[str, ...] = ()
     recent: tuple[ConversationTurn, ...] = ()
+    carried: tuple[CarriedPassage, ...] = ()
 
     def summary_block(self) -> str:
-        """Render the summary and the earlier questions for the system prompt.
+        """Render the summary, the earlier questions and the carried passages for the system prompt.
+
+        The carried passages come last, nearest the messages whose citation numbers they number.
 
         Returns:
-            str: The summary section, then the earlier questions section, whichever exist;
-            ``NO_HISTORY`` when neither does.
+            str: The summary section, then the earlier questions section, then the carried
+            passages section, whichever exist; ``NO_HISTORY`` when none does.
         """
         sections = []
         if self.summary:
             sections.append(_summary_section(self.summary))
         if self.earlier_questions:
             sections.append(_questions_section(self.earlier_questions))
-        return "\n\n".join(sections) or NO_HISTORY
+        if self.carried:
+            sections.append(_carried_section(self.carried))
+        return _SECTION_SEPARATOR.join(sections) or NO_HISTORY
 
     def messages(self) -> list[ChatMessage]:
         """Render the recent exchanges as the messages that precede the new one.
@@ -235,6 +276,19 @@ def _questions_section(questions: Sequence[str]) -> str:
     return f"{QUESTIONS_HEADER}:\n" + "\n".join(f"- {question}" for question in questions)
 
 
+def _carried_section(carried: Sequence[CarriedPassage]) -> str:
+    """Render the carried-passages section of the block.
+
+    Args:
+        carried (Sequence[CarriedPassage]): The passages, the first being ``[1]``.
+
+    Returns:
+        str: The heading and one numbered line per passage, its label on one line.
+    """
+    lines = (f"[{number}] {' '.join(passage.label.split())}" for number, passage in enumerate(carried, 1))
+    return f"{CARRIED_HEADER}:\n" + "\n".join(lines)
+
+
 def _envelopes(exchanges: int) -> int:
     """Count the tokens the messages of some exchanges cost beyond their text.
 
@@ -324,21 +378,117 @@ def _newest_summary(summary: str, chars: int) -> str:
     return fit_tail_with_marker(text, allowance)[0] if allowance > 0 else ""
 
 
-def _reply_parts(turn: ConversationTurn) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _carried_within(carried: Sequence[CarriedPassage], chars: int) -> tuple[CarriedPassage, ...]:
+    """Take the newest carried passages whose lines fit a section of ``chars`` characters.
+
+    Args:
+        carried (Sequence[CarriedPassage]): The passages, oldest cited first, as
+            :func:`cited_node_ids` returns them.
+        chars (int): The most characters the rendered section may use.
+
+    Returns:
+        tuple[CarriedPassage, ...]: The longest newest run of ``carried`` that fits, in the order
+        given, so the oldest passage kept is ``[1]``. The lines are walked from the newest back
+        and kept whole; the first that does not fit ends the run, and every older passage is left out.
+    """
+    kept: list[CarriedPassage] = []
+    for passage in reversed(carried):
+        if len(_carried_section([passage, *kept])) > chars:
+            break
+        kept.insert(0, passage)
+    return tuple(kept)
+
+
+def _span(first: int, last: int) -> list[int]:
+    """List the numbers a range in a citation marker names.
+
+    Args:
+        first (int): The number the range starts at.
+        last (int): The number it ends at; a range may be written backwards.
+
+    Returns:
+        list[int]: Every number from the lower end to the upper, or only those two ends when the
+        range is wider than ``CITED_RANGE_MAX`` numbers, which cites everything rather than each.
+    """
+    low, high = sorted((first, last))
+    return list(range(low, high + 1)) if high - low < CITED_RANGE_MAX else [low, high]
+
+
+def _marker_numbers(marker: str) -> list[int]:
+    """Read the citation numbers a marker names.
+
+    Args:
+        marker (str): A marker as ``_CITATION_MARKER_RE`` matches it, such as ``[2, 4]``,
+            ``[2; 4]`` or ``[3-5]``; a range may be written with an en dash as well.
+
+    Returns:
+        list[int]: The numbers in the order written; a range gives the numbers it spans.
+    """
+    numbers: list[int] = []
+    for item in re.split(r"[,;]", marker):
+        ends = [int(digits) for digits in re.findall(r"\d+", item)]
+        numbers.extend(_span(ends[0], ends[-1]) if len(ends) > 1 else ends)
+    return numbers
+
+
+def _marker_ids(marker: str, sources: Sequence[str | None]) -> list[str]:
+    """Name the stored nodes a marker cites.
+
+    Args:
+        marker (str): A marker as ``_CITATION_MARKER_RE`` matches it.
+        sources (Sequence[str | None]): The answer's stored nodes, ``sources[n - 1]`` being ``[n]``.
+
+    Returns:
+        list[str]: The node of each number the marker names, in the order written; a number with
+        no stored node names none.
+    """
+    ids: list[str] = []
+    for number in _marker_numbers(marker):
+        node_id = sources[number - 1] if 1 <= number <= len(sources) else None
+        if node_id:
+            ids.append(node_id)
+    return ids
+
+
+def _renumbered(text: str, sources: Sequence[str | None], numbering: Mapping[str, int]) -> str:
+    """Rewrite an earlier answer's citation markers to number the carried passages, and drop the rest.
+
+    Args:
+        text (str): The answer, or one part of it.
+        sources (Sequence[str | None]): The answer's stored nodes, ``sources[n - 1]`` being ``[n]``.
+        numbering (Mapping[str, int]): Each carried node's number in the window's list.
+
+    Returns:
+        str: The text, stripped. A marker naming carried passages becomes one naming their numbers,
+        each once, in the order written; one naming none is removed with the blanks before it.
+    """
+
+    def renumber(match: re.Match[str]) -> str:
+        found = match.group()
+        shown = dict.fromkeys(numbering[node_id] for node_id in _marker_ids(found, sources) if node_id in numbering)
+        return f"{found[: found.index('[')]}[{', '.join(map(str, shown))}]" if shown else ""
+
+    return _CITATION_MARKER_RE.sub(renumber, text).strip()
+
+
+def _reply_parts(turn: ConversationTurn, numbering: Mapping[str, int]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split an earlier answer into the parts the window shows and the labels they carry.
 
     Args:
         turn (ConversationTurn): The exchange.
+        numbering (Mapping[str, int]): Each carried node's number in the window's list.
 
     Returns:
         tuple[tuple[str, ...], tuple[str, ...]]: The labels and the parts, citation numbers
-        dropped: an assessment's two parts, each labelled where :func:`split_answer` trusts its
-        boundary, or the whole answer with no label.
+        dropped except those naming a carried passage, which are renumbered: an assessment's
+        two parts, each labelled where :func:`split_answer` trusts its boundary, or the whole
+        answer with no label.
     """
     sourced, assessment = split_answer(turn.assistant_text, turn.evidence_chars)
     if sourced or assessment:
-        return (ANSWER_SOURCED_LABEL, ANSWER_ASSESSMENT_LABEL), (_plain(sourced), _plain(assessment))
-    return (), (_plain(turn.assistant_text),)
+        parts = (_renumbered(sourced, turn.sources, numbering), _renumbered(assessment, turn.sources, numbering))
+        return (ANSWER_SOURCED_LABEL, ANSWER_ASSESSMENT_LABEL), parts
+    return (), (_renumbered(turn.assistant_text, turn.sources, numbering),)
 
 
 def _show_reply(labels: Sequence[str], parts: Sequence[str]) -> str:
@@ -354,7 +504,7 @@ def _show_reply(labels: Sequence[str], parts: Sequence[str]) -> str:
     return labelled_lines(labels, parts) if labels else parts[0]
 
 
-def _last_answered(turns: Sequence[ConversationTurn], count: int) -> list[int]:
+def last_answered(turns: Sequence[ConversationTurn], count: int) -> list[int]:
     """Find the last turns that are complete exchanges, scanning from the end.
 
     Args:
@@ -374,25 +524,71 @@ def _last_answered(turns: Sequence[ConversationTurn], count: int) -> list[int]:
     return found[::-1]
 
 
+def recent_positions(turns: Sequence[ConversationTurn], allowance_tokens: int) -> list[int]:
+    """Choose the exchanges a window of this allowance sends as messages.
+
+    The window's own choice, which :func:`build_window` makes through this function, so a
+    caller that reads the answers the window will show reads exactly those.
+
+    Args:
+        turns (Sequence[ConversationTurn]): The session's turns, oldest first.
+        allowance_tokens (int): Tokens the window may cost; see ``history_allowance_tokens``.
+
+    Returns:
+        list[int]: The positions of the last two complete exchanges, oldest first; the last one
+        when the allowance is below the plain model's; fewer, down to none, when the allowance
+        cannot pay ``MIN_EXCHANGE_TOKENS`` and an envelope for each.
+    """
+    answered = last_answered(turns, RECENT_EXCHANGES)
+    exchanges = min(RECENT_EXCHANGES if allowance_tokens >= HISTORY_ALLOWANCE_TOKENS else 1, len(answered))
+    while exchanges and allowance_tokens - _envelopes(exchanges) < exchanges * MIN_EXCHANGE_TOKENS:
+        exchanges -= 1
+    return answered[len(answered) - exchanges :]
+
+
+def cited_node_ids(turns: Sequence[ConversationTurn], positions: Sequence[int]) -> tuple[str, ...]:
+    """Name the stored passages the answers at some positions cite.
+
+    Args:
+        turns (Sequence[ConversationTurn]): The session's turns, oldest first.
+        positions (Sequence[int]): The exchanges to read, oldest first; see :func:`recent_positions`.
+
+    Returns:
+        tuple[str, ...]: At most ``CARRIED_MAX_PASSAGES`` distinct node ids: the ones cited last,
+        each placed by its latest citation, oldest cited first. That is the order the window
+        numbers them in, the first being ``[1]`` when all of them are listed.
+    """
+    cited = [
+        node_id
+        for position in positions
+        for marker in _CITATION_MARKER_RE.finditer(turns[position].assistant_text)
+        for node_id in _marker_ids(marker.group(), turns[position].sources)
+    ]
+    newest_first = list(dict.fromkeys(reversed(cited)))[:CARRIED_MAX_PASSAGES]
+    return tuple(reversed(newest_first))
+
+
 def _fit_recent(
-    turns: Sequence[ConversationTurn], *, room_tokens: int, char_token_ratio: float
+    turns: Sequence[ConversationTurn], *, room_tokens: int, char_token_ratio: float, numbering: Mapping[str, int]
 ) -> tuple[ConversationTurn, ...]:
     """Cut the recent exchanges to share a room, every text shortest-first.
 
     A text needing less than its share returns the rest to the longer ones, so a short
     question is never cut for a long answer's sake, and an assessment's judgement is
-    not pushed out by its source-backed part.
+    not pushed out by its source-backed part. The answers are renumbered before they are
+    cut, so the cut is measured on the text that is sent.
 
     Args:
         turns (Sequence[ConversationTurn]): The exchanges, oldest first, each answered.
         room_tokens (int): Tokens for their text; the envelopes are already paid.
         char_token_ratio (float): Characters per token.
+        numbering (Mapping[str, int]): Each carried node's number in the window's list.
 
     Returns:
         tuple[ConversationTurn, ...]: The exchanges as the window sends them.
     """
     asked = [turn.user_text.strip() for turn in turns]
-    replies = [_reply_parts(turn) for turn in turns]
+    replies = [_reply_parts(turn, numbering) for turn in turns]
     texts = [text for question, (_, parts) in zip(asked, replies, strict=True) for text in (question, *parts)]
     labelling = sum(len(_show_reply(labels, parts)) - sum(map(len, parts)) for labels, parts in replies)
     # Each message is estimated on its own, so each may round up by one token.
@@ -411,17 +607,25 @@ def build_window(
     *,
     allowance_tokens: int,
     char_token_ratio: float,
+    carried: Sequence[CarriedPassage] = (),
 ) -> ConversationWindow:
     """Bound a session's history to what an agent turn may send.
 
     The last two exchanges are sent as messages in their own words, cut only to fit; one
     when the allowance is below the plain model's (a thinking model's), since two would
-    leave nothing for the rest. The user's earlier questions, newest first, take up to
+    leave nothing for the rest. The passages in ``carried`` are listed in the block, up to
+    ``CARRIED_TOKENS``; the user's earlier questions, newest first, take up to
     ``EARLIER_QUESTIONS_TOKENS``, and the newest part of the rolling summary up to
-    ``SUMMARY_TOKENS``; both claim their share before the exchanges are cut, so long
-    answers cannot push an open question out. Citation numbers are dropped from the
-    summary and every answer; an earlier assessment shows its two parts labelled where
-    :func:`split_answer` trusts its stored boundary.
+    ``SUMMARY_TOKENS``. All three claim their share before the exchanges are cut, the
+    carried passages first, so long answers cannot push an open question out. The block
+    shows the carried passages last, nearest the messages whose markers they number.
+
+    The carried list is the newest run of ``carried`` whose lines fit, whole lines only,
+    numbered in the order given: when they do not all fit, the oldest give way and are not
+    carried. Citation numbers are dropped from the summary and every answer, except that a
+    marker naming a carried passage stays, renumbered to the passage's number in the list;
+    an earlier assessment shows its two parts labelled where :func:`split_answer` trusts its
+    stored boundary. With nothing carried, every marker is dropped.
 
     The allowance covers the whole window: the block, every message's text and the
     ``MESSAGE_OVERHEAD_TOKENS`` envelope each message costs, so a caller that counts the block
@@ -437,6 +641,9 @@ def build_window(
         summary (str): The rolling summary, which grows by appending, so its end is the newest.
         allowance_tokens (int): Tokens the window may cost; see ``history_allowance_tokens``.
         char_token_ratio (float): Characters per token for the estimate.
+        carried (Sequence[CarriedPassage]): The passages to list, distinct, oldest cited first,
+            which is the order to number them in; see :func:`cited_node_ids` for which the recent
+            answers cite.
 
     Returns:
         ConversationWindow: The window, never over the allowance.
@@ -444,20 +651,25 @@ def build_window(
     Raises:
         ValueError: If ``char_token_ratio`` is not positive.
     """
-    answered = _last_answered(turns, RECENT_EXCHANGES)
-    exchanges = min(RECENT_EXCHANGES if allowance_tokens >= HISTORY_ALLOWANCE_TOKENS else 1, len(answered))
-    while exchanges and allowance_tokens - _envelopes(exchanges) < exchanges * MIN_EXCHANGE_TOKENS:
-        exchanges -= 1
-    recent_at = answered[len(answered) - exchanges :]
+    recent_at = recent_positions(turns, allowance_tokens)
+    exchanges = len(recent_at)
     spare = max(0, allowance_tokens - _envelopes(exchanges) - exchanges * MIN_EXCHANGE_TOKENS)
+    # Claimed first, and priced with the separator ahead of it, since the sections before it are not known yet.
+    room_chars = _chars_within(min(CARRIED_TOKENS, spare), char_token_ratio) - len(_SECTION_SEPARATOR)
+    listed = _carried_within(carried, room_chars)
+    if listed:
+        spare -= estimate_tokens(_SECTION_SEPARATOR + _carried_section(listed), char_token_ratio)
     asked = [" ".join(turns[i].user_text.split()) for i in reversed(range(len(turns))) if i not in recent_at]
     question_chars = _chars_within(min(EARLIER_QUESTIONS_TOKENS, spare), char_token_ratio)
     questions = _newest_questions(filter(None, asked), question_chars)
     if questions:
         spare -= estimate_tokens(_questions_section(questions), char_token_ratio)
-    separator = len("\n\n") if questions else 0
+    separator = len(_SECTION_SEPARATOR) if questions else 0
     newest = _newest_summary(summary, _chars_within(min(SUMMARY_TOKENS, spare), char_token_ratio) - separator)
-    older = ConversationWindow(summary=newest, earlier_questions=questions)
+    older = ConversationWindow(summary=newest, earlier_questions=questions, carried=listed)
     room = allowance_tokens - _envelopes(exchanges) - estimate_tokens(older.summary_block(), char_token_ratio)
-    recent = _fit_recent([turns[i] for i in recent_at], room_tokens=room, char_token_ratio=char_token_ratio)
+    numbering = {passage.node_id: number for number, passage in enumerate(listed, 1)}
+    recent = _fit_recent(
+        [turns[i] for i in recent_at], room_tokens=room, char_token_ratio=char_token_ratio, numbering=numbering
+    )
     return replace(older, recent=recent)

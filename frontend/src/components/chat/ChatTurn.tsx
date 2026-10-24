@@ -208,6 +208,8 @@ function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
   switch (step.action) {
     case 'seed':
       return t(single ? 'chat.agent_trail_seed_one' : 'chat.agent_trail_seed_other', { count: step.found })
+    case 'carried':
+      return t(single ? 'chat.agent_trail_carried_one' : 'chat.agent_trail_carried_other', { count: step.found })
     case 'answer':
       return t('chat.agent_trail_answer')
     case 'note':
@@ -248,6 +250,7 @@ function StepMarker({ action }: { action: AgentAction }) {
     case 'keyframes':
       return <ImageIcon className={className} />
     case 'seed':
+    case 'carried':
     case 'read':
       return <DocumentsIcon className={className} />
     case 'keyword':
@@ -284,7 +287,10 @@ function TrailSteps({
   )
 }
 
-/** The steps the model took itself: not the seed it started from, nor an earlier assessment's answer marker. */
+/**
+ * The steps behind the disclosure: not the seed a scope pinned, nor an earlier assessment's answer marker.
+ * A follow-up's carried passages stay: no banner says the turn started from them.
+ */
 function researchSteps(actions: TrailStep[] | undefined): TrailStep[] {
   if (!Array.isArray(actions)) return []
   return actions.filter(
@@ -317,6 +323,17 @@ function AgentTrailDisclosure({ steps }: { steps: TrailStep[] }) {
       {open && <TrailSteps id={listId} steps={steps} className="mt-2" />}
     </div>
   )
+}
+
+/**
+ * A finished turn's trail: behind the disclosure, unless all the turn did was carry passages over. It searched
+ * nothing then, so its one row stands under the answer rather than behind a title that names searches.
+ */
+function FinishedTrail({ steps }: { steps: TrailStep[] }) {
+  if (steps.every((step) => step.action === 'carried')) {
+    return <TrailSteps steps={steps} testId="agent-trail" className="mt-3 text-xs text-muted-foreground" />
+  }
+  return <AgentTrailDisclosure steps={steps} />
 }
 
 /** Whether the answer text carries the assessment label the notice points to. */
@@ -445,7 +462,7 @@ export function ChatTurn({
             )}
           </div>
         )}
-        {research.length > 0 && <AgentTrailDisclosure steps={research} />}
+        {research.length > 0 && <FinishedTrail steps={research} />}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>

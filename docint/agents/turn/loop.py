@@ -23,13 +23,14 @@ Limits make the model answer in one more round, its last: the same transcript pl
 as a user message (joined to a user message it would follow: strict chat templates refuse two in
 a row), the tools still declared but ``tool_choice="none"``. An endpoint that ignores
 ``tool_choice`` may answer that round with tool calls and no text: the round is then sent once
-more declaring no tools, and that reply is the answer. ``agent.reason`` names the
-first cause: the rounds spent (``round_budget``), the time spent (``time_budget``), no room left
-for one more full tool reply or for a round's own calls (``context_budget``), or two rounds in a
-row that added no passage and told the model nothing new (``idle``): a reply that answered with a
-count, say, is news even when it admits nothing. Limits are checked between rounds, and the time also
-bounds every call's I/O; a round is never cut off while it streams, so an answer already streaming
-is never abandoned. An answer the endpoint cut at its length limit is kept, as written, and flagged
+more declaring no tools, and that reply is the answer. ``agent.reason`` names the first cause:
+the rounds spent (``round_budget``), the time spent (``time_budget``), no room left for one more
+full tool reply or for a round's own calls even after clearing replies the model has read and
+retiring pictures it has seen (``context_budget``), or two rounds in a row that added no passage
+and told the model nothing new (``idle``): a reply that answered with a count, say, is news even
+when it admits nothing. Limits are checked between rounds, and the time also bounds every call's
+I/O; a round is never cut off while it streams, so an answer already streaming is never
+abandoned. An answer the endpoint cut at its length limit is kept, as written, and flagged
 ``answer_cut``, the one reason that replaces the first cause: a cut answer matters more than a
 limit or a failure before it.
 
@@ -39,17 +40,42 @@ order, within the room and the time left. The turn's room for tool replies is th
 ``round_room`` less the final note. A round's own cost, its assistant message and the least
 reply each of its calls needs, must fit the room left; a round that does not is withdrawn
 before any of its calls runs, its shown text withdrawn by its note, and the model answers.
+Short of room, for one more full reply between rounds or for a round's replies at their longest
+(else their least), the loop first cuts replies the model has read to stubs, oldest first, and
+only then retires the pictures it has seen, oldest first (see :meth:`AgentLoop._make_room`). A
+reply has been read, and a picture seen, once a model call that began carried it, so the check
+between rounds never touches the round just answered. A stub keeps the reply's ``keep`` text and
+names its passages for ``read(n)``; a cleared read is forgotten, so the same read shows its
+passage again; an error reply is never cleared. Clearing is priced first: when it cannot make the
+room, nothing changes. Before a forced answer what making room took out is put back
+(:meth:`AgentLoop._restore`): the retired pictures first, as the cap allows, then the stubs,
+each newest first while it fits; after the overflow cut, nothing is cleared, retired or put back.
 Only a call its tool answered is a step in the trail; an error reply, for arguments that will
-not do or for a call that did not run or failed, reaches the model alone. A call that could not
-be prepared, whose search failed or found no slot, or whose answer raised, marks the turn
-``research_failed`` without ending it: evidence may be missing.
+not do or for a call that did not run or failed, reaches the model alone, and its round logs it
+by tool and kind. A call that could not be prepared, whose search failed or found no slot, or
+whose answer raised, marks the turn ``research_failed`` without ending it: evidence may be
+missing.
 
-Pictures. With a thumbnail fetcher, the pictures a round admits are shown to the model after its
-tool replies, and a round refused with them is sent once more without (see
+Pictures. With a thumbnail fetcher, the pictures of the passages a round admits, shows or names
+that the turn has not shown, a call answered from memory included, are shown to the model after
+its tool replies, within the prompt's cap and the room left: a picture the turn holds but has not
+shown, a carried one or one the cap kept back, reaches the model when a later search, listing or
+read shows or names its passage. A picture the prompt carries is never attached twice, and one
+retired to make room comes back only for a read of its passage, fresh or from memory, or when a
+forced answer puts it back: a search or listing that names it again does not bring it back. A
+round refused with pictures is sent once more without those still attached (see
 :mod:`~docint.agents.turn.images` and :meth:`AgentLoop._round`).
 
+Carried passages. A follow-up starts out holding the passages its earlier answers cite, which the
+window lists: they are seeded as ``[1..k]`` before the first round, each with its opening counted
+as its match, so a search window of the same section merges into it (see
+:func:`~docint.agents.turn.passages.carried_entry`). The turn's first model call that gets an
+event opens with a ``carried`` step counting them, so a call refused before any event has still
+shown nothing. ``read(n)`` shows a carried passage, and on the visual target its picture, as does
+a search or keyframe listing that finds it again.
+
 A pinned scope is answered from the pinned passages alone, in one round that offers no tools (see
-:mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`).
+:mod:`~docint.agents.turn.scope` and :meth:`AgentLoop._scoped`). It carries no passage.
 
 Failures. Model calls run on the loop thread, one model slot each. Before the turn has shown
 anything, as when the first round's second try breaks off before its text shows, a failure goes
@@ -72,7 +98,7 @@ round that ran:
   tools fails the same way, an overflow of it raising ``ValueError`` naming the context window.
 
 Nothing here logs a query, an answer, a tool argument or document text: only counts, tool names,
-exception types and reason tokens.
+exception types, and reason and error-kind tokens.
 """
 
 from __future__ import annotations
@@ -80,7 +106,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -95,9 +121,17 @@ from docint.agents.assessment.split import SentinelStreamSplitter
 from docint.agents.turn.budget import MESSAGE_OVERHEAD_TOKENS, TurnBudget, message_cost
 from docint.agents.turn.calls import RoundCalls
 from docint.agents.turn.images import TurnImages
+from docint.agents.turn.passages import carried_entry
 from docint.agents.turn.scope import EvidenceDoesNotFit, scope_message
 from docint.agents.turn.stream import Provisional, RoundDone, stream_round
-from docint.agents.turn.tools import ToolContext, ToolRegistry, nested_too_deeply
+from docint.agents.turn.tools import (
+    PassageReply,
+    ToolContext,
+    ToolRegistry,
+    ToolReply,
+    cleared_text,
+    nested_too_deeply,
+)
 from docint.agents.types import AgentAction, AgentProgress
 from docint.utils.text_budget import fit_with_marker
 
@@ -134,21 +168,24 @@ class AgentResult:
         raw_text (str): The answer exactly as the model wrote it, sentinel included, reasoning
             left out; empty only when the answer round wrote nothing. A result always comes from
             an answer round that ran.
-        nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order: every passage
-            a tool reply showed, or a scoped turn's pinned passages, stamped with its
-            ``citation_index``; one whose picture the model was shown also carries
-            ``VISUAL_IMAGES_ATTACHED_KEY``.
+        nodes (list[NodeWithScore]): The turn's evidence numbered in ledger order, each stamped
+            with its ``citation_index``: the passages carried from earlier answers first, then
+            every passage a tool reply showed; a scoped turn's pinned passages. One whose picture
+            the model was shown also carries ``VISUAL_IMAGES_ATTACHED_KEY``.
         steps (int): Tool rounds whose calls were answered; a round withdrawn for want of room
             is not counted.
-        actions (list[dict[str, Any]]): The trail: one ``{action, detail, found}`` per note and
-            per call its tool answered, in order, with the keys the reply's trail adds; a scoped
-            turn's is its ``seed`` alone.
+        actions (list[dict[str, Any]]): The trail: the ``carried`` step first when the turn
+            carried passages, then one ``{action, detail, found}`` per note and per call its tool
+            answered, in order, with the keys the reply's trail adds; a scoped turn's is its
+            ``seed`` alone.
         reason (str | None): The first cause that cut the turn short or left evidence out: a
             limit, a failed round, a call that could not be prepared, a failed search or missing
             search slot; ``answer_cut``, replacing any of these, when the endpoint cut the answer
             at its length limit; ``None`` when there was none.
-        images_attached (int): Pictures the model was shown: those in the transcript when the
-            turn ended, none once a refusal took them back.
+        images_attached (int): The pictures retired to make room and those still attached when
+            the turn ended, each counted once. A refusal takes back the pictures still attached,
+            which then do not count even when an earlier call carried them; retired ones stay
+            counted.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
     """
@@ -163,6 +200,28 @@ class AgentResult:
 
 
 @dataclass
+class _Shown:
+    """One tool reply in a turn's transcript, which the loop may clear to make room and put back.
+
+    Attributes:
+        message (ChatMessage): The message the transcript holds now: the reply, or its stub once cleared.
+        original (ChatMessage): The message as its round first added it.
+        reply (ToolReply): The reply it carries.
+        key (tuple[str, str] | None): The tool's name and the call's repeat key, under which the
+            registry remembers the answer; ``None`` for a call it did not key.
+        round (int): The tool round that added it.
+        cleared (bool): Whether the transcript holds its stub.
+    """
+
+    message: ChatMessage
+    original: ChatMessage
+    reply: ToolReply
+    key: tuple[str, str] | None
+    round: int
+    cleared: bool = False
+
+
+@dataclass
 class _Turn:
     """The state of one running turn.
 
@@ -173,6 +232,8 @@ class _Turn:
         started (float): The clock's reading when the turn began.
         images (TurnImages): The pictures shown to the model; none unless the turn has a fetcher.
         transcript (list[ChatMessage]): The rounds so far: assistant messages and tool replies.
+        replies (list[_Shown]): One record per tool reply in the transcript, in order, for
+            clearing replies to make room and putting them back (see :meth:`AgentLoop._make_room`).
         spent (int): Tokens the transcript costs, and the search note once it is joined.
         steps (int): Tool rounds whose calls were answered; a withdrawn round is not counted.
         idle (int): Rounds in a row that added no passage and told the model nothing new.
@@ -189,6 +250,10 @@ class _Turn:
             first round runs again, and never when a limit makes the model answer first.
         bare_base (list[ChatMessage] | None): The base as it was before the search note joined it,
             for an answer round sent while no round has answered to the note; ``None`` until then.
+        carried (int): The passages carried from earlier answers, which the ledger holds as
+            ``[1..carried]``.
+        carried_due (bool): Whether the ``carried`` step still waits for a model call that gets an
+            event.
     """
 
     ctx: ToolContext
@@ -197,6 +262,7 @@ class _Turn:
     started: float
     images: TurnImages
     transcript: list[ChatMessage] = field(default_factory=list)
+    replies: list[_Shown] = field(default_factory=list)
     spent: int = 0
     steps: int = 0
     idle: int = 0
@@ -209,6 +275,8 @@ class _Turn:
     asked_again: bool = False
     note_due: bool = False
     bare_base: list[ChatMessage] | None = None
+    carried: int = 0
+    carried_due: bool = False
 
     def stop(self, reason: str) -> None:
         """Record why the model must answer now, keeping the first cause.
@@ -344,6 +412,39 @@ def _shortened(transcript: Sequence[ChatMessage]) -> list[ChatMessage] | None:
     return kept if cut else None
 
 
+def _error_items(errors: Sequence[ToolReply], offered: frozenset[str]) -> str:
+    """Name a round's error replies for the log: by tool and kind, a tool the turn does not offer by kind alone.
+
+    The model wrote the name of a tool the turn does not offer, so it never reaches the log.
+
+    Args:
+        errors (Sequence[ToolReply]): The round's error replies, in call order.
+        offered (frozenset[str]): The names of the tools the turn offers.
+
+    Returns:
+        str: ``'tool' kind``, or the bare kind, for each reply, separated by commas.
+    """
+    return ", ".join(f"'{reply.action}' {reply.kind}" if reply.action in offered else reply.kind for reply in errors)
+
+
+def _swap(transcript: list[ChatMessage], old: ChatMessage, new: ChatMessage) -> None:
+    """Put ``new`` where ``old`` stands in the transcript, found by identity: two replies may compare equal.
+
+    Args:
+        transcript (list[ChatMessage]): The turn's rounds so far, changed in place.
+        old (ChatMessage): The message to replace.
+        new (ChatMessage): Its replacement.
+
+    Raises:
+        RuntimeError: When ``old`` is not in the transcript, which the turn's records never allow.
+    """
+    for index, message in enumerate(transcript):
+        if message is old:
+            transcript[index] = new
+            return
+    raise RuntimeError("A tool reply the turn recorded is missing from its transcript.")
+
+
 class AgentLoop:
     """Run one chat turn as an agent loop over the turn's tools."""
 
@@ -399,7 +500,7 @@ class AgentLoop:
                 :mod:`~docint.agents.turn.images`); ``None`` shows no picture.
             legend_template (str): Tells the model the pictures are its sources, with an
                 ``{image_legend}`` slot for the lines tying each to its number.
-            max_images (int): The most pictures a turn shows; ``0`` shows none.
+            max_images (int): The most pictures one prompt carries; ``0`` shows none.
             search_note (str): What a first round that called no tool is told when it is asked
                 again: look up what the answer relies on first. Empty, such a reply is the answer.
 
@@ -458,6 +559,7 @@ class AgentLoop:
         message: str,
         ledger: EvidenceLedger,
         pinned: Sequence[NodeWithScore] | None = None,
+        carried: Sequence[NodeWithScore] = (),
     ) -> Iterator[AgentProgress | str | AgentResult]:
         """Run the turn.
 
@@ -469,6 +571,11 @@ class AgentLoop:
             pinned (Sequence[NodeWithScore] | None): The passages the user pinned: the turn then
                 answers from them alone, in one round that offers no tools (see :meth:`_scoped`).
                 ``None`` for a turn without a scope; an empty scope is still one, never widened.
+            carried (Sequence[NodeWithScore]): The passages the window lists as carried, in its
+                order. They are seeded into the ledger as ``[1..k]`` before the first round (see
+                :func:`~docint.agents.turn.passages.carried_entry`), and the turn's first model
+                call that gets an event opens with a ``carried`` step counting them (see
+                :meth:`_open_carried`). A scoped turn ignores them.
 
         Yields:
             AgentProgress | str | AgentResult: Steps and answer text as they come, the label
@@ -503,8 +610,17 @@ class AgentLoop:
                 round_room=self._budget.round_room,
             ),
         )
+        if carried:
+            # Numbered first; the step saying so waits for a model call that gets an event.
+            ledger.add([carried_entry(scored) for scored in carried])
+            turn.carried, turn.carried_due = len(ledger), True
         while True:
             limit = self._limit(turn)
+            # No call has carried the replies of the round just answered, so they are not cleared.
+            if limit == "context_budget" and self._make_room(
+                turn, self._room_needed(turn), seen_through=turn.steps - 1
+            ):
+                limit = self._limit(turn)
             if limit is not None:
                 turn.stop(limit)
                 break
@@ -541,10 +657,12 @@ class AgentLoop:
                 yield from self._answer(turn, streamed)
                 return
             held = len(turn.ctx.ledger)
-            withdrawn = yield from self._tool_round(turn, streamed.done)
-            if withdrawn:
+            shown = yield from self._tool_round(turn, streamed.done)
+            if shown is None:
                 break
-            self._show_pictures(turn, held)
+            named, read = shown
+            # The pictures of what the round admitted, showed or named that the prompt lacks; retired ones only if read.
+            self._show_pictures(turn, sorted({*range(held + 1, len(turn.ctx.ledger) + 1), *named}), read=read)
         yield from self._final_round(turn)
 
     def _limit(self, turn: _Turn) -> str | None:
@@ -563,13 +681,186 @@ class AgentLoop:
             return "round_budget"
         if self._time_left(turn) <= 0:
             return "time_budget"
-        due = message_cost(self._search_note, self._ratio) if turn.note_due else 0
-        # One full reply, and the envelope of the message that asks for it.
-        if self._room - turn.spent - due < self._calls.full_reply + MESSAGE_OVERHEAD_TOKENS:
+        if self._room - turn.spent < self._room_needed(turn):
             return "context_budget"
         if turn.idle >= IDLE_ROUNDS:
             return "idle"
         return None
+
+    def _room_needed(self, turn: _Turn) -> int:
+        """Return the room the next round needs.
+
+        Args:
+            turn (_Turn): The turn.
+
+        Returns:
+            int: Tokens for one full reply, the envelope of the message that asks for it, and a
+            search note still due, which the next round would carry.
+        """
+        due = message_cost(self._search_note, self._ratio) if turn.note_due else 0
+        return self._calls.full_reply + MESSAGE_OVERHEAD_TOKENS + due
+
+    def _make_room(self, turn: _Turn, need: int, *, seen_through: int) -> bool:
+        """Clear tool replies the model has read, then retire pictures it has seen, until the room left holds ``need``.
+
+        The replies a model call that began has carried, those of rounds up to ``seen_through``,
+        are cleared to their stubs first, oldest first (see :meth:`_stubs`); a stub still names
+        its passages for ``read(n)``. Only then are the picture messages attached after those
+        rounds retired, oldest first (see
+        :meth:`~docint.agents.turn.images.TurnImages.retire_oldest`). Clearing is priced first:
+        when clearing and retiring all of them would still fall short, nothing changes. A
+        cleared read is forgotten, so the same read is answered anew with its passage. Nothing is
+        cleared or retired once the replies were cut after an overflow.
+
+        Args:
+            turn (_Turn): The turn.
+            need (int): Tokens the room left must hold.
+            seen_through (int): The last tool round whose replies and pictures the model has seen.
+
+        Returns:
+            bool: Whether the room left holds ``need`` now.
+        """
+        if turn.shortened:
+            return False
+        if self._room - turn.spent >= need:
+            return True
+        stubs = self._stubs(turn, seen_through=seen_through)
+        spare = sum(saves for _, _, saves in stubs) + turn.images.retirable(seen_through=seen_through)
+        if self._room - turn.spent + spare < need:
+            return False
+        cleared, freed = self._clear(turn, stubs, need=need)
+        retired, more = self._retire(turn, need, seen_through=seen_through)
+        logger.info(
+            "An agent turn cleared {} earlier tool replies and {} picture messages to go on, freeing {} tokens",
+            cleared,
+            retired,
+            freed + more,
+        )
+        return True
+
+    def _clear(self, turn: _Turn, stubs: Sequence[tuple[_Shown, ChatMessage, int]], *, need: int) -> tuple[int, int]:
+        """Cut replies to their stubs in the order given until the room left holds ``need``.
+
+        Args:
+            turn (_Turn): The turn.
+            stubs (Sequence[tuple[_Shown, ChatMessage, int]]): The replies that may be cleared (see
+                :meth:`_stubs`), oldest first.
+            need (int): Tokens the room left must hold.
+
+        Returns:
+            tuple[int, int]: The replies cleared and the tokens that freed.
+        """
+        cleared = freed = 0
+        for record, stub, saves in stubs:
+            if self._room - turn.spent >= need:
+                break
+            _swap(turn.transcript, record.message, stub)
+            turn.spent -= saves
+            record.message, record.cleared = stub, True
+            reply = record.reply
+            # Remembered, the read would be answered "Already called" for a passage its reply no longer shows.
+            if isinstance(reply, PassageReply) and reply.depends_on and record.key is not None:
+                turn.ctx.answered.pop(record.key, None)
+            cleared, freed = cleared + 1, freed + saves
+        return cleared, freed
+
+    def _retire(self, turn: _Turn, need: int, *, seen_through: int) -> tuple[int, int]:
+        """Retire picture messages the model has seen, oldest first, until the room left holds ``need``.
+
+        Args:
+            turn (_Turn): The turn, the replies it may clear already cleared.
+            need (int): Tokens the room left must hold.
+            seen_through (int): The last tool round whose pictures the model has seen.
+
+        Returns:
+            tuple[int, int]: The picture messages retired and the tokens that freed.
+        """
+        retired = freed = 0
+        while self._room - turn.spent < need:
+            taken = turn.images.retire_oldest(turn.transcript, seen_through=seen_through)
+            if taken is None:
+                break
+            turn.transcript, saves = taken
+            turn.spent -= saves
+            retired, freed = retired + 1, freed + saves
+        return retired, freed
+
+    def _stubs(self, turn: _Turn, *, seen_through: int) -> list[tuple[_Shown, ChatMessage, int]]:
+        """Return the replies that may be cleared, oldest first, each with its stub and what clearing it frees.
+
+        A reply may be cleared when its round is at most ``seen_through``, it is not cleared yet,
+        it showed or named passages and is no error reply (which says why its call was not
+        answered), and its stub (see :func:`~docint.agents.turn.tools.cleared_text`) costs less
+        than the message holding it.
+
+        Args:
+            turn (_Turn): The turn.
+            seen_through (int): The last tool round whose replies the model has read.
+
+        Returns:
+            list[tuple[_Shown, ChatMessage, int]]: Per reply, its record, its stub under the
+            reply's role and call id, and the tokens clearing it frees.
+        """
+        stubs: list[tuple[_Shown, ChatMessage, int]] = []
+        for record in turn.replies:
+            reply = record.reply
+            if record.round > seen_through or record.cleared or not isinstance(reply, PassageReply) or reply.error:
+                continue
+            stub = ChatMessage(
+                role=MessageRole.TOOL,
+                content=cleared_text(reply),
+                additional_kwargs=dict(record.original.additional_kwargs),
+            )
+            freed = self._cost(record.message) - self._cost(stub)
+            if freed > 0:
+                stubs.append((record, stub, freed))
+        return stubs
+
+    def _restore(self, turn: _Turn) -> None:
+        """Put back for a forced answer what making room took out: retired pictures first, then cleared replies.
+
+        Each kind comes back newest first while each fits the room left, and the first that does
+        not fit stops it; a picture message must fit the prompt's cap too, and one holding a
+        picture a read showed again stays retired (see
+        :meth:`~docint.agents.turn.images.TurnImages.restore`). Pictures go first: making room
+        took them out last, since a visual answer rests on them. Nothing is put back once the
+        replies were cut after an overflow.
+
+        Args:
+            turn (_Turn): The turn, about to answer.
+        """
+        if turn.shortened:
+            return
+        retired = turn.images.retired
+        turn.transcript, grown, back = turn.images.restore(turn.transcript, room=self._room - turn.spent)
+        turn.spent += grown
+        if back:
+            logger.info("An agent turn restored {} of its {} retired picture messages for its answer", back, retired)
+        cleared = [record for record in turn.replies if record.cleared]
+        restored = 0
+        for record in reversed(cleared):
+            grows = self._cost(record.original) - self._cost(record.message)
+            if grows > self._room - turn.spent:
+                break
+            _swap(turn.transcript, record.message, record.original)
+            turn.spent += grows
+            record.message, record.cleared = record.original, False
+            restored += 1
+        if restored:
+            logger.info(
+                "An agent turn restored {} of its {} cleared tool replies for its answer", restored, len(cleared)
+            )
+
+    def _cost(self, message: ChatMessage) -> int:
+        """Return what a tool message costs in the prompt, as the transcript is priced.
+
+        Args:
+            message (ChatMessage): A tool reply or its stub.
+
+        Returns:
+            int: Its text at the turn's ratio, and its envelope.
+        """
+        return message_cost(message.content or "", self._ratio)
 
     def _join_search_note(self, turn: _Turn) -> None:
         """Join the search note to the user's message as the first round runs again, its cost now spent.
@@ -592,9 +883,11 @@ class AgentLoop:
         """Stream a tool round or the forced answer; a round refused with pictures goes once more without them.
 
         A round whose request carries pictures and fails before its first event is taken as
-        refusing them, as ``VisualImagesMixin`` takes it: every picture is taken back (see
-        :meth:`~docint.agents.turn.images.TurnImages.drop`) and the round is sent again without
-        any, once. Should that fail too, it fails as any round does; a dead endpoint does.
+        refusing them, as ``VisualImagesMixin`` takes it: every picture still attached is taken
+        back (see :meth:`~docint.agents.turn.images.TurnImages.drop`) and the round is sent again
+        without any, once. Should that fail too, it fails as any round does; a dead endpoint does.
+        While the turn's ``carried`` step is due, each call opens with it (see
+        :meth:`_open_carried`).
 
         Args:
             turn (_Turn): The turn.
@@ -602,31 +895,47 @@ class AgentLoop:
             hold (bool): Whether the round is held whole, its text released by nothing but its end.
 
         Yields:
-            AgentProgress | str: Answer text the round releases; it opens with no step.
+            AgentProgress | str: The ``carried`` step while it is due, then answer text the round
+            releases.
 
         Returns:
             _Streamed | None: How the round went; ``None`` when no model slot came free.
         """
         retried = False
         while True:
-            carried = turn.images.count
+            pictures = turn.images.count
             streamed = yield from self._stream(
                 turn,
                 self._answer_prompt(turn) if answer else [*turn.base, *turn.transcript],
                 tool_choice="none" if answer else "auto",
                 wait=self._slot_wait(turn, answer=answer),
+                opening=(lambda: self._open_carried(turn)) if turn.carried_due else None,
                 hold=hold,
             )
-            if streamed is None or streamed.began or not carried or retried:
+            if streamed is None or streamed.began or not pictures or retried:
                 return streamed
             logger.warning(
                 "An agent round carrying {} pictures failed before its first event ({}); it is sent again without them",
-                carried,
+                pictures,
                 type(streamed.error).__name__,
             )
             turn.transcript, freed = turn.images.drop(turn.transcript)
             turn.spent -= freed
             retried = True
+
+    def _open_carried(self, turn: _Turn) -> AgentProgress:
+        """Record the step a turn holding carried passages opens with, once: its first call that got an event.
+
+        A call refused before any event has shown nothing, so the caller can still answer another way.
+
+        Args:
+            turn (_Turn): The turn, its carried passages seeded.
+
+        Returns:
+            AgentProgress: The ``carried`` step, step 0, counting the passages seeded.
+        """
+        turn.carried_due = False
+        return self._step(turn, "carried", "", turn.carried, step=0)
 
     def _answer_prompt(self, turn: _Turn) -> list[ChatMessage]:
         """Return what an answer round is sent: the turn so far, the final note joined last.
@@ -658,15 +967,23 @@ class AgentLoop:
         # A started turn owes its answer: it waits the time left, and at least the usual wait.
         return max(MODEL_SLOT_WAIT_S, time_left) if answer and turn.shown else min(MODEL_SLOT_WAIT_S, time_left)
 
-    def _show_pictures(self, turn: _Turn, held: int) -> None:
-        """Show the model the pictures a round admitted, in one message after its tool replies.
+    def _show_pictures(self, turn: _Turn, numbers: Sequence[int], *, read: Collection[int] = ()) -> None:
+        """Show the model the new pictures among a round's passages, in one message after its tool replies.
 
         Args:
             turn (_Turn): The turn, the round's tool replies in its transcript.
-            held (int): How many passages the ledger held before the round's calls.
+            numbers (Sequence[int]): The passages the round admitted, showed or named, by number,
+                ascending; those whose pictures the prompt carries are passed over, and so are
+                those whose pictures were retired, unless the round read them.
+            read (Collection[int]): The passages the round's reads showed, by number.
         """
-        admitted = list(enumerate(turn.ctx.ledger.entries()[held:], start=held + 1))
-        shown = turn.images.attach(admitted, room=self._room - turn.spent)
+        entries = turn.ctx.ledger.entries()
+        shown = turn.images.attach(
+            [(number, entries[number - 1]) for number in numbers],
+            room=self._room - turn.spent,
+            after_round=turn.steps,
+            read=read,
+        )
         if shown is not None:
             message, cost = shown
             turn.transcript.append(message)
@@ -795,7 +1112,7 @@ class AgentLoop:
             steps=turn.steps,
             actions=list(turn.actions),
             reason=turn.reason,
-            images_attached=turn.images.count,
+            images_attached=turn.images.shown,
             reasoning="\n\n".join(turn.reasoning) or None,
         )
 
@@ -852,6 +1169,8 @@ class AgentLoop:
     def _final_round(self, turn: _Turn) -> Iterator[AgentProgress | str | AgentResult]:
         """Make the model answer with no tool to choose, and end the turn.
 
+        Pictures retired and replies cleared to make room are put back first, pictures first, as
+        far as they fit (see :meth:`_restore`).
         A reply that holds tool calls and no text is sent once more, declaring no tools (see
         :meth:`_resend_without_tools`).
 
@@ -869,6 +1188,7 @@ class AgentLoop:
                 when the resend overflows.
             Exception: The endpoint's error, when the answer or its resend fails.
         """
+        self._restore(turn)
         logger.info("An agent turn answers after {} tool rounds ({})", turn.steps, turn.reason)
         while True:
             streamed = yield from self._round(turn, answer=True)
@@ -1037,7 +1357,8 @@ class AgentLoop:
 
         Args:
             turn (_Turn): The turn.
-            action (str): A note, or the name of the tool that answered the call.
+            action (str): A note, a turn's opening (``seed`` or ``carried``), or the name of the
+                tool that answered the call.
             detail (str): The note's text, or the call's main argument.
             found (int): Passages the call admitted or extended.
             step (int | None): The round it belongs to; the last tool round by default.
@@ -1064,13 +1385,22 @@ class AgentLoop:
             unchecked=extra.get("unchecked"),
         )
 
-    def _tool_round(self, turn: _Turn, done: RoundDone) -> Generator[AgentProgress, None, bool]:
+    def _tool_round(
+        self, turn: _Turn, done: RoundDone
+    ) -> Generator[AgentProgress, None, tuple[tuple[int, ...], tuple[int, ...]] | None]:
         """Answer a round's calls and add the round to the transcript, or withdraw it when it does not fit.
 
         The round's own cost, its assistant message and the least reply each call needs, calls
-        past the round's limit included, must fit the room left. A round that does not is
-        withdrawn: its calls never reach the transcript, so they need no replies, it is no tool
-        round, and the model answers next (``context_budget``).
+        past the round's limit included, must fit the room left. Short of room for its replies
+        at their longest, the replies and pictures of earlier rounds, which this round's call
+        has seen, are cleared and retired to make room for them, else for the least (see
+        :meth:`_make_room`). A round that still does not fit is withdrawn: its calls never reach
+        the transcript, so they need no replies, it is no tool round, and the model answers next
+        (``context_budget``).
+
+        A round that got error replies logs one INFO line naming them by tool and kind (see
+        :func:`_error_items`): the model's arguments, and the name of a tool the turn does not
+        offer, never reach the log.
 
         Args:
             turn (_Turn): The turn.
@@ -1080,7 +1410,10 @@ class AgentLoop:
             AgentProgress: The round's note, if it wrote text, then one step per call its tool answered.
 
         Returns:
-            bool: Whether the round was withdrawn.
+            tuple[tuple[int, ...], tuple[int, ...]] | None: The passages its replies showed or
+            named (each answered reply's ``numbers``, error replies aside), and those its reads
+            showed (each answered reply's ``depends_on``, a read's fresh or from memory), each in
+            call order and once; ``None`` when the round was withdrawn.
         """
         number = turn.steps + 1
         note = " ".join(done.text.split())[:NOTE_CHARS]
@@ -1100,13 +1433,19 @@ class AgentLoop:
         asked = message_cost(written, self._ratio)
         prepared = self._calls.prepare(done.calls, turn.ctx)
         room = self._room - turn.spent - asked
-        if room < self._calls.least(prepared):
+        least, most = self._calls.least(prepared), self._calls.most(prepared)
+        if room < most:
+            # This round's call has read every round before it: room for its longest replies, else its shortest.
+            if not self._make_room(turn, asked + most, seen_through=turn.steps):
+                self._make_room(turn, asked + least, seen_through=turn.steps)
+            room = self._room - turn.spent - asked
+        if room < least:
             logger.warning(
                 "An agent round's {} tool calls do not fit the room left; it is withdrawn and the model answers",
                 len(done.calls),
             )
             turn.stop("context_budget")
-            return True
+            return None
         turn.steps = number
         answered = self._calls.answer(prepared, turn.ctx, room=room, time_left=lambda: self._time_left(turn))
         if answered.failed:
@@ -1116,15 +1455,28 @@ class AgentLoop:
         turn.spent += asked
         found = 0
         news = False
-        for call, reply in zip(done.calls, answered.replies, strict=True):
-            turn.transcript.append(
-                ChatMessage(role=MessageRole.TOOL, content=reply.text, additional_kwargs={"tool_call_id": call.id})
+        for call, ready, reply in zip(done.calls, prepared.calls, answered.replies, strict=True):
+            message = ChatMessage(
+                role=MessageRole.TOOL, content=reply.text, additional_kwargs={"tool_call_id": call.id}
             )
+            turn.transcript.append(message)
+            turn.replies.append(_Shown(message=message, original=message, reply=reply, key=ready.key, round=number))
             turn.spent += message_cost(reply.text, self._ratio)
             found += reply.found
             if not reply.error:
                 news = news or reply.informative
                 yield self._step(turn, reply.action, reply.detail, reply.found, trail=reply.trail)
+        errors = [reply for reply in answered.replies if reply.error]
+        if errors:
+            logger.info(
+                "An agent round's {} of {} tool calls got error replies: {}",
+                len(errors),
+                len(done.calls),
+                _error_items(errors, self._registry.names),
+            )
         # A passage, or an answer that told the model something without one, ends the run of idle rounds.
         turn.idle = 0 if found or news else turn.idle + 1
-        return False
+        passages = [reply for reply in answered.replies if isinstance(reply, PassageReply) and not reply.error]
+        named = dict.fromkeys(number for reply in passages for number in reply.numbers)
+        read = dict.fromkeys(number for reply in passages for number in reply.depends_on)
+        return tuple(named), tuple(read)

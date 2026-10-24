@@ -26,7 +26,15 @@ from llama_index.core.schema import MetadataMode, NodeWithScore
 
 from docint.agents.assessment.ledger import kept_ranges
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
-from docint.agents.turn.tools import ToolContext, ToolReply, ToolWork, error_reply, passage_reply, trail_detail
+from docint.agents.turn.tools import (
+    ErrorKind,
+    ToolContext,
+    ToolReply,
+    ToolWork,
+    error_reply,
+    passage_reply,
+    trail_detail,
+)
 from docint.core.search.fields import SEARCH_FIELDS, search_field_spec
 from docint.core.search.fulltext import INDEX_WORD_CLASS, index_pieces, index_tokens, parse_keywords
 from docint.core.search.index import SEARCH_MAX_TOKEN_LEN
@@ -41,6 +49,7 @@ TERM_CONTEXT_CHARS = 80
 #: Characters the keyword checks may take in the validator's prompt; whole lines only.
 KEYWORD_CHECKS_CHARS = 800
 
+# Each of the four problems below is also the error kind of the reply that refuses the call.
 #: Why a keyword call cannot run: none of its words is long enough for the index.
 NO_USABLE_WORD = "no_usable_word"
 #: Why a keyword call cannot run: the field matches one exact value, and several words were given.
@@ -430,7 +439,8 @@ class KeywordTool:
         detail = trail_detail(words)
         refusal = self._refusal(words, field)
         if refusal is not None:
-            return error_reply(self.name, refusal, detail=detail)
+            message, kind = refusal
+            return error_reply(self.name, message, kind=kind, detail=detail)
         return ToolWork(
             detail=detail,
             fetch=functools.partial(self._matcher.run, words, field),
@@ -462,7 +472,7 @@ class KeywordTool:
             return None
         return json.dumps([key_field, sorted(tokens), sorted(str(value) for value in values)], ensure_ascii=False)
 
-    def _refusal(self, words: str, field: str) -> str | None:
+    def _refusal(self, words: str, field: str) -> tuple[str, ErrorKind] | None:
         """Say why a call cannot run, in the order its problems are found.
 
         Args:
@@ -470,31 +480,34 @@ class KeywordTool:
             field (str): The field.
 
         Returns:
-            str | None: The message for an error reply; ``None`` when the call can run.
+            tuple[str, ErrorKind] | None: The message for an error reply and its kind, which for a
+            problem the match's check names is that problem; ``None`` when the call can run.
         """
         if not words:
-            return "call keyword with the words to match."
+            return "call keyword with the words to match.", "missing_argument"
         if len(words) > MAX_KEYWORD_CHARS:
-            return f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones."
+            return f"keep the words within {MAX_KEYWORD_CHARS} characters; use the most telling ones.", "too_long"
         if field not in self._matcher.fields:
-            return f"field must be one of: {', '.join(self._matcher.fields)}."
+            return f"field must be one of: {', '.join(self._matcher.fields)}.", "bad_field"
         problem = self._matcher.check(words, field)
         if problem == NO_USABLE_WORD:
-            return "give at least one word of two or more characters."
+            return "give at least one word of two or more characters.", NO_USABLE_WORD
         if problem == ONE_VALUE_ONLY:
-            return f"{field} matches one exact value; give a single one."
+            return f"{field} matches one exact value; give a single one.", ONE_VALUE_ONLY
         if problem == UNINDEXABLE_WORD:
-            return (
+            message = (
                 "the index cannot match a single letter or digit, alone, such as the D in vitamin D, or where dots "
                 "or signs split a word, such as 2.5, U.S. or p<0.05, nor a word with no letter or digit at all; "
                 "check the other words only, or use search."
             )
+            return message, UNINDEXABLE_WORD
         if problem == LONG_WORD:
-            return (
+            message = (
                 f"the index reads a word only up to its first {SEARCH_MAX_TOKEN_LEN} characters, so a longer one "
                 "cannot be checked exactly; check a shorter beginning of it, which also matches the longer words "
                 "it begins."
             )
+            return message, LONG_WORD
         return None
 
     def _answer(self, field: str, detail: str, fetched: KeywordResult, ctx: ToolContext) -> ToolReply:
@@ -509,7 +522,8 @@ class KeywordTool:
         Returns:
             ToolReply: The count note, then the passages, as a :class:`PassageReply` that is news even
             when it admits nothing, so the same call can be answered by number. A plain reply when
-            the count failed, which is never remembered, so a retry runs again.
+            the count failed, which is never remembered, so a retry runs again. Either keeps the
+            note when cleared to make room: no ``read`` shows a count again.
         """
         nodes = fetched.nodes
         if field == DEFAULT_KEYWORD_FIELD:
@@ -520,5 +534,7 @@ class KeywordTool:
         if fetched.unchecked > 0:
             trail["unchecked"] = fetched.unchecked
         if fetched.matches is None:
-            return ToolReply(text=shown.text, found=shown.found, action=shown.action, detail=shown.detail, trail=trail)
-        return replace(shown, informative=True, trail=trail)
+            return ToolReply(
+                text=shown.text, found=shown.found, action=shown.action, detail=shown.detail, trail=trail, keep=note
+            )
+        return replace(shown, informative=True, trail=trail, keep=note)

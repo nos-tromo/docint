@@ -22,6 +22,8 @@ const AGENT_TRAIL_KEYS = [
   'chat.agent_trail_hide',
   'chat.agent_trail_seed_one',
   'chat.agent_trail_seed_other',
+  'chat.agent_trail_carried_one',
+  'chat.agent_trail_carried_other',
   'chat.agent_trail_search_one',
   'chat.agent_trail_search_other',
   'chat.agent_trail_search_images_one',

@@ -6,10 +6,11 @@ from typing import Any, Literal, Protocol
 AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
-AgentAction = Literal["seed", "search", "answer", "note", "search_images", "keyframes", "keyword", "read"]
+AgentAction = Literal["seed", "carried", "search", "answer", "note", "search_images", "keyframes", "keyword", "read"]
 """What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
-round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages;
-``answer`` is found only in trails stored by the earlier assessment pipeline."""
+round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages, and
+``carried`` a follow-up's with the passages its earlier answers cite; ``answer`` is found only in
+trails stored by the earlier assessment pipeline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +22,7 @@ class AgentProgress:
 
     Attributes:
         step (int): The round the step belongs to, from ``1``; a scoped turn's
-            ``seed`` is ``0``.
+            ``seed`` and a follow-up's ``carried`` are ``0``.
         action (AgentAction): What the step did.
         detail (str): The call's main argument, such as a model-written search
             query, or a note's text; empty when there is none. Shown to the user,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import pkgutil
 import re
@@ -34,12 +35,24 @@ from docint.agents.assessment.ledger import (
     MARKER_RESERVE_CHARS,
     MIN_TEXT_CHARS,
     WINDOW_JOIN,
+    EvidenceLedger,
+    head_spans,
     passage_costs,
     passage_parts,
     stamp,
 )
+from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.calls import FAILED_REPLY, RoundCalls
-from docint.agents.turn.passages import HEADER_CHARS, NO_NEW_PASSAGES, _fits, _plan
+from docint.agents.turn.passages import (
+    HEADER_CHARS,
+    LABEL_CHARS,
+    NO_NEW_PASSAGES,
+    _fits,
+    _plan,
+    carried_entry,
+    passage_label,
+    render_entry,
+)
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
@@ -50,6 +63,7 @@ from docint.agents.turn.tools import (
     ToolRegistry,
     ToolReply,
     ToolWork,
+    cleared_text,
     error_reply,
     nested_too_deeply,
     passage_reply,
@@ -337,6 +351,43 @@ def test_a_call_missing_its_argument_gets_the_tools_own_error(name: str, argumen
 
     assert (reply.text, reply.found, reply.action) == (expected, 0, name)
     assert search.queries == []
+
+
+def test_an_error_reply_must_name_its_kind() -> None:
+    """The kind is keyword-only and has no default, so a new error reply cannot go without one."""
+    kind = inspect.signature(error_reply).parameters["kind"]
+
+    assert (kind.kind, kind.default) == (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.empty)
+    assert error_reply("search", "invented", kind="failed").kind == "failed"
+
+
+@pytest.mark.parametrize(
+    ("call", "kind"),
+    [
+        pytest.param(tool_call("nope"), "unknown_tool", id="unknown-tool"),
+        pytest.param(ToolCall(id="call_0", name="read", arguments="[1]"), "bad_arguments", id="not-an-object"),
+        pytest.param(
+            ToolCall(id="call_0", name="read", arguments='{"n": ' + "[" * 600 + "]" * 600 + "}"),
+            "nested_arguments",
+            id="nested-too-deeply",
+        ),
+        pytest.param(tool_call("read", n="drei"), "bad_argument", id="read-not-a-number"),
+        pytest.param(tool_call("read"), "bad_argument", id="read-without-n"),
+        pytest.param(tool_call("read", n=9), "no_such_passage", id="read-no-such-passage"),
+        pytest.param(tool_call("search"), "missing_argument", id="search-without-query"),
+        pytest.param(tool_call("search", query="   "), "missing_argument", id="search-blank-query"),
+    ],
+)
+def test_every_error_reply_names_its_kind(call: ToolCall, kind: str) -> None:
+    """Each way the registry and the search and read tools refuse a call is told apart by a kind token.
+
+    Args:
+        call (ToolCall): The call the model made.
+        kind (str): Why it was refused.
+    """
+    reply = ToolRegistry([SearchTool(ScriptedSearch()), ReadTool()]).call(call, tool_context())
+
+    assert reply.error and reply.kind == kind
 
 
 def test_a_two_phase_run_answers_as_call_does() -> None:
@@ -710,6 +761,87 @@ def test_a_read_is_shown_anew_once_its_passage_gained_a_match() -> None:
     assert ctx.ledger.entries()[0].node.get_content() == body
 
 
+#: An invented harbour regulation kept as one section, longer than one reply shows.
+HARBOUR_RULES = " ".join(
+    f"Absatz {line}: Die Hafenordnung regelt Liegeplätze, Gebühren und Fristen für Anmeldungen am Kai."
+    for line in range(1, 71)
+)
+
+
+def _carried_section() -> NodeWithScore:
+    """Build the regulation section an earlier answer cited, as the store keeps it: without match spans.
+
+    Returns:
+        NodeWithScore: The section.
+    """
+    return scored_node("hafenordnung-4", HARBOUR_RULES, filename="hafenordnung.pdf", page=4)
+
+
+def test_a_carried_entry_stamps_its_opening_as_its_match_on_a_copy() -> None:
+    """A carried passage counts the opening packing keeps as its match; the passage loaded is never written to."""
+    section = _carried_section()
+
+    entry = carried_entry(section)
+
+    assert entry.node.metadata[MATCH_SPANS_KEY] == [[start, end] for start, end in head_spans(HARBOUR_RULES)]
+    assert MATCH_SPANS_KEY not in section.node.metadata
+    assert (entry.node.node_id, entry.node.get_content(), entry.score) == ("hafenordnung-4", HARBOUR_RULES, 1.0)
+
+
+def test_a_carried_entry_keeps_the_matches_a_passage_already_marks() -> None:
+    """A passage whose spans already mark a match is copied as it is."""
+    window = scored_node(
+        "hafenordnung-4", HARBOUR_RULES, filename="hafenordnung.pdf", **{MATCH_SPANS_KEY: [[900, 940]]}
+    )
+
+    entry = carried_entry(window)
+
+    assert entry.node.metadata[MATCH_SPANS_KEY] == [[900, 940]]
+    assert entry.node is not window.node
+
+
+def test_a_search_window_of_a_carried_section_extends_it() -> None:
+    """A search finding a carried section again merges its window into the entry, which then shows the window's match.
+
+    Unstamped, the section would refuse the window as shown before, and the match deep in it could not be seen.
+    """
+    ctx = tool_context()
+    anchor = "Absatz 60:"
+    start = HARBOUR_RULES.index(anchor) - 200
+    window = scored_node(
+        "hafenordnung-4",
+        HARBOUR_RULES[start : start + 500],
+        filename="hafenordnung.pdf",
+        page=4,
+        **{MATCH_SPANS_KEY: [[200, 200 + len(anchor)]]},
+    )
+    ctx.ledger.add([carried_entry(_carried_section())])
+    unstamped = EvidenceLedger(cap=LEDGER_CAP)
+    unstamped.add([_carried_section()])
+    assert anchor not in render_entry(ctx.ledger.entries()[0], 1, ctx)
+
+    changed = ctx.ledger.add([window])
+
+    assert changed == [(1, window)]
+    assert unstamped.add([window]) == []
+    assert anchor in render_entry(ctx.ledger.entries()[0], 1, ctx)
+
+
+def test_passage_label_is_one_line_cut_and_defused() -> None:
+    """A label is a passage's header on one line, defused and cut to LABEL_CHARS; without a header, its opening."""
+    long_name = "hafenfest_jahresbericht_" * 8 + ".pdf"
+    defused = scored_node("bericht-1", PROGRAMME, filename=f"hafen  {SENTINEL}\nbericht.pdf", page=2)
+    cut = scored_node("bericht-2", PROGRAMME, filename=long_name, page=3)
+    headless = scored_node("bericht-3", f"\n  Das Hafenfest   wurde verschoben.\n\n{SENTINEL} Stände ab zehn.", tag="x")
+
+    label = passage_label(cut, llm_view)
+
+    assert passage_label(defused, llm_view) == "filename: hafen (assessment); bericht.pdf; page: 2"
+    assert (len(label), label[-1]) == (LABEL_CHARS, "…")
+    assert label.startswith(f"filename: {long_name[:60]}")
+    assert passage_label(headless, llm_view) == "Das Hafenfest wurde verschoben.; (assessment) Stände ab zehn."
+
+
 def test_a_remembered_read_waits_for_finish_when_its_round_may_grow_the_passage() -> None:
     """A read remembered in an earlier round is decided at finish, after a search before it in its round grew [1]."""
 
@@ -761,6 +893,22 @@ def test_an_unchanged_remembered_read_is_answered_from_memory_at_finish() -> Non
 
     assert (prepared.reply, prepared.fetch) == (None, None)
     assert registry.finish(prepared, None, ctx).text == "Already called read with these arguments; see [1]."
+
+
+def test_a_call_answered_from_memory_names_its_passages_and_a_repeated_read_the_one_it_read() -> None:
+    """A repeat names the passages the first answer did; a read's also says which it read, so its picture can follow."""
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage(), _weather()]))
+    registry.call(tool_call("search", query="Hafenfest Sonntag"), ctx)
+    registry.call(tool_call("read", n=2), ctx)
+
+    search = registry.call(tool_call("search", query="hafenfest sonntag"), ctx)
+    read = registry.call(tool_call("read", n=2), ctx)
+
+    assert isinstance(search, PassageReply) and isinstance(read, PassageReply)
+    assert (search.numbers, search.depends_on, search.found, search.informative) == ((1, 2), (), 0, False)
+    assert (read.numbers, read.depends_on, read.found, read.informative) == ((2,), (2,), 0, False)
+    assert read.text == "Already called read with these arguments; see [2]."
 
 
 def test_a_read_finished_after_an_extending_search_in_its_round_shows_the_growth() -> None:
@@ -938,10 +1086,11 @@ def test_a_reply_says_whether_the_tool_answered_the_call() -> None:
         registry.call(tool_call("read", n=9), ctx),
     ]
 
-    assert [type(reply) for reply in answers] == [PassageReply, ToolReply, PassageReply]
+    assert [type(reply) for reply in answers] == [PassageReply, PassageReply, PassageReply]
     assert [reply.error for reply in answers] == [False, False, False]
+    assert [reply.kind for reply in answers] == ["", "", ""]
     assert [reply.error for reply in errors] == [True, True, True, True]
-    assert error_reply("search", "invented").error is True
+    assert error_reply("search", "invented", kind="failed").error is True
     assert ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="").error is False
 
 
@@ -1174,7 +1323,7 @@ def test_a_repeat_key_that_raises_fails_its_call_alone(loguru_caplog: LogCapture
     answered = calls.answer(prepared, ctx, room=10_000, time_left=lambda: 60.0)
 
     assert (prepared.failed, answered.failed) == (1, 1)
-    assert answered.replies[0] == error_reply("count", FAILED_REPLY)
+    assert answered.replies[0] == error_reply("count", FAILED_REPLY, kind="failed")
     assert shown_numbers(answered.replies[1].text) == [1]
     assert search.queries == ["Hafenfest"]
     assert loguru_caplog.messages == ["An agent tool call could not be prepared: RuntimeError"]
@@ -1260,14 +1409,48 @@ def test_a_plain_reply_is_not_remembered_whatever_it_carries() -> None:
 
 
 def test_a_reply_is_by_default_no_news_and_carries_no_trail() -> None:
-    """The two new fields follow ``error`` and default to nothing, in a plain reply and a passage reply alike."""
+    """The fields after ``error`` default to nothing, in a plain reply and a passage reply alike."""
     plain = ToolReply(text="Keine neuen Passagen.", found=0, action="search", detail="")
     shown = PassageReply(text="[1]", found=1, action="search", detail="Hafenfest", numbers=(1,))
 
-    assert [(reply.informative, reply.trail) for reply in (plain, shown)] == [(False, None), (False, None)]
-    base = ["text", "found", "action", "detail", "error", "informative", "trail"]
+    defaults = [(reply.informative, reply.trail, reply.kind, reply.keep) for reply in (plain, shown)]
+    assert defaults == [(False, None, "", "")] * 2
+    # What is left of a reply once cleared, ``keep``, comes last: it is the last thing to happen to a reply.
+    base = ["text", "found", "action", "detail", "error", "informative", "trail", "kind", "keep"]
     assert [field.name for field in fields(ToolReply)] == base
     assert [field.name for field in fields(PassageReply)] == [*base, "numbers", "depends_on"]
+
+
+@pytest.mark.parametrize(
+    ("numbers", "keep", "cleared"),
+    [
+        ((1,), "", "Cleared to make room: this reply showed [1]; read(n) shows a passage again."),
+        ((1, 3, 4), "", "Cleared to make room: this reply showed [1], [3], [4]; read(n) shows a passage again."),
+        ((), "", "Cleared to make room: this reply showed no passages."),
+        (
+            (2,),
+            "3 Treffer.",
+            "3 Treffer.\n\nCleared to make room: this reply showed [2]; read(n) shows a passage again.",
+        ),
+        ((), "0 Treffer.", "0 Treffer.\n\nCleared to make room: this reply showed no passages."),
+    ],
+    ids=["one", "several", "none", "kept-text-first", "kept-text-and-none"],
+)
+def test_a_cleared_reply_keeps_its_kept_text_then_names_its_passages(
+    numbers: tuple[int, ...], keep: str, cleared: str
+) -> None:
+    """A reply cut down to make room names the passages it showed, for read(n), after what it keeps of its text.
+
+    Args:
+        numbers (tuple[int, ...]): The passages the reply showed or named.
+        keep (str): What it keeps of its text; empty for none.
+        cleared (str): What it says once cleared.
+    """
+    reply = PassageReply(
+        text=OPENING * 20, found=len(numbers), action="search", detail="Hafenfest", numbers=numbers, keep=keep
+    )
+
+    assert cleared_text(reply) == cleared
 
 
 def test_arguments_nested_too_deeply_get_an_error_reply() -> None:

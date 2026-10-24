@@ -1,9 +1,12 @@
-"""What an agent turn's model client makes of a stalled endpoint, and what its searches ask a real engine."""
+"""What an agent turn's model client makes of a stalled endpoint, and what its searches ask a real engine.
+
+Also the actions its steps are named by on the wire.
+"""
 
 from __future__ import annotations
 
 import time
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import httpx
 import openai
@@ -17,6 +20,7 @@ from llama_index.core.schema import QueryBundle
 
 from docint.agents.turn.history import ConversationWindow
 from docint.agents.turn.tools import ToolContext
+from docint.agents.types import AgentAction
 from docint.core.rag import RAG, agent_llm_view
 from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.utils.env_cfg import OpenAIConfig
@@ -186,3 +190,18 @@ def test_the_bounded_model_is_the_plain_one_with_retries_off_and_the_answer_keep
     assert rag.text_model.max_retries == 2
     assert plain_answer is rag.text_model
     assert thinking_answer.max_retries == 2
+
+
+def test_an_agent_step_is_named_by_an_action_the_client_knows() -> None:
+    """An ``agent`` frame's ``action`` is protocol the client labels a step by: the set changes only on purpose."""
+    assert set(get_args(AgentAction)) == {
+        "seed",
+        "carried",
+        "search",
+        "answer",
+        "note",
+        "search_images",
+        "keyframes",
+        "keyword",
+        "read",
+    }

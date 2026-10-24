@@ -9,26 +9,41 @@ A calling tool may say what to do about the passages it had no room for, and add
 its own; both are among the notes, its own note last, or ahead of the passages when the tool
 asks for it first.
 
-Everything here reads or writes the turn's ledger, so it runs on the loop thread.
+A passage an earlier answer cited is described on one line for the window's list, and copied
+as the turn's evidence starts out holding it, so a search finding it again extends it.
+
+Everything that reads or writes the turn's ledger runs on the loop thread.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
-from llama_index.core.schema import NodeWithScore
+from llama_index.core.schema import BaseNode, MetadataMode, NodeWithScore
 from loguru import logger
 
-from docint.agents.assessment.ledger import EvidenceLedger, passage_costs, passage_parts, render_context, stamp
-from docint.utils.text_budget import allocate_with_floors
+from docint.agents.assessment.ledger import (
+    EvidenceLedger,
+    _anchors,
+    _has_match,
+    head_spans,
+    passage_costs,
+    passage_parts,
+    render_context,
+    stamp,
+)
+from docint.agents.assessment.split import neutralize_sentinel
+from docint.utils.text_budget import MATCH_SPANS_KEY, allocate_with_floors
 
 if TYPE_CHECKING:
     from docint.agents.turn.tools import ToolContext
 
 #: Longest header a reply shows whole; a longer one keeps its citation line and ``COMPACT_HEADER_CHARS`` of the rest.
 HEADER_CHARS = 500
+#: Longest label the window lists a carried passage under.
+LABEL_CHARS = 120
 #: What a search reply says when it found nothing the turn had not shown.
 NO_NEW_PASSAGES = "No new passages."
 #: How a reply joins its passages, and its passages to the notes after them; ``render_context`` reserves it.
@@ -222,6 +237,60 @@ def render_entry(entry: NodeWithScore, number: int, ctx: ToolContext) -> str:
         char_token_ratio=1.0,
         compact=_compact(numbered, ctx),
     ).context
+
+
+def _one_line(text: str) -> str:
+    """Put a text on one line: its non-empty lines joined by ``; ``, its whitespace collapsed, sentinels defused.
+
+    Args:
+        text (str): The text.
+
+    Returns:
+        str: The line; empty when the text holds nothing but whitespace.
+    """
+    joined = "; ".join(line for line in text.splitlines() if line.strip())
+    return neutralize_sentinel(" ".join(joined.split()))
+
+
+def passage_label(scored: NodeWithScore, llm_view: Callable[[BaseNode], BaseNode]) -> str:
+    """Describe a passage on one line by the header the model reads, as the window lists a carried passage.
+
+    The header's lines are joined by ``; ``. A passage whose view shows no header is named by
+    the opening of its text instead, so a passage with text never goes without a label.
+
+    Args:
+        scored (NodeWithScore): The passage; never written to.
+        llm_view (Callable[[BaseNode], BaseNode]): The turn's LLM view.
+
+    Returns:
+        str: At most ``LABEL_CHARS`` characters, ending in ``…`` when cut.
+    """
+    view = llm_view(scored.node)
+    label = _one_line(view.get_metadata_str(mode=MetadataMode.LLM)) or _one_line(
+        scored.node.get_content(metadata_mode=MetadataMode.NONE)
+    )
+    return label if len(label) <= LABEL_CHARS else f"{label[: LABEL_CHARS - 1].rstrip()}…"
+
+
+def carried_entry(scored: NodeWithScore) -> NodeWithScore:
+    """Copy a carried passage as the turn's evidence starts out holding it, its opening counted as its match.
+
+    A search window of the same section carries a match, and the ledger merges a matched
+    window only into a matched entry (see :func:`~docint.agents.assessment.ledger.head_spans`):
+    unstamped, the passage would refuse the window as shown before.
+
+    Args:
+        scored (NodeWithScore): The passage as loaded; never written to.
+
+    Returns:
+        NodeWithScore: A deep copy whose ``MATCH_SPANS_KEY`` marks its opening; a passage whose
+        spans already mark a match keeps them.
+    """
+    node = scored.node.model_copy(deep=True)
+    text = node.get_content(metadata_mode=MetadataMode.NONE)
+    if not _has_match(text, _anchors(node)):
+        node.metadata[MATCH_SPANS_KEY] = [[start, end] for start, end in head_spans(text)]
+    return NodeWithScore(node=node, score=scored.score)
 
 
 def _sections(found: Iterable[NodeWithScore]) -> list[list[NodeWithScore]]:

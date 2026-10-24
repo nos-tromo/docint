@@ -141,7 +141,7 @@ def _covered(needed: Sequence[tuple[int, int]], others: Sequence[Sequence[tuple[
     )
 
 
-def _head_spans(text: str) -> list[tuple[int, int]]:
+def head_spans(text: str) -> list[tuple[int, int]]:
     """Return matches whose kept text is all that packing keeps of a passage without any.
 
     An unstamped passage keeps its opening (see :func:`kept_ranges`), which can
@@ -188,7 +188,7 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
     own. A stamped and an unstamped emission of different texts never merge: one
     keeps its opening, the other its match. Of one text they do, as when a
     keyword check anchors a passage held unstamped: the unstamped side counts
-    its opening as matches (see :func:`_head_spans`), so the merged entry keeps
+    its opening as matches (see :func:`head_spans`), so the merged entry keeps
     all that the model was shown of either. Anything but a ``TextNode`` keeps the
     held entry as is.
 
@@ -211,9 +211,9 @@ def _merge_windows(held: NodeWithScore, arriving: NodeWithScore) -> NodeWithScor
             return None
         # One text with and without a match: the unmatched side keeps its opening as matches.
         if held_match:
-            new_spans = _head_spans(new_text)
+            new_spans = head_spans(new_text)
         else:
-            held_spans = _head_spans(held_text)
+            held_spans = head_spans(held_text)
     if new_text in held_text:
         held_matches = distinct_spans(held_spans, len(held_text))
         arriving_matches = distinct_spans(_shifted(new_spans, held_text.find(new_text)), len(held_text))
