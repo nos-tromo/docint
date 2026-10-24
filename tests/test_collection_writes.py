@@ -11,7 +11,7 @@ import threading
 import pytest
 
 from docint.core import collection_writes
-from docint.core.collection_writes import WriteState, begin, state, touch, writing
+from docint.core.collection_writes import WriteState, begin, state, touch, watch, writing
 
 #: An invented physical collection.
 DOCS = "u0123456789ab__docs"
@@ -127,3 +127,90 @@ def test_windows_opened_and_closed_across_threads_all_close() -> None:
 
     assert not any(thread.is_alive() for thread in threads)
     assert state(DOCS) == WriteState(3200, False)
+
+
+def test_a_watch_over_no_window_sees_no_write() -> None:
+    """A watch over a stretch in which no window on its collection stood open reports no write."""
+    written = watch(DOCS)
+
+    assert written() is False
+
+
+def test_a_watch_sees_a_window_open_when_it_began_though_it_closed_since() -> None:
+    """A window already open when a watch began is a write to it, though the window closed before it was asked."""
+    close = begin(DOCS)
+    written = watch(DOCS)
+    close()
+
+    assert written() is True
+
+
+def test_a_watch_sees_a_window_open_when_it_is_asked() -> None:
+    """A window that opened after a watch began, and is still open when the watch is asked, is a write to it."""
+    written = watch(DOCS)
+
+    with writing(DOCS):
+        during = written()
+
+    assert during is True
+
+
+def test_a_watch_sees_a_window_that_opened_and_closed_in_between() -> None:
+    """A window that opened and closed between a watch's start and its question is a write to it.
+
+    No window is open at either end, and the epoch moved as a touch would have moved it.
+    """
+    written = watch(DOCS)
+    close = begin(DOCS)
+    close()
+
+    assert written() is True
+    assert state(DOCS) == WriteState(2, False)
+
+
+def test_a_touch_alone_is_no_write_to_a_watch() -> None:
+    """A touch moves the epoch and opens no window, so it is no write to a watch.
+
+    A keyword check's own index ensure touches its collection, which must not flag the check.
+    """
+    written = watch(DOCS)
+    touch(DOCS)
+
+    assert written() is False
+    assert state(DOCS) == WriteState(1, False)
+
+
+def test_a_watch_sees_only_its_own_collection() -> None:
+    """A window on another collection, or on the watched one's image companion, is no write to the watch.
+
+    It is none while it stands open, nor once it has closed.
+    """
+    others = ("u0123456789ab__hafen", f"{DOCS}_images")
+    seen: list[tuple[bool, bool]] = []
+    for name in others:
+        written = watch(DOCS)
+        with writing(name):
+            during = written()
+        seen.append((during, written()))
+
+    assert seen == [(False, False)] * len(others)
+
+
+def test_a_watch_asks_the_registry_it_began_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A watch asks the registry it began on, so a window on a registry swapped in meanwhile is no write to it.
+
+    Once its own registry is back, a window opened there is one.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    began_on = collection_writes._registry
+    written = watch(DOCS)
+    monkeypatch.setattr(collection_writes, "_registry", collection_writes._Registry())
+    with writing(DOCS):
+        elsewhere = written()
+    monkeypatch.setattr(collection_writes, "_registry", began_on)
+    with writing(DOCS):
+        here = written()
+
+    assert (elsewhere, here) == (False, True)
