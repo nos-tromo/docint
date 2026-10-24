@@ -287,8 +287,9 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
 - `actions`: one `{action, detail, found}` per step, as the `agent` frames
   below carry them. A `keyword` step adds `field`, `matches` and, when the
   keyword index leaves chunks out, `unchecked`. It also adds `writing: true`
-  when this backend was writing the collection during the check, so chunks
-  stored meanwhile may be in neither number. A count that failed is stored as
+  when this backend was writing the collection during the check, so chunks the
+  write had not stored yet are in neither number, and a batch it stored during
+  the check may be in neither. A count that failed is stored as
   `matches: null`, never as 0; the frames leave that key out;
 - `reason`: an `agent.reason` token, or `null` (see
   [Limits and reasons](retrieval-and-agents.md#limits-and-reasons)).
@@ -337,9 +338,10 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
   - `unchecked`: the chunks the keyword index does not cover, so `matches` may
     be that much too low; absent when it covers all.
 
-  A frame never carries `writing`: only the stored step, in the `agent.actions`
-  of `/query` and of the final envelope below, says that the collection was
-  being written during the check.
+  A frame never carries `writing`: only the stored step says that the
+  collection was being written during the check, in the `agent.actions` of
+  `/query`, of the final envelope below, and of an agent turn's message in
+  `GET /sessions/{session_id}/history`.
 
   ```json
   {"agent": {"step": 2, "action": "keyword", "detail": "Kontrollgruppe", "found": 1, "field": "text", "matches": 3, "unchecked": 2}}

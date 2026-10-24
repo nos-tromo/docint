@@ -138,7 +138,9 @@ While it works, the turn lists each step as it happens:
   exact number of chunks that contain them, how many chunks the keyword index
   could not check, and how many new passages it found ("Keyword check “…” in
   Author: 3 matches (2 chunks not checked), 1 new"). When the count failed, the
-  step says "count unavailable" in place of the number;
+  step says "count unavailable" in place of the number. The trail does not yet
+  show that a check ran while the collection was being written: the answer says
+  so, and the validation banner flags an answer that leaves it out;
 - a passage read again ("Read passage [2]");
 - a note ("Note: …"): text the model wrote before it decided to search
   again. Whatever of that text had already streamed into the answer moves into

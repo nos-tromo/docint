@@ -792,10 +792,11 @@ when more than the text is offered.
   so it can overstate what the filtered count missed.
 - A check that runs while this backend writes the collection, during an ingest
   or while uploaded files are still preprocessing, says so. Chunks the write
-  has not stored yet, and a batch it stores while the check runs, are neither
-  counted nor reported unchecked. A check is marked when a write was under way
-  at any moment from its read of the readiness to the end of its retrieval. An
-  index ensure or a deletion is not a write and never marks a check. A write by
+  has not stored yet are neither counted nor reported unchecked. A batch it
+  stores while the check runs may be counted, or may be neither counted nor
+  reported unchecked. A check is marked when a write was under way at any
+  moment from its read of the readiness to the end of its retrieval. An index
+  ensure or a deletion is not a write and never marks a check. A write by
   another process, such as an `ingest` CLI run on a host, is not seen.
 
 **Passages.** The passages are retrieved as a search retrieves them, narrowed to
@@ -862,13 +863,13 @@ A check made while the collection was being written adds a line next
 so that a 0 from it reads as none so far. Over a partial index, a line for the
 chunks not checked follows
 (`2 chunks are not in the keyword index yet, so they were not checked and may still contain these words.`),
-then the passages. Leading, the count survives the overflow retry, which keeps
-the head of each tool reply. The writing line comes second for the same reason,
-ahead of the coverage line, which goes first. When the retry cuts a reply
-holding the writing line, it leaves at least the words
-`The collection was being written`; in a short reply, such as a 0 that shows no
-passages, the cut can fall inside the line, so the rest of it may go. The
-validator is given the same counts (see
+then the passages. The count line leads, so it survives the overflow retry,
+which keeps the head of each tool reply. The writing line comes second for the
+same reason, and the coverage line comes after it, so a cut loses the coverage
+line before the writing line. When the retry cuts a reply holding the writing
+line, it leaves at least the words `The collection was being written`; in a
+short reply, such as a 0 that shows no passages, the cut can fall inside the
+line, so the rest of it may go. The validator is given the same counts (see
 [Answer, validation and storage](#answer-validation-and-storage)).
 
 ### Evidence and sources
