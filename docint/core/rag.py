@@ -9288,6 +9288,8 @@ class RAG:
         counts, in the same lane scope, and counts by that read: a write since the turn began,
         or a read past its TTL, is read afresh. A check whose read finds a lane in scope
         uncounted (``coverage``), or its field no longer planned, reports its count unavailable.
+        Each check also says whether this process was writing the collection at any moment while
+        it ran (``KeywordResult.writing``), since such a check covers only the chunks stored so far.
 
         Args:
             metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules, which a
@@ -9385,17 +9387,22 @@ class RAG:
             is counted and retrieved, the image companion's part in both, and what is reported
             unchecked all follow that read (:func:`_keyword_plan`), never the one the match was
             built on. When it finds a lane uncounted, or the field no longer planned, the count is
-            unavailable and nothing is retrieved. The search is an agent's own
-            (:class:`AgentSearchQuery`), so every child is kept and no sub-floor image is re-scored
-            by description; the social steps are left out. Runs on a search thread, inside the
-            request's collection scope.
+            unavailable and nothing is retrieved. Whether a write window on the collection was open
+            at any moment from just before that read to the result is the result's ``writing``
+            (:func:`~docint.core.collection_writes.watch`), for an unavailable count too: chunks a
+            write is still storing are neither counted nor reported unchecked. A touch, such as the
+            forget an index ensure makes while the retriever is built, does not set it. The search
+            is an agent's own (:class:`AgentSearchQuery`), so every child is kept and no sub-floor
+            image is re-scored by description; the social steps are left out. Runs on a search
+            thread, inside the request's collection scope.
 
             Args:
                 words (str): The words.
                 field (str): The field.
 
             Returns:
-                KeywordResult: The matches, their count and what the index leaves unchecked.
+                KeywordResult: The matches, their count, what the index leaves unchecked, and whether
+                the collection was written while the check ran.
 
             Raises:
                 RuntimeError: When the active collection is not the one the match was built for,
@@ -9408,17 +9415,20 @@ class RAG:
             if self.qdrant_collection != collection:
                 raise RuntimeError("A keyword match ran outside the collection it was built for.")
             keywords = tuple(parse_keywords(words))
+            written = collection_writes.watch(collection)
             current = self._keyword_readiness(collection, with_images=with_images)
             if isinstance(current, str):
                 # A lane in scope went uncounted: no count would be exact.
-                return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords)
+                return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords, writing=written())
             joins, unchecked = _keyword_plan(current)
             if field not in joins:
                 # The field is no longer planned: no count of it would be exact.
-                return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords)
+                return KeywordResult(nodes=[], matches=None, unchecked=0, keywords=keywords, writing=written())
             conditions = _filter(words, field, request_filter)
             if conditions is None:
-                return KeywordResult(nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords)
+                return KeywordResult(
+                    nodes=[], matches=None, unchecked=unchecked[field], keywords=keywords, writing=written()
+                )
             matches = self._keyword_count(collection, conditions)
             if matches is not None and joins[field]:
                 in_images = self._keyword_count(companion, conditions)
@@ -9436,7 +9446,9 @@ class RAG:
                 # No profile: without the social steps it would only size parent context's prompt allowance.
                 for postprocessor in self._text_postprocessors(profile={}, social_links=False):
                     nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
-            return KeywordResult(nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords)
+            return KeywordResult(
+                nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords, writing=written()
+            )
 
         fields = (DEFAULT_SEARCH_FIELD, *(name for name in planned if name != DEFAULT_SEARCH_FIELD))
         return KeywordMatcher(fields=fields, check=_check, run=_run)

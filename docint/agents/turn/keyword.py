@@ -94,12 +94,16 @@ class KeywordResult:
         unchecked (int): Chunks in the searched material the keyword index does
             not cover, so a count can be that much too low.
         keywords (tuple[str, ...]): The words the match used, as the index reads them.
+        writing (bool): Whether this process was writing the collection at some
+            moment while the check ran, so its count covers only the chunks stored
+            so far, and chunks still arriving are neither counted nor in ``unchecked``.
     """
 
     nodes: list[NodeWithScore]
     matches: int | None
     unchecked: int
     keywords: tuple[str, ...]
+    writing: bool = False
 
 
 @dataclass(frozen=True)
