@@ -516,8 +516,8 @@ def test_the_writing_line_comes_between_the_count_and_the_coverage_line() -> Non
     """The writing line is the second of the note, ahead of the coverage line, so the overflow retry's head keeps it."""
     assert keyword_note(matches=0, unchecked=2, writing=True) == (
         "No indexed chunk in the searched material contains all of these words.\n"
-        "The collection was being written during this check, so it covers only the chunks stored so far; "
-        "chunks still arriving were not checked and may still contain these words.\n"
+        "The collection was being written during this check: report this count only as a count so far, "
+        "since chunks still arriving were not checked and may still contain these words.\n"
         "2 chunks are not in the keyword index yet, so they were not checked and may still contain these words."
     )
 

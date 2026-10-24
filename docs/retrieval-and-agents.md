@@ -858,7 +858,7 @@ without `[n]`, and to report a 0 only as "no passage contains these words",
 never as the idea being absent. The reply opens with the count
 (`3 indexed chunks in the searched material contain all of these words.`).
 A check made while the collection was being written adds a line next
-(`The collection was being written during this check, so it covers only the chunks stored so far; chunks still arriving were not checked and may still contain these words.`),
+(`The collection was being written during this check: report this count only as a count so far, since chunks still arriving were not checked and may still contain these words.`),
 so that a 0 from it reads as none so far. Over a partial index, a line for the
 chunks not checked follows
 (`2 chunks are not in the keyword index yet, so they were not checked and may still contain these words.`),

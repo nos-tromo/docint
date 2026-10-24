@@ -79,8 +79,8 @@ KEYWORD_FIELD_NOTES = {
 }
 #: The note line of a check made while this process was writing its collection: chunks still arriving are not counted.
 WRITING_LINE = (
-    "The collection was being written during this check, so it covers only the chunks stored so far; "
-    "chunks still arriving were not checked and may still contain these words."
+    "The collection was being written during this check: report this count only as a count so far, "
+    "since chunks still arriving were not checked and may still contain these words."
 )
 #: The mark that ends the validator's line of a check made while this process was writing its collection.
 WRITING_MARK = "collection being written"
