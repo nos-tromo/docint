@@ -790,9 +790,14 @@ when more than the text is offered.
   yet backfilled (`make search-index`) and, on `all`, a companion without the
   field's index. The number counts the whole collection, whatever the filters,
   so it can overstate what the filtered count missed.
-- While the collection is being written, a batch stored during a check can be
-  missed by that check. It is neither counted nor reported unchecked, and the
-  next check reads the coverage again.
+- A check that runs while this backend writes the collection, during an ingest
+  or while uploaded files are still preprocessing, says so. Chunks the write
+  has not stored yet are neither counted nor reported unchecked. A batch it
+  stores while the check runs may be counted, or may be neither counted nor
+  reported unchecked. A check is marked when a write was under way at any
+  moment from its read of the readiness to the end of its retrieval. An index
+  ensure or a deletion is not a write and never marks a check. A write by
+  another process, such as an `ingest` CLI run on a host, is not seen.
 
 **Passages.** The passages are retrieved as a search retrieves them, narrowed to
 the matches by the filter that counts them: the same rerank, image floor and
@@ -840,7 +845,9 @@ check. Exact values are compared as written: always on `uuid`, and on
 therefore two checks, and so are `Alice` and `alice` on `author`, while a uuid
 pasted with or without its dashes is one. A repeat is answered from memory:
 the reply names the passages the first check showed, and its trail step shows
-the first check's `field`, `matches` and `unchecked` again.
+the first check's `field`, `matches`, `unchecked` and `writing` again. A check
+made while the collection was being written is remembered like any other, so
+asking it again in the same turn does not run it again after the write ends.
 
 A check with a known count is informative, a 0 included, so a round holding one
 is not idle although it admits no passage. A repeat is never informative, and
@@ -850,11 +857,19 @@ neither is a count that failed: either can make an idle round.
 source. The keyword line of the system prompt tells the model to state it
 without `[n]`, and to report a 0 only as "no passage contains these words",
 never as the idea being absent. The reply opens with the count
-(`3 indexed chunks in the searched material contain all of these words.`) and,
-over a partial index, a line for the chunks not checked
+(`3 indexed chunks in the searched material contain all of these words.`).
+A check made while the collection was being written adds a line next
+(`The collection was being written during this check: report this count only as a count so far, since chunks still arriving were not checked and may still contain these words.`),
+so that a 0 from it reads as none so far. Over a partial index, a line for the
+chunks not checked follows
 (`2 chunks are not in the keyword index yet, so they were not checked and may still contain these words.`),
-then the passages. Leading, the count survives the overflow retry, which keeps
-the head of each tool reply. The validator is given the same counts (see
+then the passages. The count line leads, so it survives the overflow retry,
+which keeps the head of each tool reply. The writing line comes second for the
+same reason, and the coverage line comes after it, so a cut loses the coverage
+line before the writing line. When the retry cuts a reply holding the writing
+line, it leaves at least the words `The collection was being written`; in a
+short reply, such as a 0 that shows no passages, the cut can fall inside the
+line, so the rest of it may go. The validator is given the same counts (see
 [Answer, validation and storage](#answer-validation-and-storage)).
 
 ### Evidence and sources
@@ -869,8 +884,9 @@ source card.
 
 The trail (`agent.actions`) opens with a `carried` step when the turn carried
 passages, then holds one `{action, detail, found}` per note, and one per call
-its tool answered. A keyword step adds `field`, `matches` and,
-where the keyword index leaves chunks out, `unchecked`. The `agent` frames in
+its tool answered. A keyword step adds `field`, `matches`, `unchecked` where
+the keyword index leaves chunks out, and `writing: true` where the collection
+was being written during the check. The `agent` frames in
 [api-reference.md](api-reference.md#post-stream_query) say when each is absent,
 and [ui-guide.md](ui-guide.md#chat-srcrouteschattsx) shows how the SPA reads
 them. A call that was not answered gets its reply but no step: one skipped,
@@ -1115,12 +1131,17 @@ checks. Agent turns never take the corrective retry.
 In both modes the validator is also given the turn's keyword checks with a
 known count, as facts about the collection rather than sources: one line per
 check, with its words, its field, its count and any chunks not checked, under
-their own heading after any summary diagnostics. A failed count is left out.
-Both validator prompts accept a statement of how many indexed chunks hold some
-words, a 0 included, when a listed check gives that count. An answer that rests
-on checks alone, citing no passage, is therefore validated by the model against
-the checks, its relevance judged by them, rather than mismatched for having no
-sources or judged against passages the search happened to find.
+their own heading after any summary diagnostics. A check made while the
+collection was being written ends its line in `; collection being written`,
+after any chunks not checked. A failed count is left out, marked or not. Both
+validator prompts accept a statement of how many indexed chunks hold some
+words, a 0 included, when a listed check gives that count. A marked check
+covered only the chunks stored by then, so the prompts take its count only as a
+count so far: its 0 grounds a statement that none does only as none so far,
+never as the words being absent. An answer that rests on checks alone, citing
+no passage, is therefore validated by the model against the checks, its
+relevance judged by them, rather than mismatched for having no sources or
+judged against passages the search happened to find.
 
 An agent turn is stored with its `answer_mode` and its trail. It reports
 `retrieval_mode: "agent"` (or `"scoped"`), `retrieval_query: null` and a

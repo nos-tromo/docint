@@ -7,6 +7,11 @@ read of a collection is valid only for the epoch it was read at, and never while
 open. Whether a window is open never changes without the epoch moving, so a read still valid at its
 epoch was taken while no window was open.
 
+A watch (:func:`watch`) says whether a write overlapped a stretch of work, such as a keyword check:
+whether a window on its collection was open at any moment since the watch began. It counts the
+windows opened, never the epoch, because a touch moves the epoch without a write: a change made in
+one step only ever makes a cached read more conservative, so it is no write to a watch.
+
 The registry is keyed by physical collection name and holds nothing else: no user, no session and no
 active collection, so it never selects what a request works on. Standard library only.
 """
@@ -34,20 +39,23 @@ class WriteState:
 
 
 class _Registry:
-    """The open windows and the epoch of every collection a window or a touch has reached.
+    """The open windows, the windows opened so far and the epoch of every collection a window or a touch has reached.
 
     Its lock is a leaf: nothing is called while it is held. A collection's count of open windows
-    is dropped once it reaches 0; its epoch is never dropped, so no epoch is ever handed out twice.
+    is dropped once it reaches 0; its epoch is never dropped, so no epoch is ever handed out twice,
+    and neither is its count of windows opened, so a watch sees a window that opened and closed
+    while it ran.
     """
 
     def __init__(self) -> None:
-        """Start with no window open and every epoch at 0."""
+        """Start with no window open or opened, and every epoch at 0."""
         self._lock = threading.Lock()
         self._open: dict[str, int] = {}
+        self._opened: dict[str, int] = {}
         self._epochs: dict[str, int] = {}
 
     def open(self, collection: str) -> None:
-        """Open a window on a collection, moving its epoch.
+        """Open a window on a collection, moving its epoch and counting the window opened.
 
         Args:
             collection (str): The physical collection.
@@ -55,6 +63,7 @@ class _Registry:
         with self._lock:
             self._epochs[collection] = self._epochs.get(collection, 0) + 1
             self._open[collection] = self._open.get(collection, 0) + 1
+            self._opened[collection] = self._opened.get(collection, 0) + 1
 
     def close(self, collection: str) -> None:
         """Close a window on a collection, moving its epoch.
@@ -90,6 +99,19 @@ class _Registry:
         """
         with self._lock:
             return WriteState(epoch=self._epochs.get(collection, 0), writing=collection in self._open)
+
+    def windows(self, collection: str) -> tuple[bool, int]:
+        """Return whether a window on a collection is open, and how many windows on it have opened.
+
+        Args:
+            collection (str): The physical collection.
+
+        Returns:
+            tuple[bool, int]: Whether a window on it is open now, and the windows opened on it so far,
+            both read at one moment.
+        """
+        with self._lock:
+            return collection in self._open, self._opened.get(collection, 0)
 
 
 _registry = _Registry()
@@ -158,3 +180,34 @@ def state(collection: str) -> WriteState:
         WriteState: Its epoch, and whether a window on it is open.
     """
     return _registry.state(collection)
+
+
+def watch(collection: str) -> Callable[[], bool]:
+    """Begin watching a collection for writes, and return the call that says whether one overlapped the watch.
+
+    The call is true when a window on the collection was open at some moment since the watch
+    began: one open when it began, one open when it is asked, or one that opened in between,
+    closed since or not. A touch is no write to it, though it moves the epoch. It asks the registry
+    the watch began on, however often and from whichever thread it is called, and the watch holds
+    nothing in the registry.
+
+    Args:
+        collection (str): The physical collection.
+
+    Returns:
+        Callable[[], bool]: Whether a window on the collection was open at some moment since the
+        watch began.
+    """
+    registry = _registry
+    was_open, opened = registry.windows(collection)
+
+    def written() -> bool:
+        """Say whether a window on the collection was open at some moment since the watch began.
+
+        Returns:
+            bool: Whether one was open when the watch began, is open now, or opened in between.
+        """
+        is_open, now_opened = registry.windows(collection)
+        return was_open or is_open or now_opened != opened
+
+    return written

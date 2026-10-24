@@ -27,7 +27,7 @@ from docint.agents.turn.history import (
     ConversationWindow,
     labelled_lines,
 )
-from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
+from docint.agents.turn.keyword import WRITING_MARK, KeywordMatcher, KeywordResult
 from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
 from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, cleared_text
@@ -705,6 +705,22 @@ def test_the_validators_take_a_count_from_a_listed_keyword_check_as_grounded(cod
     lines = [line for line in _prompt(name, code).splitlines() if "keyword check" in line.casefold()]
 
     assert len(lines) == 1, f"{code}/{name}.txt names the keyword checks on {len(lines)} lines"
+
+
+@pytest.mark.parametrize("name", VALIDATOR_PROMPTS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_validators_take_a_check_made_while_written_only_as_a_count_so_far(code: str, name: str) -> None:
+    """The line that accepts a count on a check also names the mark a check made while written ends in.
+
+    Args:
+        code (str): The locale.
+        name (str): The validator prompt.
+    """
+    marked = [
+        line for line in _prompt(name, code).splitlines() if "keyword check" in line.casefold() and WRITING_MARK in line
+    ]
+
+    assert len(marked) == 1, f"{code}/{name}.txt does not name {WRITING_MARK!r} on its keyword check line"
 
 
 @pytest.mark.parametrize("target", TARGETS)
