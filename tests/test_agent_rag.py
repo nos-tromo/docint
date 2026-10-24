@@ -5,6 +5,7 @@ Every message, passage, clip, filter and collection here is invented.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import types
@@ -2481,6 +2482,7 @@ def test_a_check_after_a_write_closed_reads_the_readiness_again(monkeypatch: pyt
     The turn read the collection before the write: no image companion, every chunk indexed. The write stored matching
     images in a new companion and chunks the index does not cover yet, and has ended since. Nothing is being written
     and the read the turn kept is not 30 s old, so only the epoch, which the write moved, tells the check it is stale.
+    The write ended before the check began, so the check is not flagged as made while its collection was written.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2499,7 +2501,7 @@ def test_a_check_after_a_write_closed_reads_the_readiness_again(monkeypatch: pyt
 
     assert not closed.writing
     assert closed.epoch > unwritten.epoch
-    assert (result.matches, result.unchecked) == (3, 5)
+    assert (result.matches, result.unchecked, result.writing) == (3, 5, False)
     assert [name for name, _ in client.counted] == [PHYSICAL, f"{PHYSICAL}_images"]
     assert [build["include_images"] for build in built] == [True]
     assert lanes.reads == [PHYSICAL, PHYSICAL]
@@ -2759,6 +2761,116 @@ def test_an_index_ensure_during_a_check_does_not_flag_it(monkeypatch: pytest.Mon
         collection_writes.WriteState(1, False),
     )
     assert len(built) == 1
+
+
+@pytest.mark.parametrize("window", [True, False], ids=["written", "not-written"])
+def test_a_check_whose_words_compile_to_no_match_says_whether_it_was_written(
+    monkeypatch: pytest.MonkeyPatch, window: bool
+) -> None:
+    """A check whose words compile to no match is neither counted nor searched, and says whether it was written.
+
+    Several words on a field matched by one exact value compile to nothing. The tool refuses such a call before it
+    runs, but a match run directly still answers it, with its count unavailable. The field is still planned, so this
+    is not the answer of a field that lost its index. The flag follows the window: set while one is open, clear
+    otherwise.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        window (bool): Whether a write window on the collection is open while the check runs.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, fields=("text", "uuid"), collection=PHYSICAL)
+    matcher = _physical_matcher(rag, "documents")
+
+    with collection_writes.writing(PHYSICAL) if window else contextlib.nullcontext():
+        result = _physical_check(rag, matcher, "zwei Werte", "uuid")
+
+    assert matcher.fields == ("text", "uuid")
+    assert (client.counted, built) == ([], [])
+    assert (result.matches, result.unchecked, result.nodes, result.writing) == (None, 0, [], window)
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+def test_a_write_that_ends_while_a_check_reads_its_readiness_flags_the_check(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """A write open when a check begins, which ends while the check reads its readiness again, flags the check.
+
+    That read was made while the write was under way, so it may plan the count on a collection caught mid-write, as
+    before its image companion exists. No window is open by the time the match is counted, so only a watch begun
+    before the read sees the write.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, _ = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    matcher = _physical_matcher(rag, cast(RetrievalTarget, target))
+    close = collection_writes.begin(PHYSICAL)
+    real = client.get_collection
+    ended: list[str] = []
+
+    def _write_ended_mid_read(collection_name: str) -> Any:
+        """Read a schema as the double does, the write on the collection ending the first time.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if not ended:
+            ended.append(collection_name)
+            close()
+        return real(collection_name)
+
+    monkeypatch.setattr(client, "get_collection", _write_ended_mid_read)
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert ended == [PHYSICAL]
+    assert collection_writes.state(PHYSICAL).writing is False
+    assert (result.matches, result.unchecked, result.writing) == (0, 0, True)
+
+
+def test_a_write_that_begins_while_a_check_retrieves_flags_the_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write that begins after a check has counted, while it retrieves the matches, flags the check.
+
+    The flag is read once the matches are retrieved, never right after the count, so a write begun in between is not
+    missed.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    _, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL)
+    matcher = _physical_matcher(rag)
+    real_build = rag._build_retriever
+    closers: list[Callable[[], None]] = []
+
+    def _written_mid_build(**kwargs: Any) -> Any:
+        """Begin a write on the collection, then build as the double does.
+
+        Args:
+            **kwargs (Any): The build arguments.
+
+        Returns:
+            Any: The double's retriever.
+        """
+        closers.append(collection_writes.begin(PHYSICAL))
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(rag, "_build_retriever", _written_mid_build)
+    try:
+        result = _physical_check(rag, matcher, "Hafenfest")
+    finally:
+        for close in closers:
+            close()
+
+    assert (result.matches, result.writing, len(built)) == (2, True, 1)
 
 
 def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:
