@@ -8299,6 +8299,11 @@ class RAG:
     ) -> IngestStats:
         """Asynchronously ingest documents from the specified directory into the Qdrant collection.
 
+        The run is a write window on the collection (:mod:`docint.core.collection_writes`) from
+        start to end, however it ends, as :meth:`ingest_docs` is. While the window is open, no
+        engine in this process reuses a keyword readiness it read of the collection, and its end
+        voids what was kept.
+
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
             build_query_engine (bool): Whether to build the query engine immediately
@@ -8331,10 +8336,37 @@ class RAG:
             through would write dense-only points into a hybrid
             collection. Wiring this method to a real caller MUST add a
             ``self.probe_sparse_endpoint()`` call first.
-            It also opens no write window, so a turn may decide on a keyword
-            readiness read before, during, or up to ``KEYWORD_READINESS_TTL_S``
-            after the run. A real caller must wrap it as :meth:`ingest_docs`
-            is wrapped.
+        """
+        collection = self.qdrant_collection
+        with collection_writes.writing(collection):
+            return await self._asingest_docs(
+                data_dir,
+                build_query_engine=build_query_engine,
+                progress_callback=progress_callback,
+                ner=ner,
+                hate_speech=hate_speech,
+            )
+
+    async def _asingest_docs(
+        self,
+        data_dir: str | Path,
+        *,
+        build_query_engine: bool,
+        progress_callback: Callable[[str], None] | None,
+        ner: bool | None,
+        hate_speech: bool | None,
+    ) -> IngestStats:
+        """Run one async ingest into the active collection; :meth:`asingest_docs` wraps it and documents the arguments.
+
+        Args:
+            data_dir (str | Path): The directory containing the documents to ingest.
+            build_query_engine (bool): Whether to build the query engine immediately after ingestion.
+            progress_callback (Callable[[str], None] | None): Optional callback for reporting ingestion progress.
+            ner (bool | None): Per-request NER override; ``None`` keeps the env default.
+            hate_speech (bool | None): Per-request hate-speech override; ``None`` keeps the env default.
+
+        Returns:
+            IngestStats: What the run did.
         """
         # See _ingest_docs: pre-create the Qdrant collection so it stays
         # selectable in the UI even when every embedding batch fails.
