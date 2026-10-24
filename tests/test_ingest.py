@@ -15,7 +15,10 @@ from llama_index.core.schema import TextNode
 
 import docint.cli.ingest as ingest
 import docint.core.ingest.ingestion_pipeline as pipeline_module
+from docint.core import collection_writes
+from docint.core.collection_writes import WriteState
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.rag import RAG, IngestStats
 
 
 def test_parse_hate_speech_reply_extracts_first_json_object_from_noisy_output() -> None:
@@ -294,6 +297,58 @@ def test_ingest_docs_leaves_enable_hybrid_unset_when_hybrid_is_none(
     monkeypatch.setattr(ingest, "RAG", DummyRAG)
     ingest.ingest_docs("demo", tmp_path)
     assert calls.enable_hybrid is unset
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+def test_ingest_docs_keeps_its_collection_written_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
+) -> None:
+    """The run is a write window on its physical collection from start to end, a failed run included.
+
+    The engine the CLI builds runs it, as the API's ingest does, and the window it opens is the process's, so every
+    engine serving turns sees it. Only the pipeline inside ``RAG.ingest_docs`` is a stand-in.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The directory ingested.
+        outcome (str): How the run ends: ``completed`` with its stats, or ``failed`` with an error.
+    """
+    physical = "u0123456789ab__hafen"
+    # The engine reads no embedding tokenizer from the host's cache.
+    monkeypatch.setattr("docint.core.rag.build_embedding_token_counter", lambda repo_id, cache_dir: None)
+    stats = IngestStats(files_processed=1, files_skipped=0, files_failed=0, docs=1, nodes=3)
+    during: list[WriteState] = []
+
+    def _pipeline(self: RAG, data_dir: str | Path, **kwargs: Any) -> IngestStats:
+        """Note where the collection's writes stand as the run goes, then end it as the case says.
+
+        Args:
+            self (RAG): The engine the CLI built.
+            data_dir (str | Path): The directory ingested, unused.
+            **kwargs (Any): The run's options, unused.
+
+        Returns:
+            IngestStats: The run's stats, for the ``completed`` outcome.
+
+        Raises:
+            RuntimeError: For the ``failed`` outcome.
+        """
+        during.append(collection_writes.state(physical))
+        if outcome == "failed":
+            raise RuntimeError("the run failed")
+        return stats
+
+    monkeypatch.setattr(RAG, "_ingest_docs", _pipeline)
+    epoch = collection_writes.state(physical).epoch
+
+    if outcome == "failed":
+        with pytest.raises(RuntimeError, match="the run failed"):
+            ingest.ingest_docs(physical, tmp_path)
+    else:
+        assert ingest.ingest_docs(physical, tmp_path) is stats
+
+    assert during == [WriteState(epoch + 1, True)]
+    assert collection_writes.state(physical) == WriteState(epoch + 2, False)
 
 
 def _make_pipeline(

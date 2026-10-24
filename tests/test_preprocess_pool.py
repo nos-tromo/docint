@@ -16,6 +16,8 @@ from typing import Any
 import pytest
 from typing_extensions import override
 
+from docint.core import collection_writes
+from docint.core.collection_writes import WriteState
 from docint.core.ingest import preprocess
 from docint.core.ingest.preprocess import (
     PreprocessPool,
@@ -624,3 +626,224 @@ def test_no_pool_means_nothing_in_flight(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert preprocess.inflight_pdf_hashes() == set()
     assert preprocess._pool is None
+
+
+# ---------------------------------------------------------------------------
+# Write windows
+# ---------------------------------------------------------------------------
+
+#: An invented physical collection, and another for the tasks that must leave its window alone.
+HAFEN = "u0123456789ab__hafen"
+OTHER = "u0123456789ab__mydocs"
+
+
+@pytest.fixture
+def one_worker_pool() -> Any:
+    """A one-worker pool, so that a second task waits behind the first; shut down after the test."""
+    instance = PreprocessPool(max_workers=1)
+    yield instance
+    instance.shutdown()
+
+
+def _hold_the_worker(pool: PreprocessPool, release: threading.Event) -> None:
+    """Occupy the pool's only worker with a task on another collection, and wait until it runs.
+
+    Args:
+        pool (PreprocessPool): A one-worker pool.
+        release (threading.Event): Lets the task end.
+    """
+    holding = threading.Event()
+
+    def hold() -> None:
+        """Say the worker is held, then keep it until released."""
+        holding.set()
+        release.wait(timeout=5)
+
+    pool.submit(preprocess_key("image", OTHER, "held"), hold)
+    assert holding.wait(timeout=5)
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
+def test_a_task_keeps_its_collection_written_until_it_settles(pool: PreprocessPool, fails: bool) -> None:
+    """A task is a write window on its key's collection while it runs, and ends it only once it has settled.
+
+    Args:
+        pool (PreprocessPool): The pool.
+        fails (bool): Whether the task raises when released instead of returning.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def task() -> str:
+        """Say the task runs, wait to be released, then settle as the case asks."""
+        started.set()
+        release.wait(timeout=5)
+        if fails:
+            raise RuntimeError("the task failed")
+        return "done"
+
+    future = pool.submit(preprocess_key("image", HAFEN, "h"), task)
+    try:
+        assert started.wait(timeout=5)
+        running = collection_writes.state(HAFEN)
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+
+    assert running == WriteState(1, True)
+    assert collection_writes.state(HAFEN) == WriteState(2, False)
+    assert isinstance(future.exception(timeout=5), RuntimeError) is fails
+
+
+def test_a_cancelled_task_ends_its_write(one_worker_pool: PreprocessPool) -> None:
+    """A task cancelled while it waits for a worker has held its collection written until then, and ends the write.
+
+    Args:
+        one_worker_pool (PreprocessPool): The pool.
+    """
+    release = threading.Event()
+    _hold_the_worker(one_worker_pool, release)
+    try:
+        queued = one_worker_pool.submit(preprocess_key("image", HAFEN, "h"), lambda: None)
+        waiting = collection_writes.state(HAFEN)
+
+        assert one_worker_pool.cancel_collection(HAFEN) == 1
+        cancelled = collection_writes.state(HAFEN)
+    finally:
+        release.set()
+    one_worker_pool.wait_idle(timeout=5)
+
+    assert queued.cancelled()
+    assert waiting == WriteState(1, True)
+    assert cancelled == WriteState(2, False)
+    assert collection_writes.state(HAFEN) == cancelled
+
+
+def test_shutting_the_pool_down_ends_the_writes_of_its_queued_tasks(one_worker_pool: PreprocessPool) -> None:
+    """Shutting the pool down cancels what waits, ending those writes; the task still running keeps its own.
+
+    Args:
+        one_worker_pool (PreprocessPool): The pool.
+    """
+    release = threading.Event()
+    _hold_the_worker(one_worker_pool, release)
+    try:
+        queued = [one_worker_pool.submit(preprocess_key("image", HAFEN, name), lambda: None) for name in ("1", "2")]
+        waiting = collection_writes.state(HAFEN)
+
+        one_worker_pool.shutdown()
+        shut_down = collection_writes.state(HAFEN)
+        running = collection_writes.state(OTHER)
+    finally:
+        release.set()
+    one_worker_pool.wait_idle(timeout=5)
+
+    assert all(future.cancelled() for future in queued)
+    assert waiting == WriteState(2, True)
+    assert shut_down == WriteState(4, False)
+    assert collection_writes.state(HAFEN) == shut_down
+    assert running == WriteState(1, True)
+    assert collection_writes.state(OTHER) == WriteState(2, False)
+
+
+def test_a_key_already_in_flight_opens_no_second_write(pool: PreprocessPool) -> None:
+    """A submit for a key whose task is in flight hands back that task and opens no window of its own.
+
+    Args:
+        pool (PreprocessPool): The pool.
+    """
+    release = threading.Event()
+    key = preprocess_key("image", HAFEN, "h")
+
+    first = pool.submit(key, lambda: release.wait(timeout=5))
+    try:
+        second = pool.submit(key, lambda: release.wait(timeout=5))
+        during = collection_writes.state(HAFEN)
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+
+    assert second is first
+    assert during == WriteState(1, True)
+    assert collection_writes.state(HAFEN) == WriteState(2, False)
+
+
+@pytest.mark.parametrize("key", ["k", preprocess_key("image", "", "h")], ids=["not-a-pool-key", "no-collection"])
+def test_a_key_naming_no_collection_opens_no_write(
+    pool: PreprocessPool, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """A key that names no collection, whether it is no pool key or its collection is empty, opens no window.
+
+    Args:
+        pool (PreprocessPool): The pool.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        key (str): The key.
+    """
+    opened: list[str] = []
+    begin = collection_writes.begin
+
+    def spy(collection: str) -> Any:
+        """Note which collection a window is opened on, and open it.
+
+        Args:
+            collection (str): The physical collection.
+
+        Returns:
+            Any: The window's closer.
+        """
+        opened.append(collection)
+        return begin(collection)
+
+    monkeypatch.setattr(collection_writes, "begin", spy)
+    release = threading.Event()
+
+    pool.submit(key, lambda: release.wait(timeout=5))
+    try:
+        during = collection_writes.state("")
+    finally:
+        release.set()
+    pool.wait_idle(timeout=5)
+
+    assert opened == []
+    assert during == WriteState(0, False)
+    assert collection_writes.state("") == WriteState(0, False)
+
+
+def test_a_submit_the_pool_refuses_leaves_no_write_open(pool: PreprocessPool) -> None:
+    """A task the executor refuses, as after a shutdown, raises to its caller and leaves neither window nor key behind.
+
+    The window is opened before the executor is asked, so even the refused task opened one, and closed it.
+
+    Args:
+        pool (PreprocessPool): The pool.
+    """
+    pool.shutdown()
+
+    with pytest.raises(RuntimeError):
+        pool.submit(preprocess_key("image", HAFEN, "h"), lambda: None)
+
+    assert collection_writes.state(HAFEN) == WriteState(2, False)
+    assert pool.inflight(HAFEN) == (0, 0)
+
+
+def test_a_submit_interrupted_in_the_executor_leaves_no_write_open(
+    pool: PreprocessPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt raised in the executor as it is handed a task closes the window opened for it, like any error.
+
+    Args:
+        pool (PreprocessPool): The pool.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        """Stand in for an executor that is interrupted as it is handed the task."""
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pool._executors[""], "submit", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        pool.submit(preprocess_key("image", HAFEN, "h"), lambda: None)
+
+    assert collection_writes.state(HAFEN) == WriteState(2, False)
+    assert pool.inflight(HAFEN) == (0, 0)

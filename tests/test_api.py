@@ -18,9 +18,11 @@ from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
     KEYWORD_CALLS,
     KEYWORD_STEPS,
+    KeywordClient,
     answer_round,
     call_round,
     keyword_match,
+    ready_schema,
     scripted_loop,
     status_error,
     streaming_tool_llm,
@@ -43,9 +45,11 @@ from docint.agents.turn.loop import _OVERFLOW_MESSAGE
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
 from docint.agents.types import AgentProgress, IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
+from docint.core import collection_writes
+from docint.core.collection_writes import WriteState
 from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
-from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn
+from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn, IngestStats
 from docint.core.state.session_manager import SessionManager
 from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS
 
@@ -3209,6 +3213,97 @@ def test_ingest_sync_generic_exception_propagates_as_500(
     response = client.post("/ingest", json={"collection": "col", "hybrid": True})
     assert response.status_code == 500
     assert response.json()["detail"] == "Request failed."
+
+
+@pytest.mark.parametrize("outcome", ["completed", "empty", "unsupported", "failed"])
+def test_a_sync_ingest_keeps_its_collection_written_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path, outcome: str
+) -> None:
+    """While ``POST /ingest`` runs, every read the engine serving turns makes of the physical collection hits the store.
+
+    The request goes through the real chain: the route, the CLI's ``ingest_docs`` and the engine it builds, whose
+    ``ingest_docs`` is the write window; only the pipeline inside that is a stand-in. The engine serving turns is a
+    real one here, its ownership a stand-in that names ``mydocs`` by an owner's physical collection, which is what
+    the window is keyed by, so ``mydocs`` stays at epoch 0. However the run ends, the response says so, and the
+    next read once it has goes to the store and is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+        outcome (str): How the run ends: ``completed``, ``empty`` (``EmptyIngestionError``), ``unsupported``
+            (``NoSupportedFilesError``) or ``failed`` (any other error, answered with a 500).
+    """
+    physical = "u0123456789ab__mydocs"
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("docint.core.rag._readiness_now", lambda: 1000.0)
+    # Neither engine reads an embedding tokenizer from the host's cache.
+    monkeypatch.setattr("docint.core.rag.build_embedding_token_counter", lambda repo_id, cache_dir: None)
+    serving = RAG(qdrant_collection="")
+    store = KeywordClient({physical: ready_schema("text")}, counts={physical: 10})
+    serving._qdrant_client = cast(Any, store)
+    owners = types.SimpleNamespace(register=lambda owner, logical: physical, touch=lambda owner, logical: None)
+    monkeypatch.setattr(serving, "ensure_collection_owner_manager", lambda: owners)
+    monkeypatch.setattr(api_module, "rag", serving)
+    written: list[bool] = []
+    logical: list[WriteState] = []
+    mid_run: list[int] = []
+
+    def _read() -> int:
+        """Read the collection's readiness on the serving engine, as a documents turn does.
+
+        Returns:
+            int: How many schema reads the store has served by then.
+        """
+        serving._keyword_readiness(physical, with_images=False)
+        return len(store.schemas_read)
+
+    def _pipeline(self: RAG, data_dir: str | Path, **kwargs: Any) -> IngestStats:
+        """Read the serving engine's readiness twice as the run goes, then end the run as the case says.
+
+        Args:
+            self (RAG): The engine the CLI built.
+            data_dir (str | Path): The data directory, unused.
+            **kwargs (Any): The run's options, unused.
+
+        Returns:
+            IngestStats: The run's stats, for the ``completed`` outcome.
+
+        Raises:
+            EmptyIngestionError: For the ``empty`` outcome.
+            NoSupportedFilesError: For the ``unsupported`` outcome.
+            RuntimeError: For the ``failed`` outcome.
+        """
+        written.append(collection_writes.state(physical).writing)
+        logical.append(collection_writes.state("mydocs"))
+        mid_run.append(len(store.schemas_read))
+        for _ in range(2):
+            mid_run.append(_read())
+        if outcome == "empty":
+            raise api_module.EmptyIngestionError(self.qdrant_collection)
+        if outcome == "unsupported":
+            raise NoSupportedFilesError("nothing ingestable")
+        if outcome == "failed":
+            raise RuntimeError("Qdrant unreachable")
+        return IngestStats(files_processed=1, files_skipped=0, files_failed=0, docs=1, nodes=3)
+
+    monkeypatch.setattr(RAG, "_ingest_docs", _pipeline)
+    kept = _read()
+    assert _read() == kept
+
+    response = client.post("/ingest", json={"collection": "mydocs"})
+
+    assert response.status_code == (500 if outcome == "failed" else 200)
+    assert response.json().get("empty", False) is (outcome in ("empty", "unsupported"))
+    assert written == [True]
+    assert logical == [WriteState(0, False)]
+    assert mid_run[0] == kept
+    assert mid_run[0] < mid_run[1] < mid_run[2]
+    assert not collection_writes.state(physical).writing
+    after_run = len(store.schemas_read)
+    read_afresh = _read()
+    assert read_afresh > after_run
+    assert _read() == read_afresh
 
 
 def test_ingest_upload_empty_emits_warning_and_completes(

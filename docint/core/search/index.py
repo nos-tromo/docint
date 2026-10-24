@@ -306,6 +306,7 @@ def search_index_status(
     collection: str,
     *,
     by_lane: bool = False,
+    include_companion: bool = True,
 ) -> dict[str, Any]:
     """Report how much of a collection is ready for full-text search.
 
@@ -323,6 +324,10 @@ def search_index_status(
         collection (str): Physical collection name.
         by_lane (bool): Whether to add the per-lane breakdown; off by default,
             since ``/search`` hands the status to clients as it is.
+        include_companion (bool): Whether the image companion is a lane at all;
+            on by default. Off, it is neither looked up nor counted, and the
+            totals are the main collection's, for a caller that would discard
+            the lane.
 
     Returns:
         dict[str, Any]: ``indexed`` (the payload index exists), ``total``,
@@ -347,7 +352,7 @@ def search_index_status(
     lanes = [collection]
     companion = image_companion_name(collection)
     try:
-        if client.collection_exists(collection_name=companion):
+        if include_companion and client.collection_exists(collection_name=companion):
             lanes.append(companion)
     except Exception as exc:
         logger.debug("companion lookup failed for {}: {}", companion, exc)

@@ -38,6 +38,7 @@ from qdrant_client import models
 
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.agents.turn.keyword import LONG_WORD, NO_USABLE_WORD, ONE_VALUE_ONLY, UNINDEXABLE_WORD, KeywordMatcher
+from docint.core import collection_writes
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, CollectionCleanupError, LazyRerankerPostprocessor
 from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
@@ -9015,6 +9016,98 @@ def test_a_companion_lookup_that_fails_withholds_the_matcher_from_an_all_turn(mo
 
     assert _keyword_matcher_for(rag, target="all") is None
     assert _keyword_matcher_for(rag, target="documents") is not None
+
+
+@pytest.mark.parametrize("how", ["delete", "ingest", "failed-ingest"])
+def test_a_collection_is_read_live_while_ingested_and_afresh_once_ingested_or_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
+) -> None:
+    """A collection's keyword readiness is read live while it is ingested, and afresh once it is ingested or deleted.
+
+    The run is a write window on the collection, so a turn during it reads the store; once the run has ended, a
+    failed one too, the next turn reads afresh and that read is kept. The delete runs outside a request scope on
+    another active collection, as the API's does.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The source root.
+        how (str): What happens to the collection.
+    """
+    monkeypatch.setattr(rag_module, "_readiness_now", lambda: 1000.0)
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, client, *_ = _keyword_rag(monkeypatch, {"test": TEXT_READY})
+    rag.qdrant_collection = "active"
+    rag._qdrant_src_dir = tmp_path
+    rag._embed_model = cast(Any, object())
+    _patch_ingest_dependencies(monkeypatch)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+
+    def _decide() -> None:
+        """Build a turn's keyword matcher in the collection."""
+        with rag.collection_scope("test"):
+            _matcher(rag)
+
+    _decide()
+    kept = len(client.schemas_read)
+    _decide()
+    assert kept > 0
+    assert len(client.schemas_read) == kept
+    written_mid_run: list[bool] = []
+    mid_run: list[int] = []
+
+    def _watch(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
+        """Decide a turn's keyword matcher as the run goes, noting whether the collection is written and what was read.
+
+        Args:
+            self (_FakePipeline): The pipeline.
+            processed_hashes (set[str]): Hashes already ingested.
+
+        Returns:
+            list[Any]: No batches.
+        """
+        written_mid_run.append(collection_writes.state("test").writing)
+        _decide()
+        mid_run.append(len(client.schemas_read))
+        return []
+
+    if how == "delete":
+        rag.delete_collection("test")
+        assert client.deleted[0] == "test"
+    elif how == "ingest":
+        monkeypatch.setattr(_FakePipeline, "build", _watch)
+        with rag.collection_scope("test"):
+            rag.ingest_docs(tmp_path, build_query_engine=False)
+        assert written_mid_run == [True]
+        assert mid_run[0] > kept
+    else:
+
+        def _fail(self: _FakePipeline, processed_hashes: set[str]) -> list[Any]:
+            """Fail as a run does halfway through.
+
+            Args:
+                self (_FakePipeline): The pipeline.
+                processed_hashes (set[str]): Hashes already ingested.
+
+            Raises:
+                RuntimeError: Always.
+            """
+            _watch(self, processed_hashes)
+            raise RuntimeError("the run failed")
+
+        monkeypatch.setattr(_FakePipeline, "build", _fail)
+        with rag.collection_scope("test"), pytest.raises(RuntimeError, match="the run failed"):
+            rag.ingest_docs(tmp_path, build_query_engine=False)
+        assert written_mid_run == [True]
+        assert mid_run[0] > kept
+
+    after_it = len(client.schemas_read)
+    _decide()
+    assert len(client.schemas_read) > after_it
+    if how != "delete":
+        # The window closed: the read made after the run is kept.
+        read_afresh = len(client.schemas_read)
+        _decide()
+        assert len(client.schemas_read) == read_afresh
 
 
 def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(monkeypatch: pytest.MonkeyPatch) -> None:

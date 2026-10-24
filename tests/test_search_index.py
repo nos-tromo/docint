@@ -425,6 +425,45 @@ def test_status_keeps_its_published_shape_unless_lanes_are_asked_for() -> None:
     assert "lanes" not in search_index_status(client, "col")
 
 
+class _AskedCompanionClient(_CompanionClient):
+    """Companion client that records which collections were looked up and which were counted."""
+
+    def __init__(self, *, main: tuple[int, int], images: tuple[int, int]) -> None:
+        """Initialize with per-collection ``(total, with_text)`` counts.
+
+        Args:
+            main (tuple[int, int]): Counts for the main collection.
+            images (tuple[int, int]): Counts for the ``_images`` companion.
+        """
+        super().__init__(main=main, images=images)
+        self.exists_asked: list[str] = []
+        self.counted: list[str] = []
+
+    @override
+    def count(self, collection_name: str, **kwargs: Any) -> Any:
+        """Record the collection, then count it."""
+        self.counted.append(collection_name)
+        return super().count(collection_name, **kwargs)
+
+    @override
+    def collection_exists(self, collection_name: str) -> bool:
+        """Record the collection, then report that it exists."""
+        self.exists_asked.append(collection_name)
+        return super().collection_exists(collection_name)
+
+
+def test_status_without_the_companion_reads_only_the_main_lane() -> None:
+    """A caller that discards the image lane leaves it out: it is neither looked up nor counted."""
+    client = _AskedCompanionClient(main=(100, 90), images=(22, 0))
+
+    status = search_index_status(client, "col", by_lane=True, include_companion=False)
+
+    assert client.exists_asked == []
+    assert client.counted == ["col", "col"]
+    assert status["lanes"] == {"col": {"total": 100, "with_search_text": 90}}
+    assert (status["total"], status["with_search_text"], status["missing"]) == (100, 90, 10)
+
+
 class _FailingCompanionClient(_CompanionClient):
     """Companion client whose image lane cannot be counted."""
 

@@ -13,11 +13,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from agent_fakes import KeywordClient, ready_schema
 from fastapi.testclient import TestClient
 
 from docint.core import api as api_module
+from docint.core import collection_writes
+from docint.core.collection_writes import WriteState
+from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.ingest.preprocess import PreprocessPool, StageProgress
 from docint.core.jobs import IngestJobManager, IngestJobState, JobRunner
+from docint.core.rag import RAG, IngestStats
 
 
 def _default_runner(state: Any, push: Any) -> dict[str, Any]:
@@ -402,6 +407,94 @@ def test_summary_on_ingest_false_skips_stage(monkeypatch: pytest.MonkeyPatch) ->
     # ``stats`` is None here only because the stubbed ingest_docs returns
     # nothing; a real run carries the counters the summary line reports.
     assert result == {"empty": False, "resolution": None, "stats": None}
+
+
+@pytest.mark.parametrize("outcome", ["completed", "empty", "unsupported", "failed"])
+def test_a_turn_during_an_ingest_job_reads_its_physical_collection_live(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """While a job ingests, every read the engine serving turns makes of the physical collection goes to the store.
+
+    The run goes through the real chain: the job runner, the CLI's ``ingest_docs`` and the engine it builds, whose
+    ``ingest_docs`` is the write window; only the pipeline inside that is a stand-in. The window is the process's,
+    so the serving engine sees it, and it is keyed by the physical name, so ``mydocs`` stays at epoch 0. However
+    the run ends, the next read once it has goes to the store and is kept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        outcome (str): How the run ends: ``completed``, ``empty`` (``EmptyIngestionError``), ``unsupported``
+            (``NoSupportedFilesError``) or ``failed`` (any other error, which fails the job).
+    """
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+    monkeypatch.setattr("docint.core.rag._readiness_now", lambda: 1000.0)
+    # The engine the CLI builds reads no embedding tokenizer from the host's cache.
+    monkeypatch.setattr("docint.core.rag.build_embedding_token_counter", lambda repo_id, cache_dir: None)
+    state = _make_state(kind="ingest", resolve=False)
+    store = KeywordClient({state.physical: ready_schema("text")}, counts={state.physical: 10})
+    monkeypatch.setattr(api_module.rag, "_qdrant_client", store)
+    monkeypatch.setattr(api_module.rag, "_keyword_readiness_cache", {})
+    written: list[bool] = []
+    logical: list[WriteState] = []
+    mid_run: list[int] = []
+
+    def _read() -> int:
+        """Read the collection's readiness on the serving engine, as a documents turn does.
+
+        Returns:
+            int: How many schema reads the store has served by then.
+        """
+        api_module.rag._keyword_readiness(state.physical, with_images=False)
+        return len(store.schemas_read)
+
+    def _pipeline(self: RAG, data_dir: str | Path, **kwargs: Any) -> IngestStats:
+        """Read the serving engine's readiness twice as the run goes, then end the run as the case says.
+
+        Args:
+            self (RAG): The engine the CLI built.
+            data_dir (str | Path): The staged batch, unused.
+            **kwargs (Any): The run's options, unused.
+
+        Returns:
+            IngestStats: The run's stats, for the ``completed`` outcome.
+
+        Raises:
+            EmptyIngestionError: For the ``empty`` outcome.
+            NoSupportedFilesError: For the ``unsupported`` outcome.
+            RuntimeError: For the ``failed`` outcome.
+        """
+        written.append(collection_writes.state(state.physical).writing)
+        logical.append(collection_writes.state(state.logical_name))
+        mid_run.append(len(store.schemas_read))
+        for _ in range(2):
+            mid_run.append(_read())
+        if outcome == "empty":
+            raise api_module.EmptyIngestionError(self.qdrant_collection)
+        if outcome == "unsupported":
+            raise NoSupportedFilesError("nothing ingestable")
+        if outcome == "failed":
+            raise RuntimeError("the run failed")
+        return IngestStats(files_processed=1, files_skipped=0, files_failed=0, docs=1, nodes=3)
+
+    monkeypatch.setattr(RAG, "_ingest_docs", _pipeline)
+    kept = _read()
+    assert _read() == kept
+
+    if outcome == "failed":
+        with pytest.raises(RuntimeError, match="the run failed"):
+            api_module._run_ingest_job(state, lambda ev, p: None)
+    else:
+        result = api_module._run_ingest_job(state, lambda ev, p: None)
+        assert result["empty"] is (outcome != "completed")
+
+    assert written == [True]
+    assert logical == [WriteState(0, False)]
+    assert mid_run[0] == kept
+    assert mid_run[0] < mid_run[1] < mid_run[2]
+    assert not collection_writes.state(state.physical).writing
+    after_run = len(store.schemas_read)
+    read_afresh = _read()
+    assert read_afresh > after_run
+    assert _read() == read_afresh
 
 
 def test_staged_reports_the_files_no_job_accounts_for(client: TestClient) -> None:
