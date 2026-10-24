@@ -1307,6 +1307,17 @@ def test_a_cleared_keyword_reply_keeps_its_count() -> None:
     )
 
 
+def test_a_cleared_keyword_reply_made_while_written_keeps_the_writing_line() -> None:
+    """Cut down to make room, a count made while its collection was written still says so: no read can show it again."""
+    double = _Matcher(_result([programme_passage()], matches=3, unchecked=2, writing=True))
+
+    reply = ToolRegistry([double.tool]).call(tool_call("keyword", words="Hafenfest"), tool_context())
+
+    assert isinstance(reply, PassageReply)
+    assert WRITING_LINE in reply.keep
+    assert WRITING_LINE in cleared_text(reply)
+
+
 def test_reordered_or_recased_words_on_the_text_are_answered_from_memory() -> None:
     """The same check asked again in other words is not run, admits nothing, and is no news."""
     double = _Matcher(_result([programme_passage()], matches=2, unchecked=1))

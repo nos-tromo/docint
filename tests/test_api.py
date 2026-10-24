@@ -7222,6 +7222,29 @@ def test_an_assessment_hands_its_keyword_checks_to_the_validator(monkeypatch: py
     assert (result["validation_checked"], result["validation_mismatch"]) == (True, False)
 
 
+def test_an_assessment_shows_its_validator_a_check_made_while_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check stored with ``writing`` reaches an assessment's validator marked, as it reaches a lookup's.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+
+    api_module._assessment_validation(
+        question="Wie gut ist das Hafenfest geplant?",
+        answer="Bisher enthält keine Passage das Wort Feuerwerk.",
+        sources=[],
+        agent={"answer": "split", "evidence_chars": None, "actions": [{**ZERO_CHECK, "writing": True}]},
+    )
+
+    [prompt] = validator.prompts
+    assert '\n- "Feuerwerk" (text): 0; collection being written\n' in prompt
+    assert "intent=assessment" in prompt
+
+
 def _assessment_stream(
     calls: list[dict[str, Any]], *, agent: dict[str, Any], answer: str
 ) -> Callable[..., Generator[Any, None, None]]:
