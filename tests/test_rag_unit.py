@@ -5664,6 +5664,54 @@ def test_asingest_docs_empty_raises_and_cleans_kv_file(monkeypatch: pytest.Monke
     assert bumps == []
 
 
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+def test_asingest_docs_keeps_its_collection_written_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
+) -> None:
+    """The async run is a write window on its collection from start to end, a failed run included.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The directory ingested.
+        outcome (str): How the run ends: ``completed`` with its stats, or ``failed`` with an error.
+    """
+    physical = "u0123456789ab__hafen"
+    rag = RAG(qdrant_collection=physical)
+    stats = rag_module.IngestStats(files_processed=1, files_skipped=0, files_failed=0, docs=1, nodes=3)
+    during: list[collection_writes.WriteState] = []
+
+    async def _pipeline(self: RAG, data_dir: str | Path, **kwargs: Any) -> rag_module.IngestStats:
+        """Note where the collection's writes stand as the run goes, then end it as the case says.
+
+        Args:
+            self (RAG): The engine.
+            data_dir (str | Path): The directory ingested, unused.
+            **kwargs (Any): The run's options, unused.
+
+        Returns:
+            rag_module.IngestStats: The run's stats, for the ``completed`` outcome.
+
+        Raises:
+            RuntimeError: For the ``failed`` outcome.
+        """
+        during.append(collection_writes.state(physical))
+        if outcome == "failed":
+            raise RuntimeError("the run failed")
+        return stats
+
+    monkeypatch.setattr(RAG, "_asingest_docs", _pipeline)
+    epoch = collection_writes.state(physical).epoch
+
+    if outcome == "failed":
+        with pytest.raises(RuntimeError, match="the run failed"):
+            asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
+    else:
+        assert asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False)) is stats
+
+    assert during == [collection_writes.WriteState(epoch + 1, True)]
+    assert collection_writes.state(physical) == collection_writes.WriteState(epoch + 2, False)
+
+
 def test_create_collection_if_missing_returns_when_collection_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
