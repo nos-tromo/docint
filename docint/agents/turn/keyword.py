@@ -311,7 +311,7 @@ def keyword_note(*, matches: int | None, unchecked: int, writing: bool = False) 
     contain the words, and the coverage line says so: a zero rules out only what was checked.
     A collection being written also has chunks the index does not know yet, which no coverage
     count includes; the writing line says so. It comes second, ahead of the coverage line, so a
-    cut tail loses the coverage line first.
+    cut tail loses the coverage line before the writing line.
 
     Args:
         matches (int | None): The exact count, or ``None`` when it failed.
