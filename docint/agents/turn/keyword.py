@@ -5,13 +5,13 @@ contains a set of words and says how many there are, which a ranked search
 cannot promise. The count is exact over what the keyword index covers, so a
 zero is an answer rather than a miss, unless this process was writing the
 collection during the check: that count covers only the chunks stored so far,
-and the note and the trail step say so. The match itself runs in RAG, which owns
-the index, the filters and the retrieval chain; this module holds what the turn
-does with a match (it anchors each hit on its words, writes the count note and
-keys a check so the same one asked again is known), the :class:`KeywordTool`
-the model calls it by, and the checks block the turn's validator reads its
-counts from. It imports nothing from :mod:`docint.core.rag` or
-:mod:`docint.core.state`.
+and the note, the trail step and the validator's checks block say so. The match
+itself runs in RAG, which owns the index, the filters and the retrieval chain;
+this module holds what the turn does with a match (it anchors each hit on its
+words, writes the count note and keys a check so the same one asked again is
+known), the :class:`KeywordTool` the model calls it by, and the checks block
+the turn's validator reads its counts from. It imports nothing from
+:mod:`docint.core.rag` or :mod:`docint.core.state`.
 """
 
 from __future__ import annotations
@@ -82,6 +82,8 @@ WRITING_LINE = (
     "The collection was being written during this check, so it covers only the chunks stored so far; "
     "chunks still arriving were not checked and may still contain these words."
 )
+#: The mark that ends the validator's line of a check made while this process was writing its collection.
+WRITING_MARK = "collection being written"
 
 #: A word starts where the index starts one: no letter or digit right before it.
 _WORD_START = rf"(?<![{INDEX_WORD_CLASS}])"
@@ -360,7 +362,11 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
     """Render a turn's keyword checks for its validator, which reads the counts as facts beside the sources.
 
     Only keyword steps whose count is known are listed: a failed count says nothing
-    about the collection. Lines are kept whole, in trail order, while they fit.
+    about the collection. A step whose ``writing`` is ``True`` ends its line in
+    :data:`WRITING_MARK`: its count covers only the chunks stored so far, which the validator
+    takes as a count so far and never as the words being absent. Only that boolean marks a
+    check, since the trail is stored and read back as data. Lines are kept whole, mark included,
+    in trail order, while they fit.
 
     Args:
         actions (Sequence[Mapping[str, Any]]): The turn's trail (``agent.actions``), in order.
@@ -368,7 +374,8 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
 
     Returns:
         str: One ``- "words" (field): count`` line per check, with ``; N chunks not checked``
-        when the index does not cover every chunk; empty when there is none.
+        when the index does not cover every chunk, then ``; collection being written`` when the
+        collection was being written during the check; empty when there is none.
     """
     lines: list[str] = []
     used = 0
@@ -380,6 +387,8 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
         unchecked = action.get("unchecked")
         if type(unchecked) is int and unchecked > 0:
             line += f"; {unchecked} chunk not checked" if unchecked == 1 else f"; {unchecked} chunks not checked"
+        if action.get("writing") is True:
+            line += f"; {WRITING_MARK}"
         cost = len(line) + (1 if lines else 0)
         if used + cost > max_chars:
             break

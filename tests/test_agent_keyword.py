@@ -547,10 +547,51 @@ def test_a_single_unchecked_chunk_reads_in_the_singular() -> None:
     )
 
 
+def test_a_check_made_while_its_collection_was_written_is_marked_for_the_validator() -> None:
+    """The mark ends a check's line, after any coverage suffix, and only that check's: the count is a count so far."""
+    actions = [
+        {**KEYWORD_STEPS[1], "writing": True},
+        {**KEYWORD_STEPS[0], "writing": True},
+        {"action": "keyword", "detail": "Sturmwarnung", "found": 0, "field": "text", "matches": 5},
+    ]
+
+    assert render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS).splitlines() == [
+        '- "Regatta" (text): 0; collection being written',
+        '- "Hafenfest" (author): 3; 2 chunks not checked; collection being written',
+        '- "Sturmwarnung" (text): 5',
+    ]
+
+
+def test_the_mark_counts_toward_the_room_of_the_checks() -> None:
+    """A marked line is measured with its mark, so a block never outgrows its room and no line is cut in half."""
+    line = '- "Regatta" (text): 0; collection being written'
+    actions = [{**KEYWORD_STEPS[1], "writing": True}]
+
+    assert render_keyword_checks(actions, max_chars=len(line)) == line
+    assert render_keyword_checks(actions, max_chars=len(line) - 1) == ""
+
+
+@pytest.mark.parametrize("writing", [False, None, 1, "true"], ids=["false", "none", "one", "string"])
+def test_only_a_true_writing_marks_a_check(writing: Any) -> None:
+    """A stored step is data: only the boolean the tool writes marks a check, not a value that merely reads as true.
+
+    Args:
+        writing (Any): A ``writing`` value other than ``True``.
+    """
+    actions = [{**KEYWORD_STEPS[1], "writing": writing}]
+
+    assert render_keyword_checks(actions, max_chars=KEYWORD_CHECKS_CHARS) == '- "Regatta" (text): 0'
+
+
 @pytest.mark.parametrize(
     "actions",
-    [[], [{"action": "search", "detail": "Hafenfest", "found": 1}], [KEYWORD_STEPS[2]]],
-    ids=["no-steps", "search-only", "failed-count"],
+    [
+        [],
+        [{"action": "search", "detail": "Hafenfest", "found": 1}],
+        [KEYWORD_STEPS[2]],
+        [{**KEYWORD_STEPS[2], "writing": True}],
+    ],
+    ids=["no-steps", "search-only", "failed-count", "failed-count-written"],
 )
 def test_a_turn_without_a_known_count_has_no_checks(actions: list[dict[str, Any]]) -> None:
     """The block is empty, so the validator's prompt gains nothing.
