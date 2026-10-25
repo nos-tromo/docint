@@ -13,12 +13,13 @@ it, and what it can do) with topic-by-topic deep dives.
 | [architecture.md](architecture.md) | Runtime architecture, component map, end-to-end request flow |
 | [configuration.md](configuration.md) | Every environment variable grouped by the dataclass that reads it, with defaults |
 | [api-reference.md](api-reference.md) | Every FastAPI route, method, tag, request/response shape, and streaming semantics |
-| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `search-index`, `search-index-all`, `retention-report`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
+| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `topics`, `search-index`, `search-index-all`, `retention-report`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
 | [ingestion.md](ingestion.md) | Document ingestion pipeline: triage, layout, OCR, extraction, chunking, embedding |
 | [retrieval-and-agents.md](retrieval-and-agents.md) | Agent turns, agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
 | [ui-guide.md](ui-guide.md) | React SPA pages — Dashboard, Chat, Ingest, Analysis, Inspector, Report — plus localization |
 | [reports.md](reports.md) | Report Builder: curating findings into a case file, frozen image evidence, the five export formats |
 | [extracts.md](extracts.md) | Data extracts: full transcripts, keyframe descriptions and document text as downloadable files |
+| [topics.md](topics.md) | Topics (scalable collection clustering): runs, the assignment rule, payload keys, the store and its lock, the fit-service contract, jobs, limitations |
 | [retention.md](retention.md) | Collection retention: deleting collections nobody has worked with for 6–24 months, and what counts as activity |
 | [deployment.md](deployment.md) | Docker services, shared volumes, networks, vLLM co-deployment, proxies |
 | [migrations.md](migrations.md) | Changes existing collections do not pick up on their own, and the one action that fixes each |
