@@ -589,6 +589,13 @@ CHECKS_HEADING = (
     "Keyword checks (exact counts of indexed chunks that contain all the words; facts about the collection, "
     "not sources):"
 )
+#: A turn's topic checks as the validator is handed them: one line per topic its listing showed.
+TOPIC_CHECKS = '- T3 "Hafenfest und Stände": 410 of 12000 chunks (3.4%)'
+#: What heads them in the validator's prompt.
+TOPIC_CHECKS_HEADING = (
+    "Topic checks (counts of chunks per topic and their share of the collection; facts about the collection, "
+    "not sources):"
+)
 #: The sources a validator is shown beside an answer that cites them.
 SOURCES: list[dict[str, Any]] = [{"text": "Der Hafenverein plant das Fest im Mai.", "citation_index": 1}]
 #: Coverage diagnostics a summary carries.
@@ -621,11 +628,11 @@ def test_an_answer_without_sources_or_checks_is_a_mismatch_the_model_is_not_aske
     """With nothing to ground it, an answer is mismatched by construction, as before.
 
     Args:
-        checks (str | None): The turn's keyword checks: none.
+        checks (str | None): The turn's keyword and topic checks: none.
     """
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
-    result = RetrievalResult(answer="Ja.", sources=[], keyword_checks=checks)
+    result = RetrievalResult(answer="Ja.", sources=[], keyword_checks=checks, topic_checks=checks)
 
     finalized = agent.finalize(result, Turn(user_input="q"))
 
@@ -654,20 +661,27 @@ def test_the_checks_follow_the_summary_diagnostics_and_sit_beside_the_cited_sour
 
 
 @pytest.mark.parametrize("diagnostics", [None, DIAGNOSTICS], ids=["no-diagnostics", "diagnostics"])
+@pytest.mark.parametrize("topic_checks", [None, ""], ids=["no-topics", "empty-topics"])
 @pytest.mark.parametrize("checks", [None, ""], ids=["none", "empty"])
 def test_without_keyword_checks_the_prompt_is_byte_identical(
-    checks: str | None, diagnostics: dict[str, Any] | None
+    checks: str | None, topic_checks: str | None, diagnostics: dict[str, Any] | None
 ) -> None:
-    """A turn without a check with a known count is shown to the validator exactly as before.
+    """A turn without a check with a known count, or a topic check, is shown to the validator exactly as before.
 
     Args:
         checks (str | None): The turn's keyword checks: none.
+        topic_checks (str | None): The turn's topic checks: none.
         diagnostics (dict[str, Any] | None): Summary diagnostics, which keep their place.
     """
     agent = ResultValidationResponseAgent(enabled=True, llm=None)
 
     prompt = agent._build_prompt(
-        query="q", answer="Im Mai [1].", sources=SOURCES, summary_diagnostics=diagnostics, keyword_checks=checks
+        query="q",
+        answer="Im Mai [1].",
+        sources=SOURCES,
+        summary_diagnostics=diagnostics,
+        keyword_checks=checks,
+        topic_checks=topic_checks,
     )
 
     assert prompt == agent._build_prompt(
@@ -680,3 +694,44 @@ def test_without_keyword_checks_the_prompt_is_byte_identical(
         sources_text=agent._sources_to_text(SOURCES)[0],
     )
     assert CHECKS_HEADING not in prompt
+    assert TOPIC_CHECKS_HEADING not in prompt
+
+
+def test_an_answer_resting_on_topic_checks_alone_is_validated_by_the_model() -> None:
+    """A topic's share is a fact the validator can check the answer against, not an answer without evidence."""
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(
+        answer="Rund 3 % der Abschnitte handeln vom Hafenfest.", sources=[], topic_checks=TOPIC_CHECKS
+    )
+
+    finalized = agent.finalize(result, Turn(user_input="Wie viel der Sammlung handelt vom Hafenfest?"))
+
+    assert llm.calls == 1
+    assert llm.last_prompt is not None
+    assert llm.last_prompt.endswith(
+        f"{TOPIC_CHECKS_HEADING}\n{TOPIC_CHECKS}\n\nRetrieved sources:\n{NO_SOURCES_BESIDE_CHECKS}"
+    )
+    assert CHECKS_HEADING not in llm.last_prompt
+    assert (finalized.validation_checked, finalized.validation_mismatch) == (True, False)
+    assert finalized.validation_reason is None
+
+
+def test_the_topic_checks_follow_the_keyword_checks_and_sit_beside_the_cited_sources() -> None:
+    """A turn with both kinds of check shows the keyword checks first, then the topic checks, then the sources."""
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+
+    prompt = agent._build_prompt(
+        query="q",
+        answer="Das Fest ist im Mai [1]; rund 3 % der Abschnitte handeln davon.",
+        sources=SOURCES,
+        summary_diagnostics=DIAGNOSTICS,
+        keyword_checks=CHECKS,
+        topic_checks=TOPIC_CHECKS,
+    )
+
+    keyword_at = prompt.index(f"{CHECKS_HEADING}\n{CHECKS}\n\n")
+    topics_at = prompt.index(f"{TOPIC_CHECKS_HEADING}\n{TOPIC_CHECKS}\n\n")
+    sources_at = prompt.index("Retrieved sources:\nSource 1 [")
+    assert prompt.index("Summary diagnostics:") < keyword_at < topics_at < sources_at
+    assert NO_SOURCES_BESIDE_CHECKS not in prompt

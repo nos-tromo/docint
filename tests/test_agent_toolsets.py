@@ -13,7 +13,7 @@ from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, history_allowa
 from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.tools import SearchFn, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
-from docint.agents.turn.topics import TopicsListing, TopicsSource
+from docint.agents.turn.topics import TopicPassages, TopicsListing, TopicsSource
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
@@ -99,7 +99,7 @@ def _topics() -> TopicsSource:
         """
         raise AssertionError("The topics were listed, which the test did not expect.")
 
-    def _passages(topic_id: int) -> list[NodeWithScore] | None:
+    def _passages(topic_id: int) -> TopicPassages | None:
         """Fail: no test here expects a topic to be read.
 
         Args:

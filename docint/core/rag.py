@@ -149,7 +149,7 @@ from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.passages import passage_label
 from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
-from docint.agents.turn.topics import KEYWORDS_SHOWN, TopicLine, TopicsListing, TopicsSource
+from docint.agents.turn.topics import KEYWORDS_SHOWN, TopicLine, TopicPassages, TopicsListing, TopicsSource
 from docint.core import collection_writes
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -257,7 +257,17 @@ from docint.core.storage.utils import build_quantization_config, qdrant_collecti
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
 from docint.core.topics import views as topic_views
-from docint.core.topics.gather import RUN_FIELD, TOPIC_FIELD, central_points, dense_vector, ensure_topic_indexes
+from docint.core.topics.gather import (
+    RUN_FIELD,
+    TOPIC_FIELD,
+    and_filters,
+    central_points,
+    dense_vector,
+    eligible_filter,
+    ensure_topic_indexes,
+    topic_counts,
+)
+from docint.core.topics.gather import count as count_points
 from docint.core.topics.labels import TopicLabeller
 from docint.core.topics.service import TopicsDeps, TopicsService
 from docint.core.topics.stopwords import load_stop_words, stop_words_digest
@@ -8815,9 +8825,11 @@ class RAG:
 
         A visual or scoped turn is never offered them, and neither is a turn whose filters
         cannot be compiled for Qdrant: a topic's passages would be read outside them. The run is
-        read once, here; the listing reads the overview, and a topic's passages are its members
-        nearest its centre under the request's filter. A withheld offer is logged once at DEBUG
-        by its reason (:data:`TopicsUnavailable`), or as ``fault`` with the exception's type alone.
+        read once, here. Without filters the listing reads the overview; under them it counts
+        each topic's chunks and the total within the request's filter, as a keyword check counts
+        under it. A topic's passages are its members nearest its centre under the request's
+        filter, named by the run's own label. A withheld offer is logged once at DEBUG by its
+        reason (:data:`TopicsUnavailable`), or as ``fault`` with the exception's type alone.
 
         Args:
             retrieval_target (RetrievalTarget): Which evidence the turn may answer from.
@@ -8876,11 +8888,14 @@ class RAG:
             return "no_topics"
 
         def _listing() -> TopicsListing:
-            """Read the collection's topics and their sizes from the overview.
+            """Read the collection's topics and their sizes, under the request's filter when it has one.
 
             Returns:
-                TopicsListing: The topics in overview order, largest first; none when the run is gone.
+                TopicsListing: The topics, largest first; none when the run is gone. Under a filter,
+                the run's topics that hold a chunk it selects, sized and totalled within it.
             """
+            if request_filter is not None:
+                return _filtered_listing(request_filter)
             overview = self.topics_overview(collection)
             if overview is None:
                 return TopicsListing(lines=(), total=0)
@@ -8895,7 +8910,39 @@ class RAG:
             )
             return TopicsListing(lines=lines, total=int((overview.get("coverage") or {}).get("total") or 0))
 
-        def _passages(topic_id: int) -> list[NodeWithScore] | None:
+        def _filtered_listing(within: qdrant_models.Filter) -> TopicsListing:
+            """Count each topic's chunks and the eligible total within the request's filter.
+
+            The topic keys get their indexes first, as the overview's facet does.
+
+            Args:
+                within (qdrant_models.Filter): The request's compiled filter.
+
+            Returns:
+                TopicsListing: The run's topics holding a chunk the filter selects, with their labels
+                and keywords from the run, largest first.
+            """
+            self._ensure_topic_indexes_once(collection)
+            client = self.qdrant_client
+            topics = run.table.topics
+            sizes = topic_counts(client, collection, run.run_id, limit=len(topics) + 2, extra=within)
+            total = count_points(client, collection, and_filters(eligible_filter(), within))
+            lines = sorted(
+                (
+                    TopicLine(
+                        topic_id=topic.id,
+                        label=topic.label,
+                        keywords=tuple(word for word, _ in topic.keywords[:KEYWORDS_SHOWN]),
+                        size=sizes[topic.id],
+                    )
+                    for topic in topics
+                    if sizes.get(topic.id, 0) > 0
+                ),
+                key=lambda line: (-line.size, line.topic_id),
+            )
+            return TopicsListing(lines=tuple(lines), total=total, filtered=True)
+
+        def _passages(topic_id: int) -> TopicPassages | None:
             """Read one topic's members nearest its centre, under the request's filter.
 
             Runs on a search thread, inside the request's collection scope.
@@ -8904,9 +8951,9 @@ class RAG:
                 topic_id (int): The topic.
 
             Returns:
-                list[NodeWithScore] | None: The passages, closest first, at most
-                ``AGENT_TOPIC_PASSAGES``; empty when the vectors no longer match the run's size.
-                ``None`` for a topic the run lacks, the unassigned ``-1`` included.
+                TopicPassages | None: The passages, closest first, at most ``AGENT_TOPIC_PASSAGES``,
+                none when the vectors no longer match the run's size, with the topic's label in the
+                run. ``None`` for a topic the run lacks, the unassigned ``-1`` included.
 
             Raises:
                 RuntimeError: When the active collection is not the one the topics were built for,
@@ -8917,10 +8964,12 @@ class RAG:
             centre = run.table.centre(topic_id)
             if centre is None:
                 return None
+            info = run.table.topic(topic_id)
+            label = info.label if info is not None else ""
             self._ensure_topic_indexes_once(collection)
             dense = dense_vector(self.qdrant_client, collection)
             if dense.dim != run.table.dim:
-                return []
+                return TopicPassages(label=label, nodes=[])
             points = central_points(
                 self.qdrant_client,
                 collection,
@@ -8932,7 +8981,7 @@ class RAG:
                 extra=request_filter,
             )
             nodes = (_point_node(str(point.id), dict(point.payload or {})) for point in points)
-            return [scored for scored in nodes if scored is not None]
+            return TopicPassages(label=label, nodes=[scored for scored in nodes if scored is not None])
 
         return TopicsSource(listing=_listing, passages=_passages)
 
@@ -9252,7 +9301,8 @@ class RAG:
         a passage they do not match is left out; filters active without them carry nothing,
         logged once at DEBUG as ``filters``. A rule on a topic key is checked against the main
         collection's stored topic keys, read in one batch, since a docstore node holds none; the
-        node itself is never changed, and a picture, which has no topic, does not match it. A
+        node itself is never changed. A passage with no topic keys, such as a picture, is checked
+        as one without a topic: a rule asking for a topic drops it, a ``neq`` rule keeps it. A
         passage without text is not carried. A failure of the store or the index carries nothing
         and is logged by the exception's type alone; a docstore miss of one id only sends that id
         on to the store. One INFO line counts the outcome. Runs under the caller's collection

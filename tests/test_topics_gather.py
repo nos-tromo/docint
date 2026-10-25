@@ -411,6 +411,22 @@ def test_topic_counts_read_the_runs_facet_and_ignore_other_runs(client: QdrantCl
     assert topic_counts(client, COLL, "r0", limit=10) == {7: 1}
 
 
+def test_topic_counts_count_only_the_members_an_extra_filter_selects(client: QdrantClient) -> None:
+    """An extra filter narrows every topic's count, and a topic it leaves no member in drops out.
+
+    Args:
+        client: Qdrant client.
+    """
+    ids = _seed(client)
+    write_assignments(client, COLL, "r1", {0: ids[:3], 1: ids[3:4], -1: ids[4:]})
+    is_h1 = models.FieldCondition(key=FILE_HASH_FIELD, match=models.MatchValue(value="h1"))
+    only_h1, not_h1 = models.Filter(must=[is_h1]), models.Filter(must_not=[is_h1])
+    # Indices 0..5 carry hashes h0,h1,h0,h1,h0,h1.
+    assert topic_counts(client, COLL, "r1", limit=10, extra=only_h1) == {0: 1, 1: 1, -1: 1}
+    assert topic_counts(client, COLL, "r1", limit=10, extra=not_h1) == {0: 2, -1: 1}
+    assert topic_counts(client, COLL, "r1", limit=10, extra=None) == topic_counts(client, COLL, "r1", limit=10)
+
+
 def test_document_counts_facet_file_hash_within_a_topic(client: QdrantClient) -> None:
     """Documents are counted within the topic, largest first and by hash on ties.
 

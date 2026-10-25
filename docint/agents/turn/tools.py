@@ -139,8 +139,9 @@ class ToolReply:
             A reply answered from memory never is.
         trail (Mapping[str, Any] | None): Extra keys for this call's step in the turn's trail,
             copied verbatim; a key may hold ``None`` on purpose, as a failed count's ``matches``
-            does. Its values must be JSON values (str, int, float, bool or ``None``), since the
-            stored step is persisted with ``json.dumps``. ``None`` for none.
+            does. Its values must be JSON values (str, int, float, bool, ``None``, or lists of
+            them, as a topics listing's ``topics`` is), since the stored step is persisted with
+            ``json.dumps``. ``None`` for none.
         kind (str): Why the call was not answered, an :data:`ErrorKind` token, on every
             :func:`error_reply`; empty on any other reply. The turn logs it in place of the
             call's arguments.

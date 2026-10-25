@@ -10,7 +10,7 @@ import json
 import threading
 import types
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
@@ -64,6 +64,7 @@ from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import BLOB_PAYLOAD_KEYS, RETRIEVAL_TARGETS, RetrievalTarget
 from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.index import image_companion_name
+from docint.core.topics.gather import and_filters, eligible_filter
 from docint.core.topics.model import TopicInfo, TopicTable
 from docint.core.topics.store import TopicRun
 from docint.utils.embed_chunking import estimate_tokens
@@ -3597,7 +3598,7 @@ NO_ROOM_FOR_TOPICS = "The topics tool was withheld from an agent turn: "
 
 
 def _topic_run(*, empty: bool = False) -> TopicRun:
-    """Build the invented run: two topics over four-dimensional vectors.
+    """Build the invented run: three topics over four-dimensional vectors.
 
     Args:
         empty (bool): Whether the run found no topics at all.
@@ -3628,7 +3629,11 @@ def _topic_run(*, empty: bool = False) -> TopicRun:
             floor=0.5,
         )
 
-    topics = () if empty else (_info(0, "Hafenfest und Stände"), _info(1, "Regatta am Sonntag"))
+    topics = (
+        ()
+        if empty
+        else (_info(0, "Hafenfest und Stände"), _info(1, "Regatta am Sonntag"), _info(2, "Anmeldung am Kai"))
+    )
     table = TopicTable(topics=topics, centres=np.eye(len(topics), 4))
     return TopicRun(run_id=TOPIC_RUN_ID, record={}, table=table)
 
@@ -3650,8 +3655,39 @@ def _overview() -> dict[str, Any]:
     }
 
 
-def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = False) -> list[dict[str, Any]]:
-    """Give the collection an active run, and record every central-passage read with where it ran.
+@dataclass
+class _TopicReads:
+    """What a turn's topics read, in order.
+
+    Attributes:
+        reads (list[dict[str, Any]]): One record per central-passage read: the collection read, the
+            active one, the run, the topic, the limit and the extra filter.
+        overviews (int): Reads of the overview.
+        events (list[str]): Index ensures (``ensure:<collection>``), filtered facets and counts, in order.
+    """
+
+    reads: list[dict[str, Any]] = field(default_factory=list)
+    overviews: int = 0
+    events: list[str] = field(default_factory=list)
+
+
+def _no_filtered_count(*args: Any, **kwargs: Any) -> Any:
+    """Fail: only a listing under the turn's filters counts by itself.
+
+    Args:
+        *args (Any): The call's arguments.
+        **kwargs (Any): The call's keywords.
+
+    Raises:
+        AssertionError: Always.
+    """
+    raise AssertionError("A filtered count ran, which the test did not expect.")
+
+
+def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = False) -> _TopicReads:
+    """Give the collection an active run, and record what its topics read and where.
+
+    The filtered facet and count fail the test unless it scripts them.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -3659,14 +3695,31 @@ def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = Fa
         empty (bool): Whether the run found no topics.
 
     Returns:
-        list[dict[str, Any]]: One record per read: the collection read, the active one, the run, the topic,
-        the limit and the extra filter.
+        _TopicReads: The record, filled in as the topics are read.
     """
     run = _topic_run(empty=empty)
+    seen = _TopicReads()
+
+    def _overview_read(physical: str) -> dict[str, Any]:
+        """Count an overview read and describe the run.
+
+        Args:
+            physical (str): The collection.
+
+        Returns:
+            dict[str, Any]: The overview.
+        """
+        seen.overviews += 1
+        return _overview()
+
     monkeypatch.setattr(rag, "_active_topic_run", lambda physical: run)
-    monkeypatch.setattr(rag, "topics_overview", lambda physical: _overview())
-    monkeypatch.setattr(rag, "_ensure_topic_indexes_once", lambda collection: None)
-    reads: list[dict[str, Any]] = []
+    monkeypatch.setattr(rag, "topics_overview", _overview_read)
+    monkeypatch.setattr(
+        rag, "_ensure_topic_indexes_once", lambda collection: seen.events.append(f"ensure:{collection}")
+    )
+    monkeypatch.setattr("docint.core.rag.topic_counts", _no_filtered_count)
+    monkeypatch.setattr("docint.core.rag.count_points", _no_filtered_count)
+    reads = seen.reads
 
     def _central(client: Any, collection: str, **kwargs: Any) -> list[types.SimpleNamespace]:
         """Record the read and find the programme chunk.
@@ -3695,7 +3748,7 @@ def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = Fa
     monkeypatch.setattr(
         "docint.core.rag.dense_vector", lambda client, collection: types.SimpleNamespace(name="text-dense", dim=4)
     )
-    return reads
+    return seen
 
 
 @pytest.mark.parametrize("target", ["all", "documents"])
@@ -3712,7 +3765,7 @@ def test_the_topics_tool_is_offered_only_with_an_active_run(
     """
     bare = _turn(_rag(monkeypatch, code=code), target=target)
     rag = _rag(monkeypatch, code=code)
-    _topics_ready(monkeypatch, rag)
+    seen = _topics_ready(monkeypatch, rag)
 
     turn = _turn(rag, target=target)
 
@@ -3728,6 +3781,76 @@ def test_the_topics_tool_is_offered_only_with_an_active_run(
         "2 topics over 50 chunks:",
         "T1 · Regatta am Sonntag · hafenfest, stände, musik · 20 chunks (40.0%)",
     ]
+    assert (seen.overviews, seen.events) == (1, [])
+
+
+def test_a_filtered_listing_counts_within_the_turns_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the turn's filters each topic's size and the total are counted within them, as a keyword check counts.
+
+    A topic none of whose chunks the filters select is left out, and the labels and keywords come from the run.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    seen = _topics_ready(monkeypatch, rag)
+    compiled = build_qdrant_filter(RULES)
+    counted: list[dict[str, Any]] = []
+    totals: list[Any] = []
+
+    def _counts(client: Any, collection: str, run_id: str, *, limit: int, extra: Any = None) -> dict[int, int]:
+        """Record the facet and answer each topic's filtered size.
+
+        Args:
+            client (Any): The store client.
+            collection (str): The collection.
+            run_id (str): The run.
+            limit (int): Most facet values.
+            extra (Any): The further filter.
+
+        Returns:
+            dict[int, int]: Topic 1 holds five chunks, topic 0 three, the unassigned bucket four, topic 2 none.
+        """
+        seen.events.append("facet")
+        counted.append({"collection": collection, "run_id": run_id, "limit": limit, "extra": extra})
+        return {0: 3, 1: 5, -1: 4}
+
+    def _count(client: Any, collection: str, flt: Any) -> int:
+        """Record the total's filter and answer it.
+
+        Args:
+            client (Any): The store client.
+            collection (str): The collection.
+            flt (Any): Which points.
+
+        Returns:
+            int: Twelve chunks.
+        """
+        seen.events.append("count")
+        totals.append((collection, flt))
+        return 12
+
+    monkeypatch.setattr("docint.core.rag.topic_counts", _counts)
+    monkeypatch.setattr("docint.core.rag.count_points", _count)
+
+    with rag.collection_scope(PHYSICAL):
+        turn = _turn(rag, target="documents", metadata_filter_rules=RULES, metadata_filters_active=True)
+        reply = turn.loop._registry.call(tool_call("topics"), _ctx(turn))
+
+    assert reply.text.split("\n") == [
+        "2 topics over 12 chunks within the turn's filters:",
+        "T1 · Regatta am Sonntag · hafenfest, stände, musik · 5 chunks (41.7%)",
+        "T0 · Hafenfest und Stände · hafenfest, stände, musik · 3 chunks (25.0%)",
+    ]
+    assert counted == [{"collection": PHYSICAL, "run_id": TOPIC_RUN_ID, "limit": 5, "extra": compiled}]
+    assert totals == [(PHYSICAL, and_filters(eligible_filter(), compiled))]
+    assert seen.events == [f"ensure:{PHYSICAL}", "facet", "count"]
+    assert seen.overviews == 0
+    assert reply.trail == {
+        "total": 12,
+        "filtered": True,
+        "topics": [[1, "Regatta am Sonntag", 5], [0, "Hafenfest und Stände", 3]],
+    }
 
 
 @pytest.mark.parametrize("reason", ["no-run", "no-topics", "disabled"])
@@ -3831,7 +3954,8 @@ def test_topic_passages_and_in_the_turns_filter_and_stay_in_their_collection(mon
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     rag = _rag(monkeypatch)
-    reads = _topics_ready(monkeypatch, rag)
+    seen = _topics_ready(monkeypatch, rag)
+    reads = seen.reads
 
     with rag.collection_scope(PHYSICAL):
         turn = _turn(rag, target="documents", metadata_filter_rules=RULES, metadata_filters_active=True)
@@ -3851,7 +3975,9 @@ def test_topic_passages_and_in_the_turns_filter_and_stay_in_their_collection(mon
     ]
     assert reply.found == 1
     assert [entry.node.node_id for entry in ctx.ledger.entries()] == ["7"]
+    # The label is the run's own: the overview is never read for it.
     assert reply.text.startswith("T1 · Regatta am Sonntag")
+    assert seen.overviews == 0
     assert missing.kind == "no_such_topic"
     with rag.collection_scope("u0123456789ab__other"), pytest.raises(RuntimeError, match="outside the collection"):
         turn.loop._registry.call(tool_call("topics", topic="T0"), ctx)
@@ -3861,26 +3987,34 @@ def test_topic_passages_and_in_the_turns_filter_and_stay_in_their_collection(mon
 def test_carried_passages_match_a_topic_rule_through_their_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     """A topic rule is checked on the stored topic keys, read for the text passages alone; no node is changed.
 
+    Both text passages come from the docstore, whose nodes hold no topic keys, so only the stored keys can
+    match them; the chunk is stored under the integer id Qdrant hands back, so its keys reach it only through
+    the id it was asked by. A picture holds no topic keys: a rule asking for a topic drops it, ``neq`` keeps it.
+
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     store = _PointStore(
         {
             PHYSICAL: {
-                7: {**_chunk_payload(), "docint_topic": f"{TOPIC_RUN_ID}:0", "docint_topic_run": TOPIC_RUN_ID},
-                SECTION_ID: {"docint_topic": f"{TOPIC_RUN_ID}:1", "docint_topic_run": TOPIC_RUN_ID},
+                7: {**_chunk_payload(), "docint_topic": f"{TOPIC_RUN_ID}:1", "docint_topic_run": TOPIC_RUN_ID},
+                SECTION_ID: {"docint_topic": f"{TOPIC_RUN_ID}:0", "docint_topic_run": TOPIC_RUN_ID},
             },
             PHYSICAL_IMAGES: {FRAME_ID: _frame_payload()},
         }
     )
-    rag = _carrying(monkeypatch, store, _Docstore(_section_node()))
-    rule = [{"field": "docint_topic", "operator": "eq", "value": f"{TOPIC_RUN_ID}:1"}]
+    chunk = TextNode(id_=CHUNK_ID, text=programme_passage().node.get_content(), metadata={"filename": "programm.pdf"})
+    rag = _carrying(monkeypatch, store, _Docstore(_section_node(), chunk))
+    asked = [SECTION_ID, CHUNK_ID, FRAME_ID]
+    topic_one = {"field": "docint_topic", "operator": "eq", "value": f"{TOPIC_RUN_ID}:1"}
 
-    carried = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], rules=rule, active=True)
-    plain = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], rules=RULES, active=True)
+    carried = _carry(rag, asked, rules=[topic_one], active=True)
+    others = _carry(rag, asked, rules=[{**topic_one, "operator": "neq"}], active=True)
+    plain = _carry(rag, asked, rules=RULES, active=True)
 
-    assert [scored.node.node_id for scored in carried] == [SECTION_ID]
+    assert [scored.node.node_id for scored in carried] == [CHUNK_ID]
     assert "docint_topic" not in carried[0].node.metadata
+    assert [scored.node.node_id for scored in others] == [SECTION_ID, FRAME_ID]
     topic_reads = [read for read in store.retrieved if read["with_payload"] == ["docint_topic", "docint_topic_run"]]
-    assert [(read["collection_name"], read["ids"]) for read in topic_reads] == [(PHYSICAL, [SECTION_ID, 7])]
+    assert [(read["collection_name"], read["ids"]) for read in topic_reads] == [(PHYSICAL, [SECTION_ID, 7])] * 2
     assert [scored.node.node_id for scored in plain] == [FRAME_ID]

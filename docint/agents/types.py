@@ -162,6 +162,13 @@ class RetrievalResult:
     Facts about the collection the validator reads beside the sources, so an
     answer may state a count no passage shows. ``None`` or empty for none.
     """
+    topic_checks: str | None = None
+    """An agent turn's topic checks: each topic its listing showed, with its size and share, one line each.
+
+    Facts about the collection the validator reads beside the sources and the
+    keyword checks, so an answer may state a topic's share no passage shows.
+    ``None`` or empty for none.
+    """
     turn_idx: int | None = None
     """Index of the persisted conversation turn; an internal join key.
 

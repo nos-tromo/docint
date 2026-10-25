@@ -32,7 +32,7 @@ from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
 from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, cleared_text
 from docint.agents.turn.toolsets import toolset_for
-from docint.agents.turn.topics import TopicsListing, TopicsSource
+from docint.agents.turn.topics import FILTERED_MARK, TopicsListing, TopicsSource
 from docint.core.rag import RAG
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
@@ -808,6 +808,25 @@ def test_the_validators_take_a_check_made_while_written_only_as_a_count_so_far(c
     ]
 
     assert len(marked) == 1, f"{code}/{name}.txt does not name {WRITING_MARK!r} on its keyword check line"
+
+
+@pytest.mark.parametrize("name", VALIDATOR_PROMPTS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_validators_take_a_share_from_a_listed_topic_check_as_grounded(code: str, name: str) -> None:
+    """A topic's share cites no passage, so each validator has one line accepting it on a topic check.
+
+    The same line names the mark a check counted within the turn's filters ends in, and names no keyword check,
+    so the keyword line stays the only one that does.
+
+    Args:
+        code (str): The locale.
+        name (str): The validator prompt.
+    """
+    lines = [line for line in _prompt(name, code).splitlines() if "topic check" in line.casefold()]
+
+    assert len(lines) == 1, f"{code}/{name}.txt names the topic checks on {len(lines)} lines"
+    assert FILTERED_MARK in lines[0], f"{code}/{name}.txt does not name {FILTERED_MARK!r} on its topic check line"
+    assert "keyword check" not in lines[0].casefold()
 
 
 @pytest.mark.parametrize("target", TARGETS)

@@ -27,6 +27,7 @@ from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import SearchFn, ToolContext, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
+from docint.agents.turn.topics import TopicsSource
 from docint.core.search.fields import SEARCH_FIELDS
 
 ScriptedRound = Sequence[dict[str, Any] | Exception] | Exception
@@ -552,6 +553,7 @@ def scripted_loop(
     search: SearchFn | None = None,
     search_images: SearchFn | None = None,
     keyword: KeywordMatcher | None = None,
+    topics: TopicsSource | None = None,
     view: Callable[[BaseNode], BaseNode] = llm_view,
     **overrides: Any,
 ) -> AgentLoop:
@@ -563,6 +565,7 @@ def scripted_loop(
         search (SearchFn | None): The text search; by default one that fails if it runs.
         search_images (SearchFn | None): The image search; by default one that fails if it runs.
         keyword (KeywordMatcher | None): The keyword match to offer; by default none, so no keyword tool.
+        topics (TopicsSource | None): The topics to offer; by default none, so no topics tool.
         view (Callable[[BaseNode], BaseNode]): The LLM view; the whitelist double by default.
         **overrides (Any): Further loop arguments, such as limits, model slots or a thumbnail fetcher.
 
@@ -575,6 +578,7 @@ def scripted_loop(
         search_images=search_images or ScriptedSearch(),
         list_keyframes=ScriptedSearch(),
         keyword=keyword,
+        topics=topics,
     )
     kwargs: dict[str, Any] = {
         "budget": turn_budget(),

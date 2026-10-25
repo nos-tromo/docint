@@ -459,7 +459,9 @@ def count(client: Any, collection: str, flt: models.Filter) -> int:
     return int(client.count(collection_name=collection, count_filter=flt, exact=True).count)
 
 
-def topic_counts(client: Any, collection: str, run_id: str, *, limit: int) -> dict[int, int]:
+def topic_counts(
+    client: Any, collection: str, run_id: str, *, limit: int, extra: models.Filter | None = None
+) -> dict[int, int]:
     """Count members per topic for one run.
 
     Args:
@@ -467,12 +469,17 @@ def topic_counts(client: Any, collection: str, run_id: str, *, limit: int) -> di
         collection: Physical collection name.
         run_id: Run id.
         limit: Most facet values to read.
+        extra: A further filter the counted members must satisfy.
 
     Returns:
         Topic id to member count; values of other runs are ignored.
     """
     hits = client.facet(
-        collection_name=collection, key=TOPIC_FIELD, facet_filter=run_filter(run_id), exact=True, limit=limit
+        collection_name=collection,
+        key=TOPIC_FIELD,
+        facet_filter=and_filters(run_filter(run_id), extra),
+        exact=True,
+        limit=limit,
     ).hits
     out: dict[int, int] = {}
     for hit in hits:

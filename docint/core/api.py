@@ -57,6 +57,7 @@ from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
 from docint.agents.turn.keyword import KEYWORD_CHECKS_CHARS, render_keyword_checks
 from docint.agents.turn.probe import probe_tools
+from docint.agents.turn.topics import TOPIC_CHECKS_CHARS, render_topic_checks
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
@@ -931,6 +932,7 @@ def _validation_payload(
     tool_used: str | None = None,
     previous_user_input: str | None = None,
     keyword_checks: str | None = None,
+    topic_checks: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -947,6 +949,9 @@ def _validation_payload(
             validator ahead of the question; ``None`` shows none.
         keyword_checks (str | None): An agent turn's keyword checks with a known count, one line
             each (see :func:`_trail_keyword_checks`), which the validator reads as facts; ``None``
+            or empty for none.
+        topic_checks (str | None): An agent turn's topic checks, one line per topic its listing
+            showed (see :func:`_trail_topic_checks`), which the validator reads as facts; ``None``
             or empty for none.
 
     Returns:
@@ -973,6 +978,7 @@ def _validation_payload(
         intent=intent,
         tool_used=tool_used,
         keyword_checks=keyword_checks,
+        topic_checks=topic_checks,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question, previous_user_input=previous_user_input))
     return {
@@ -1082,6 +1088,21 @@ def _confirm_tools_rejection() -> None:
     confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model), reasoning=reasoning)
 
 
+def _trail_steps(agent: Any) -> list[Mapping[str, Any]]:
+    """Read the steps an agent turn's trail holds, whatever shape it was stored in.
+
+    Args:
+        agent (Any): The turn's ``agent`` trail.
+
+    Returns:
+        list[Mapping[str, Any]]: Its ``actions`` that are mappings, in order; none without them.
+    """
+    actions = agent.get("actions") if isinstance(agent, dict) else None
+    if not isinstance(actions, list):
+        return []
+    return [step for step in actions if isinstance(step, Mapping)]
+
+
 def _trail_keyword_checks(agent: Any) -> str:
     """Render the keyword checks an agent turn's trail holds, for its validator.
 
@@ -1092,17 +1113,26 @@ def _trail_keyword_checks(agent: Any) -> str:
         str: One line per keyword step with a known count, within ``KEYWORD_CHECKS_CHARS``
         (see :func:`~docint.agents.turn.keyword.render_keyword_checks`); empty when there is none.
     """
-    actions = agent.get("actions") if isinstance(agent, dict) else None
-    if not isinstance(actions, list):
-        return ""
-    steps = [step for step in actions if isinstance(step, Mapping)]
-    return render_keyword_checks(steps, max_chars=KEYWORD_CHECKS_CHARS)
+    return render_keyword_checks(_trail_steps(agent), max_chars=KEYWORD_CHECKS_CHARS)
+
+
+def _trail_topic_checks(agent: Any) -> str:
+    """Render the topic checks an agent turn's trail holds, for its validator.
+
+    Args:
+        agent (Any): The turn's ``agent`` trail.
+
+    Returns:
+        str: One line per topic a listing step showed, within ``TOPIC_CHECKS_CHARS``
+        (see :func:`~docint.agents.turn.topics.render_topic_checks`); empty when there is none.
+    """
+    return render_topic_checks(_trail_steps(agent), max_chars=TOPIC_CHECKS_CHARS)
 
 
 def _assessment_validation(
     *, question: str, answer: str, sources: list[dict[str, Any]], agent: Any
 ) -> dict[str, bool | str | None]:
-    """Validate only the source-backed part of an assessment turn, beside the turn's keyword checks.
+    """Validate only the source-backed part of an assessment turn, beside the turn's keyword and topic checks.
 
     Args:
         question (str): The user's question.
@@ -1124,12 +1154,14 @@ def _assessment_validation(
             "validation_reason": ASSESSMENT_NOT_VALIDATED_REASON,
         }
     checks = _trail_keyword_checks(trail)
+    topic_checks = _trail_topic_checks(trail)
     return _validation_payload(
         question=question,
         answer=evidence,
-        sources=cited_sources(evidence, sources, fallback=not checks),
+        sources=cited_sources(evidence, sources, fallback=not (checks or topic_checks)),
         intent="assessment",
         keyword_checks=checks,
+        topic_checks=topic_checks,
     )
 
 
@@ -1149,10 +1181,10 @@ def _turn_validation(
     An agent lookup is checked against the sources it cites, since its evidence holds every
     passage its tools showed, with the previous user message ahead of the question: the agent
     read the conversation, so a follow-up is only judged right against what it follows. Either
-    agent mode also hands the validator the turn's keyword checks with a known count, as facts
-    an answer may state without citing a passage; an answer that cites none beside such checks
-    is judged against the checks alone, never against passages it does not rely on. A plain
-    lookup is checked as it always was.
+    agent mode also hands the validator the turn's keyword checks with a known count and its
+    topic checks, as facts an answer may state without citing a passage; an answer that cites
+    none beside such checks is judged against the checks alone, never against passages it does
+    not rely on. A plain lookup is checked as it always was.
 
     Args:
         data (dict[str, Any]): The turn's payload; ``answer_mode`` names an agent turn's mode.
@@ -1171,12 +1203,14 @@ def _turn_validation(
         return _assessment_validation(question=question, answer=answer, sources=sources, agent=data.get("agent"))
     if mode == "lookup":
         checks = _trail_keyword_checks(data.get("agent"))
+        topic_checks = _trail_topic_checks(data.get("agent"))
         return _validation_payload(
             question=question,
             answer=answer,
-            sources=cited_sources(answer, sources, fallback=not checks),
+            sources=cited_sources(answer, sources, fallback=not (checks or topic_checks)),
             previous_user_input=previous_user_input,
             keyword_checks=checks,
+            topic_checks=topic_checks,
         )
     return _validation_payload(
         question=question,
