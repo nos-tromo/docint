@@ -268,3 +268,17 @@ def test_delete_collection_removes_everything(tmp_path: Path) -> None:
     assert not (tmp_path / PHYSICAL).exists()
     store.delete_collection(PHYSICAL)
     store.delete_run(PHYSICAL, run.run_id)
+
+
+def test_prune_removes_a_run_even_when_it_is_the_active_one(tmp_path: Path) -> None:
+    """Prune ignores the active pointer."""
+    store = TopicStore(tmp_path)
+    a, b = _run(_id(store, 1)), _run(_id(store, 2))
+    store.save(PHYSICAL, a)
+    store.save(PHYSICAL, b)
+    store.activate(PHYSICAL, a.run_id)
+    store.prune(PHYSICAL, keep=b.run_id)
+    assert not (tmp_path / PHYSICAL / a.run_id).exists()
+    assert (tmp_path / PHYSICAL / "active.json").is_file()
+    assert store.active_id(PHYSICAL) == a.run_id
+    assert store.active(PHYSICAL, owner_created_at=a.record["owner_created_at"]) is None

@@ -213,6 +213,10 @@ class TopicStore:
     def save(self, physical: str, run: TopicRun) -> None:
         """Write a run: the centres first, ``run.json`` last.
 
+        Run ids are write-once: a run is never re-saved under the same id with
+        differently shaped centres (re-saving the same table with updated
+        metadata is fine).
+
         Args:
             physical (str): Collection name.
             run (TopicRun): The run.
@@ -305,6 +309,8 @@ class TopicStore:
     def discard_stale(self, physical: str, *, owner_created_at: str | None) -> bool:
         """Delete the active run when it belongs to a recreated collection.
 
+        Takes no lock; call it under the collection lock (:meth:`try_lock`).
+
         Args:
             physical (str): Collection name.
             owner_created_at (str | None): The ownership row's creation time now.
@@ -334,6 +340,10 @@ class TopicStore:
     def prune(self, physical: str, *, keep: str) -> None:
         """Remove every run but one.
 
+        Does not read ``active.json``: if ``keep`` is not the active run, the
+        active run's directory is deleted and the pointer is left dangling.
+        Call it under the collection lock, passing the run just activated.
+
         Args:
             physical (str): Collection name.
             keep (str): The run id to keep.
@@ -348,6 +358,11 @@ class TopicStore:
 
     def delete_collection(self, physical: str) -> None:
         """Remove every run of a collection; a missing one is ignored.
+
+        This is the collection-deletion cascade. It takes no lock and removes
+        ``.lock`` with the rest. A job still running against the deleted
+        collection is caught by the ``owner_created_at`` check before it
+        activates.
 
         Args:
             physical (str): Collection name.
