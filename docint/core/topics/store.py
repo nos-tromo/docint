@@ -18,6 +18,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,6 +36,11 @@ __all__ = ["RUN_ID_PATTERN", "TopicLock", "TopicRun", "TopicStore"]
 RUN_ID_PATTERN = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
 #: A collection name that is its own directory; any other is hashed (see ``TopicStore._dir``).
 _COLLECTION_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_TORN_RETRY_S = 0.05
+
+
+class _TornRun(ValueError):
+    """A run's centres and record disagree, as they do mid-save."""
 
 
 @dataclass(frozen=True)
@@ -213,9 +219,10 @@ class TopicStore:
     def save(self, physical: str, run: TopicRun) -> None:
         """Write a run: the centres first, ``run.json`` last.
 
-        Run ids are write-once: a run is never re-saved under the same id with
-        differently shaped centres (re-saving the same table with updated
-        metadata is fine).
+        A run may be re-saved under its id with updated metadata, or with rows
+        appended to its centres (topics discovered later); existing rows never
+        change. A lock-free reader can meet the new centres beside the old
+        ``run.json`` between the two writes, which :meth:`load` reads again.
 
         Args:
             physical (str): Collection name.
@@ -235,6 +242,9 @@ class TopicStore:
             physical (str): Collection name.
             run_id (str): The run id.
 
+        A shape mismatch is read once more after a short pause, since a save in
+        progress produces one; only a second mismatch counts as unreadable.
+
         Returns:
             TopicRun | None: The run; ``None`` when a file is missing, corrupt
                 or the centres do not match the record.
@@ -243,19 +253,43 @@ class TopicStore:
             ValueError: When the run id is unsafe.
         """
         directory = self._run_dir(physical, run_id)
-        try:
-            record = json.loads((directory / "run.json").read_text(encoding="utf-8"))
-            topics = tuple(TopicInfo.from_json(t) for t in record.pop("topics"))
-            centres = np.load(directory / "centres.npy", allow_pickle=False)
-            if centres.shape != (len(topics), int(record["dense"]["dim"])):
-                raise ValueError("centres shape does not match the record")
-            table = TopicTable(topics=topics, centres=centres.astype(np.float64))
-        except FileNotFoundError:
-            return None
-        except Exception as exc:
-            logger.warning("Unreadable topic run '{}' ({})", run_id, type(exc).__name__)
-            return None
-        return TopicRun(run_id=run_id, record=record, table=table)
+        for attempt in range(2):
+            try:
+                return self._read(directory, run_id)
+            except FileNotFoundError:
+                return None
+            except _TornRun:
+                if attempt == 0:
+                    time.sleep(_TORN_RETRY_S)
+                    continue
+                logger.warning("Topic run '{}' centres do not match its record", run_id)
+                return None
+            except Exception as exc:
+                logger.warning("Unreadable topic run '{}' ({})", run_id, type(exc).__name__)
+                return None
+        return None
+
+    def _read(self, directory: Path, run_id: str) -> TopicRun:
+        """Read a run's two files once.
+
+        Args:
+            directory (Path): The run's directory.
+            run_id (str): The run id.
+
+        Returns:
+            TopicRun: The run.
+
+        Raises:
+            _TornRun: When the centres' shape disagrees with the record.
+        """
+        record = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+        topics = tuple(TopicInfo.from_json(t) for t in record.pop("topics"))
+        centres = np.load(directory / "centres.npy", allow_pickle=False)
+        if centres.shape != (len(topics), int(record["dense"]["dim"])):
+            raise _TornRun("centres shape does not match the record")
+        return TopicRun(
+            run_id=run_id, record=record, table=TopicTable(topics=topics, centres=centres.astype(np.float64))
+        )
 
     def activate(self, physical: str, run_id: str) -> None:
         """Point the collection at a run.

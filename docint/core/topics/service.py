@@ -9,10 +9,11 @@ ends the job once the lock is released and any half-built run is removed.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from concurrent.futures import Future, wait
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -224,7 +225,7 @@ class TopicsDeps:
         embed_model: The embedding model id, recorded with each run.
         stop_words: Words kept out of keywords.
         stop_words_sha256: Their digest, recorded with each run.
-        on_written: Called with the collection after its assignments changed.
+        on_written: Called with the collection once per job that wrote assignments, failed or not.
         now: The clock.
         sleep: The sleep used between polls and busy retries.
     """
@@ -259,6 +260,19 @@ class _Fitted:
     labels: np.ndarray
     result: FitResult
     min_topic_size: int
+
+
+@dataclass
+class _Job:
+    """What one job has written so far.
+
+    Attributes:
+        seen: Topic id to the earliest and latest member time written, UTC.
+        wrote: Whether any assignment was written, so ``on_written`` must fire.
+    """
+
+    seen: _Seen = field(default_factory=dict)
+    wrote: bool = False
 
 
 def _lookup(payload: Mapping[str, Any], key: str) -> object:
@@ -386,13 +400,18 @@ class TopicsService:
         if action not in _ACTIONS:
             raise ValueError(f"Unknown topics action: {action!r}")
         lock = self._wait_for_lock(physical, progress)
+        job = _Job()
         try:
-            outcome = self._run_locked(action, physical, owner_created_at, progress, warn)
+            outcome = self._run_locked(action, physical, owner_created_at, progress, warn, job)
         except TopicsRefused as exc:
             logger.info("Topics {} refused for '{}' | code={}", action, logical, exc.code)
             raise
         finally:
-            lock.release()
+            # Writes from a cancelled or failed job are announced too.
+            try:
+                self._announce(physical, job)
+            finally:
+                lock.release()
         _log_outcome(outcome)
         return outcome
 
@@ -420,6 +439,7 @@ class TopicsService:
             outcome = TopicsOutcome("align", None, 0, 0, 0, empty=True, deferred=True)
             _log_outcome(outcome)
             return outcome
+        job = _Job()
         try:
             created = owner_created_at()
             store.discard_stale(physical, owner_created_at=created)
@@ -431,11 +451,28 @@ class TopicsService:
             if dense.dim != run.table.dim:
                 logger.warning("Topic alignment after ingest skipped | code={}", "dimension_changed")
                 return None
-            outcome = self._align(physical, dense, run, lambda _stage, done, total: progress(done, total))
+            outcome = self._align(physical, dense, run, lambda _stage, done, total: progress(done, total), job)
         finally:
-            lock.release()
+            try:
+                self._announce(physical, job)
+            finally:
+                lock.release()
         _log_outcome(outcome)
         return outcome
+
+    def _announce(self, physical: str, job: _Job) -> None:
+        """Tell ``on_written`` about a job's writes, never failing the job over it.
+
+        Args:
+            physical: Physical collection name.
+            job: The job.
+        """
+        if not job.wrote:
+            return
+        try:
+            self._deps.on_written(physical)
+        except Exception:
+            logger.exception("Announcing topic writes for '{}' failed", physical)
 
     def _wait_for_lock(self, physical: str, progress: Progress) -> TopicLock:
         """Poll the collection's lock until it is held.
@@ -463,6 +500,7 @@ class TopicsService:
         owner_created_at: Callable[[], str | None],
         progress: Progress,
         warn: Warn,
+        job: _Job,
     ) -> TopicsOutcome:
         """Dispatch a job once the lock is held.
 
@@ -472,6 +510,7 @@ class TopicsService:
             owner_created_at: Reads the ownership row's ``created_at`` now.
             progress: The progress channel.
             warn: The warning channel.
+            job: What the job has written.
 
         Returns:
             The outcome.
@@ -485,15 +524,15 @@ class TopicsService:
         ensure_topic_indexes(client, physical)
         dense = dense_vector(client, physical)
         if action == "build":
-            return self._build(physical, dense, created, owner_created_at, progress, warn)
+            return self._build(physical, dense, created, owner_created_at, progress, warn, job)
         run = store.active(physical, owner_created_at=created)
         if run is None:
             raise TopicsRefused("no_run")
         if dense.dim != run.table.dim:
             raise TopicsRefused("dimension_changed")
         if action == "discover":
-            return self._discover(physical, dense, run, progress, warn)
-        return self._align(physical, dense, run, progress)
+            return self._discover(physical, dense, run, progress, warn, job)
+        return self._align(physical, dense, run, progress, job)
 
     def _build(
         self,
@@ -503,6 +542,7 @@ class TopicsService:
         owner_created_at: Callable[[], str | None],
         progress: Progress,
         warn: Warn,
+        job: _Job,
     ) -> TopicsOutcome:
         """Fit a new run over the collection and make it the active one.
 
@@ -513,6 +553,7 @@ class TopicsService:
             owner_created_at: Reads it again before activation.
             progress: The progress channel.
             warn: The warning channel.
+            job: What the job has written.
 
         Returns:
             The outcome.
@@ -541,7 +582,6 @@ class TopicsService:
             "fits": [self._fit_entry("build", fitted)],
         }
         run = TopicRun(run_id, record, table)
-        seen: _Seen = {}
         try:
             store.save(physical, run)
             overrides = {
@@ -550,7 +590,7 @@ class TopicsService:
                 if label >= 0
             }
             assigned = self._pending_loop(
-                physical, dense, run_id, table, _inherit(fitted.sample, overrides), "assigning", progress, seen
+                physical, dense, run_id, table, _inherit(fitted.sample, overrides), "assigning", progress, job
             )
             if owner_created_at() != created:
                 raise TopicsRefused("collection_changed")
@@ -559,13 +599,12 @@ class TopicsService:
             store.delete_run(physical, run_id)
             raise
         store.prune(physical, keep=run_id)
-        deps.on_written(physical)
-        assigned += self._pending_loop(physical, dense, run_id, table, {}, "aligning", progress, seen)
-        saved = self._save_seen(physical, run, table, seen)
+        assigned += self._pending_loop(physical, dense, run_id, table, {}, "aligning", progress, job)
+        saved = self._save_seen(physical, run, table, job)
         return TopicsOutcome("build", run_id, len(saved.table.topics), len(table.topics), assigned, empty=False)
 
     def _discover(
-        self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress, warn: Warn
+        self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress, warn: Warn, job: _Job
     ) -> TopicsOutcome:
         """Fit the unassigned pool and append the topics that are new.
 
@@ -575,6 +614,7 @@ class TopicsService:
             run: The active run.
             progress: The progress channel.
             warn: The warning channel.
+            job: What the job has written.
 
         Returns:
             The outcome.
@@ -583,9 +623,10 @@ class TopicsService:
             TopicsRefused: ``too_few_unassigned``.
         """
         deps, run_id = self._deps, run.run_id
-        # The pre-pass is an align of its own, saved before the pool is fitted.
-        run, assigned = self._align_pass(physical, dense, run, progress)
-        seen: _Seen = {}
+        assigned = self._pending_loop(physical, dense, run_id, run.table, {}, "aligning", progress, job)
+        # Heal a pool an interrupted discover left behind; writes nothing in steady state.
+        assigned += self._realign_pool(physical, dense, run_id, run.table, {}, "aligning", progress, job)
+        run = self._save_seen(physical, run, run.table, job)
         pool = and_filters(topic_filter(run_id, -1), eligible_filter())
         fitted = self._fit_pool(physical, dense, pool, "too_few_unassigned", progress)
         candidates = self._candidates(fitted, "discover")
@@ -608,45 +649,28 @@ class TopicsService:
             if int(label) in mapping
         }
         assigned += self._realign_pool(
-            physical, dense, run_id, table, _inherit(fitted.sample, overrides), progress, seen
+            physical, dense, run_id, table, _inherit(fitted.sample, overrides), "assigning", progress, job
         )
-        assigned += self._pending_loop(physical, dense, run_id, table, {}, "aligning", progress, seen)
-        saved = self._save_seen(physical, run, table, seen)
-        deps.on_written(physical)
+        assigned += self._pending_loop(physical, dense, run_id, table, {}, "aligning", progress, job)
+        saved = self._save_seen(physical, run, table, job)
         return TopicsOutcome("discover", run_id, len(saved.table.topics), len(mapping), assigned, empty=False)
 
-    def _align(self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress) -> TopicsOutcome:
-        """Place every pending point in the active run.
+    def _align(self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress, job: _Job) -> TopicsOutcome:
+        """Place every pending point in the active run and store the seen ranges.
 
         Args:
             physical: Physical collection name.
             dense: The collection's dense vector.
             run: The active run.
             progress: The progress channel.
+            job: What the job has written.
 
         Returns:
             The outcome.
         """
-        saved, assigned = self._align_pass(physical, dense, run, progress)
+        assigned = self._pending_loop(physical, dense, run.run_id, run.table, {}, "aligning", progress, job)
+        saved = self._save_seen(physical, run, run.table, job)
         return TopicsOutcome("align", run.run_id, len(saved.table.topics), 0, assigned, empty=False)
-
-    def _align_pass(self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress) -> tuple[TopicRun, int]:
-        """Place pending points, store the widened seen ranges and announce the write.
-
-        Args:
-            physical: Physical collection name.
-            dense: The collection's dense vector.
-            run: The active run.
-            progress: The progress channel.
-
-        Returns:
-            The stored run and the points placed in a topic.
-        """
-        seen: _Seen = {}
-        assigned = self._pending_loop(physical, dense, run.run_id, run.table, {}, "aligning", progress, seen)
-        saved = self._save_seen(physical, run, run.table, seen)
-        self._deps.on_written(physical)
-        return saved, assigned
 
     def _fit_pool(
         self, physical: str, dense: DenseVector, flt: models.Filter, refusal: str, progress: Progress
@@ -683,10 +707,11 @@ class TopicsService:
         return _Fitted(sample, vectors, np.asarray(result.labels, dtype=np.int64), result, mts)
 
     def _fit(self, texts: Sequence[str], vectors: np.ndarray, params: FitParams, progress: Progress) -> FitResult:
-        """Call the fit on a worker thread, heartbeating and retrying while busy.
+        """Call the fit on a daemon thread, heartbeating and retrying while busy.
 
         A cancel raised from a heartbeat abandons the worker: its HTTP call
-        finishes on its own and its answer is dropped.
+        finishes on its own and its answer is dropped. Being a daemon, it never
+        holds up interpreter exit.
 
         Args:
             texts: One text per row.
@@ -703,14 +728,14 @@ class TopicsService:
         elapsed = 0.0
         progress("fitting", 0, 0)
         for attempt in range(1, BUSY_ATTEMPTS + 1):
-            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="topics-fit")
-            try:
-                future = executor.submit(self._deps.fit, texts, vectors, params)
-                while not wait([future], timeout=HEARTBEAT_S).done:
-                    elapsed += HEARTBEAT_S
-                    progress("fitting", int(elapsed), 0)
-            finally:
-                executor.shutdown(wait=False)
+            future: Future[FitResult] = Future()
+            worker = threading.Thread(
+                target=_fill, args=(future, self._deps.fit, texts, vectors, params), name="topics-fit", daemon=True
+            )
+            worker.start()
+            while not wait([future], timeout=HEARTBEAT_S).done:
+                elapsed += HEARTBEAT_S
+                progress("fitting", int(elapsed), 0)
             try:
                 return future.result()
             except TopicsBusy as exc:
@@ -816,7 +841,7 @@ class TopicsService:
         overrides: Mapping[str, int],
         stage: str,
         progress: Progress,
-        seen: _Seen,
+        job: _Job,
     ) -> int:
         """Place every point the run has not placed yet, in a few forward passes.
 
@@ -828,7 +853,7 @@ class TopicsService:
             overrides: Point id to the topic it keeps regardless of alignment.
             stage: The stage its frames carry.
             progress: The progress channel.
-            seen: Seen ranges, widened in place.
+            job: What the job has written, updated in place.
 
         Returns:
             Points placed in a topic (unassigned ones are written but not counted).
@@ -843,7 +868,7 @@ class TopicsService:
                     continue
                 saw = True
                 topics = _topics_for(page, table, overrides)
-                assigned += self._write(physical, run_id, page, topics, seen)
+                assigned += self._write(physical, run_id, page, topics, job)
                 done += len(page)
                 progress(stage, done, max(total, done))
             if not saw:
@@ -857,19 +882,21 @@ class TopicsService:
         run_id: str,
         table: TopicTable,
         overrides: Mapping[str, int],
+        stage: str,
         progress: Progress,
-        seen: _Seen,
+        job: _Job,
     ) -> int:
-        """Move unassigned points into the extended table, in one forward pass.
+        """Move unassigned points into a topic of the table, in one forward pass.
 
         Args:
             physical: Physical collection name.
             dense: The collection's dense vector.
             run_id: The run.
-            table: The extended table.
+            table: The table to align against.
             overrides: Pool sample members whose topic was kept, with its new id.
-            progress: Receives ``assigning`` frames.
-            seen: Seen ranges, widened in place.
+            stage: The stage its frames carry.
+            progress: The progress channel.
+            job: What the job has written, updated in place.
 
         Returns:
             Points moved into a topic; points left unassigned are not written.
@@ -881,12 +908,12 @@ class TopicsService:
         for page in iter_rows(client, physical, scroll_filter=pool, dense=dense):
             topics = _topics_for(page, table, overrides)
             kept = [(row, tid) for row, tid in zip(page, topics, strict=True) if tid >= 0]
-            moved += self._write(physical, run_id, [r for r, _ in kept], [t for _, t in kept], seen)
+            moved += self._write(physical, run_id, [r for r, _ in kept], [t for _, t in kept], job)
             done += len(page)
-            progress("assigning", done, max(total, done))
+            progress(stage, done, max(total, done))
         return moved
 
-    def _write(self, physical: str, run_id: str, rows: Sequence[PointRow], topics: Sequence[int], seen: _Seen) -> int:
+    def _write(self, physical: str, run_id: str, rows: Sequence[PointRow], topics: Sequence[int], job: _Job) -> int:
         """Write one page's assignments and widen the seen ranges.
 
         Args:
@@ -894,7 +921,7 @@ class TopicsService:
             run_id: The run.
             rows: The rows.
             topics: Each row's topic.
-            seen: Seen ranges, widened in place.
+            job: What the job has written, updated in place.
 
         Returns:
             Rows placed in a topic.
@@ -902,6 +929,10 @@ class TopicsService:
         groups: dict[int, list[str]] = {}
         for row, tid in zip(rows, topics, strict=True):
             groups.setdefault(tid, []).append(row.point_id)
+        if not groups:
+            return 0
+        # Set before the call: a write that fails midway may still have landed.
+        job.wrote = True
         write_assignments(self._deps.client, physical, run_id, groups)
         placed = 0
         for row, tid in zip(rows, topics, strict=True):
@@ -910,22 +941,25 @@ class TopicsService:
             placed += 1
             when = _timestamp(row.payload)
             if when is not None:
-                _widen(seen, tid, when)
+                _widen(job.seen, tid, when)
         return placed
 
-    def _save_seen(self, physical: str, run: TopicRun, table: TopicTable, seen: _Seen) -> TopicRun:
-        """Store a run with its seen ranges widened.
+    def _save_seen(self, physical: str, run: TopicRun, table: TopicTable, job: _Job) -> TopicRun:
+        """Store a run with the job's seen ranges widened into it.
+
+        Ranges only widen, so saving the same job's ranges twice changes nothing.
 
         Args:
             physical: Physical collection name.
             run: The run whose record is kept.
             table: The table to widen and store.
-            seen: The ranges.
+            job: What the job has written.
 
         Returns:
             The stored run.
         """
-        saved = TopicRun(run.run_id, {**run.record, "updated_at": self._now_iso()}, table.with_seen(_iso_ranges(seen)))
+        widened = table.with_seen(_iso_ranges(job.seen))
+        saved = TopicRun(run.run_id, {**run.record, "updated_at": self._now_iso()}, widened)
         self._deps.store.save(physical, saved)
         return saved
 
@@ -981,6 +1015,24 @@ class TopicsService:
             ISO-8601 UTC.
         """
         return self._deps.now().astimezone(UTC).isoformat()
+
+
+def _fill(future: Future[FitResult], fit: FitFn, texts: Sequence[str], vectors: np.ndarray, params: FitParams) -> None:
+    """Run the fit and settle its future with the answer or the error.
+
+    Args:
+        future: The future the caller waits on.
+        fit: The fit call.
+        texts: One text per row.
+        vectors: Row matrix.
+        params: Fit settings.
+    """
+    if not future.set_running_or_notify_cancel():
+        return
+    try:
+        future.set_result(fit(texts, vectors, params))
+    except BaseException as exc:
+        future.set_exception(exc)
 
 
 def _scanned(ids: Iterable[str], progress: Progress) -> Iterable[str]:

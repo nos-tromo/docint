@@ -18,11 +18,28 @@ import numpy as np
 import pytest
 from loguru import logger
 from qdrant_client import QdrantClient, models
-from topics_fakes import DIM, SPARSE_NAME, FakeFit, RecordingClient, add_points, blob_vectors, make_collection
+from topics_fakes import (
+    DENSE_NAME,
+    DIM,
+    SPARSE_NAME,
+    FakeFit,
+    RecordingClient,
+    add_points,
+    blob_vectors,
+    make_collection,
+)
+from typing_extensions import override
 
 import docint.core.topics
-from docint.core.topics import service
-from docint.core.topics.gather import RUN_FIELD, TOPIC_FIELD, count, parse_topic_value, pending_filter
+from docint.core.topics import gather, service
+from docint.core.topics.gather import (
+    RUN_FIELD,
+    TOPIC_FIELD,
+    DenseVector,
+    count,
+    parse_topic_value,
+    pending_filter,
+)
 from docint.core.topics.labels import DEFAULT_TEMPLATE, TopicLabeller
 from docint.core.topics.sample import top_ranked
 from docint.core.topics.service import (
@@ -330,6 +347,22 @@ def _run(
     """
     rec = frames or Frames()
     return svc.run(action, COLL, logical="coll", owner_created_at=created, progress=rec.progress, warn=rec.warn)
+
+
+def _vectors(client: QdrantClient, ids: Sequence[str]) -> np.ndarray:
+    """Read points' stored dense vectors.
+
+    Args:
+        client: Qdrant client.
+        ids: Point ids.
+
+    Returns:
+        One row per id, in order.
+    """
+    dense = DenseVector(DENSE_NAME, DIM)
+    by_id = {str(p.id): dense.of(p) for p in client.retrieve(COLL, ids=list(ids), with_vectors=True)}
+    rows = [by_id[pid] for pid in ids]
+    return np.stack([row for row in rows if row is not None])
 
 
 def _payloads(client: QdrantClient) -> dict[str, dict[str, Any]]:
@@ -754,6 +787,31 @@ def test_a_cancel_during_the_fit_stops_the_job_and_leaves_no_new_run(
         release.set()
 
 
+def test_the_fit_runs_on_a_daemon_thread(client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An abandoned fit worker can never hold up interpreter exit.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+    """
+    started: list[tuple[str, bool]] = []
+
+    class Recording(threading.Thread):
+        """A thread that records its name and daemon flag on start."""
+
+        @override
+        def start(self) -> None:
+            """Record, then start."""
+            started.append((self.name, self.daemon))
+            super().start()
+
+    monkeypatch.setattr(threading, "Thread", Recording)
+    _add_blobs(client)
+    _run(_service(client, root), "build")
+    assert [daemon for name, daemon in started if name == "topics-fit"] == [True]
+
+
 def test_a_failure_in_the_write_pass_deletes_the_new_run_and_keeps_the_old_one_active(
     client: QdrantClient, root: Path
 ) -> None:
@@ -765,8 +823,11 @@ def test_a_failure_in_the_write_pass_deletes_the_new_run_and_keeps_the_old_one_a
     """
     _add_blobs(client)
     first = _run(_service(client, root), "build")
+    written: list[str] = []
     with pytest.raises(RuntimeError, match="write refused"):
-        _run(_service(WriteSpy(client, fail=True), root), "build")
+        _run(_service(WriteSpy(client, fail=True), root, on_written=written.append), "build")
+    # A refused write may still have landed in part, so it is announced.
+    assert written == [COLL]
     assert TopicStore(root).active_id(COLL) == first.run_id
     assert _run_dirs(root) == {first.run_id}
     assert TopicStore(root).try_lock(COLL) is not None
@@ -1047,6 +1108,110 @@ def test_discover_with_too_few_unassigned_is_refused(client: QdrantClient, root:
     with pytest.raises(TopicsRefused) as caught:
         _run(_service(client, root), "discover")
     assert caught.value.code == "too_few_unassigned"
+
+
+def _strand_a_discover(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, cfg: TopicsConfig, written: list[str]
+) -> tuple[str, list[str]]:
+    """Build two topics, then cancel a discover after its first assigning page.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch, used to shrink pages.
+        cfg: Configuration for both jobs.
+        written: Collects the discover's ``on_written`` calls.
+
+    Returns:
+        The run id and the third blob's points the discover left unassigned.
+    """
+    monkeypatch.setattr(gather, "PAGE_SIZE", 16)
+    ids = _add_blobs(client, per=150)
+    built = _run(_service(client, root, FakeFit(BLOBS[:2]), cfg=cfg), "build")
+    assert built.run_id is not None
+
+    def stop(stage: str, done: int, total: int) -> None:
+        """Cancel on the first assigning frame.
+
+        Args:
+            stage: Stage name.
+            done: Units done.
+            total: Units in all.
+
+        Raises:
+            Stop: On the first assigning frame.
+        """
+        if stage == "assigning":
+            raise Stop
+
+    with pytest.raises(Stop):
+        _run(_service(client, root, FakeFit(BLOBS), cfg=cfg, on_written=written.append), "discover", Frames(stop))
+    topics = _topics(client)
+    return built.run_id, [pid for pid in ids[300:] if topics[pid] == -1]
+
+
+@pytest.mark.parametrize(("percentile", "exit_code"), [(5.0, "too_few_unassigned"), (80.0, "none_new")])
+def test_a_discover_interrupted_while_assigning_is_healed_by_the_next_discover(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, percentile: float, exit_code: str
+) -> None:
+    """The next discover aligns a stranded pool first, whichever way it then ends.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+        percentile: Admission percentile; it decides how many points the heal leaves.
+        exit_code: How the second discover ends.
+    """
+    cfg = _cfg(admit_percentile=percentile)
+    run_id, stranded = _strand_a_discover(client, root, monkeypatch, cfg, [])
+    run = TopicStore(root).load(COLL, run_id)
+    assert run is not None and len(run.table.topics) == 3
+    assert len(stranded) > 100
+    expected = [int(t) for t in run.table.align(_vectors(client, stranded))]
+    assert expected.count(2) > 0
+
+    frames = Frames()
+    svc = _service(client, root, FakeFit(BLOBS), cfg=cfg)
+    if exit_code == "none_new":
+        outcome = _run(svc, "discover", frames)
+        assert outcome.empty and [code for code, _ in frames.warnings] == ["none_new"]
+    else:
+        with pytest.raises(TopicsRefused) as caught:
+            _run(svc, "discover", frames)
+        assert caught.value.code == exit_code
+    topics = _topics(client)
+    assert [topics[pid] for pid in stranded] == expected
+    assert "assigning" not in frames.stages()
+
+
+def test_on_written_fires_after_a_cancelled_discover_that_wrote(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discover cancelled after writing still announces its writes.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+    """
+    written: list[str] = []
+    _strand_a_discover(client, root, monkeypatch, _cfg(), written)
+    assert written == [COLL]
+
+
+def test_a_job_that_writes_nothing_announces_nothing(client: QdrantClient, root: Path) -> None:
+    """An align with nothing pending does not call ``on_written``.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    _run(_service(client, root), "build")
+    written: list[str] = []
+    _run(_service(client, root, on_written=written.append), "align")
+    assert written == []
 
 
 # Ingest

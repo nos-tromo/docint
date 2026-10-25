@@ -2,8 +2,10 @@
 
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -154,6 +156,50 @@ def test_a_missing_or_misshapen_run_loads_as_none(tmp_path: Path) -> None:
     store.save(PHYSICAL, run)
     np.save(tmp_path / PHYSICAL / run.run_id / "centres.npy", np.zeros((2, 3), dtype=np.float32))
     assert store.load(PHYSICAL, run.run_id) is None
+
+
+def test_a_torn_read_mid_save_is_read_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shape mismatch on the first read is retried once, quietly."""
+    from loguru import logger
+
+    store = TopicStore(tmp_path)
+    run = _run(_id(store))
+    store.save(PHYSICAL, run)
+    real = np.load
+    calls = {"n": 0}
+
+    def torn(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return np.zeros((3, 4), dtype=np.float32)
+        return real(*args, **kwargs)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(store_module.np, "load", torn)
+    monkeypatch.setattr(store_module.time, "sleep", sleeps.append)
+    messages: list[str] = []
+    sink = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        loaded = store.load(PHYSICAL, run.run_id)
+    finally:
+        logger.remove(sink)
+    assert loaded is not None and np.array_equal(loaded.table.centres, run.table.centres)
+    assert calls["n"] == 2 and len(sleeps) == 1
+    assert messages == []
+
+
+def test_a_run_resaved_with_appended_rows_loads_the_larger_table(tmp_path: Path) -> None:
+    """Appending topics under the same id is a supported save."""
+    store = TopicStore(tmp_path)
+    run = _run(_id(store))
+    store.save(PHYSICAL, run)
+    extra = replace(run.table.topics[0], id=2, label="t2")
+    grown = TopicRun(run.run_id, run.record, run.table.appended([extra], np.eye(1, 4)))
+    store.save(PHYSICAL, grown)
+    loaded = store.load(PHYSICAL, run.run_id)
+    assert loaded is not None
+    assert [t.id for t in loaded.table.topics] == [0, 1, 2]
+    assert np.array_equal(loaded.table.centres[:2], run.table.centres)
 
 
 def test_active_is_none_without_active_json(tmp_path: Path) -> None:
