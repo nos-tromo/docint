@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import { Banner, Button, DownloadButton, NewButton, PlayButton, RefreshButton } from '@infra/ui'
 import { topicValue, type TopicSummary, type TopicsAction } from '@/api/topics'
 import { describeError } from '@/api/errorMessage'
@@ -63,6 +63,44 @@ function topicsCsv(topics: TopicSummary[]): string {
 }
 
 /**
+ * The run's topics, one row each, with at most one open.
+ *
+ * Memoised on stable props: the panel re-renders on every progress frame of a
+ * running job, and a run can list hundreds of topics that frame says nothing about.
+ */
+const TopicList = memo(function TopicList({
+  topics,
+  runId,
+  openTopic,
+  onToggleTopic,
+  onAsk
+}: {
+  topics: TopicSummary[]
+  runId: string
+  openTopic: string | null
+  onToggleTopic: (key: string) => void
+  onAsk: AskInChat
+}) {
+  return (
+    <ul className="divide-y divide-border rounded-md border border-border">
+      {topics.map((topic) => {
+        const key = topicValue(runId, topic.id)
+        return (
+          <TopicRow
+            key={key}
+            topic={topic}
+            runId={runId}
+            expanded={openTopic === key}
+            onToggle={() => onToggleTopic(key)}
+            onAsk={onAsk}
+          />
+        )
+      })}
+    </ul>
+  )
+})
+
+/**
  * The Analysis → Topics tab: the active run's coverage, its topics, and the
  * actions that build, extend and align it.
  *
@@ -81,6 +119,7 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
   const job = useTopicsJob()
   const start = useStartTopics()
   const [openTopic, setOpenTopic] = useState<string | null>(null)
+  const toggleTopic = useCallback((key: string) => setOpenTopic((open) => (open === key ? null : key)), [])
 
   // Between the click and the new job's first frame, the job store still names
   // the previous job, finished; until that frame arrives the run is "starting".
@@ -92,9 +131,9 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
   const busy = awaiting || job.running
   const busyAction: TopicsAction | null = job.running ? job.action : awaiting ? (start.variables ?? null) : null
 
-  // A job's outcome shows while it runs, or after it ends if it was started here: the
-  // stream replays earlier runs' refusals and failures on every connect.
-  const current = job.jobId !== null && (job.running || job.jobId === startedJobId)
+  // A job's outcome shows if it was started here or watched live on this page, never one only
+  // replayed on a connect; progress shows for any running job, and a new start hides the last outcome.
+  const current = !awaiting && job.jobId !== null && (job.jobId === startedJobId || job.live)
   const failed = current && job.error !== null
   const warningKeys = current
     ? [...new Set(job.warnings.map((w) => WARNING_KEYS.get(w.code) ?? 'topics.warning_generic'))]
@@ -135,8 +174,11 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
         // squeezing four counts into a column beside them.
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
           <p className="min-w-0 grow basis-72 text-sm text-muted-foreground">
-            {t('topics.caption', {
-              topics: data.topics.length,
+            {t(data.topics.length === 1 ? 'topics.caption_topics_one' : 'topics.caption_topics_other', {
+              count: data.topics.length
+            })}
+            {' · '}
+            {t(coverage.total === 1 ? 'topics.caption_coverage_one' : 'topics.caption_coverage_other', {
               assigned: coverage.assigned,
               total: coverage.total,
               unassigned: coverage.unassigned,
@@ -213,21 +255,13 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
       {data?.embed_model_changed && <Banner variant="info">{t('topics.embed_model_changed')}</Banner>}
 
       {data && data.topics.length > 0 && (
-        <ul className="divide-y divide-border rounded-md border border-border">
-          {data.topics.map((topic) => {
-            const key = topicValue(data.run_id, topic.id)
-            return (
-              <TopicRow
-                key={key}
-                topic={topic}
-                runId={data.run_id}
-                expanded={openTopic === key}
-                onToggle={() => setOpenTopic((open) => (open === key ? null : key))}
-                onAsk={onAsk}
-              />
-            )
-          })}
-        </ul>
+        <TopicList
+          topics={data.topics}
+          runId={data.run_id}
+          openTopic={openTopic}
+          onToggleTopic={toggleTopic}
+          onAsk={onAsk}
+        />
       )}
     </div>
   )

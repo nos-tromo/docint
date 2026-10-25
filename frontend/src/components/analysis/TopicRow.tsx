@@ -15,6 +15,9 @@ const ROW_KEYWORDS = 5
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
+/** One formatter per language: building an `Intl` formatter costs far more than using one. */
+const SHARE_FORMATS = new Map<Lang, Intl.NumberFormat>()
+
 /**
  * A topic's share of the collection as a percentage with one decimal.
  *
@@ -23,7 +26,12 @@ type Translate = (key: keyof Strings, vars?: Record<string, string | number>) =>
  * @returns The percentage, without its sign.
  */
 function sharePercent(share: number, lang: Lang): string {
-  return new Intl.NumberFormat(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(share * 100)
+  let format = SHARE_FORMATS.get(lang)
+  if (!format) {
+    format = new Intl.NumberFormat(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+    SHARE_FORMATS.set(lang, format)
+  }
+  return format.format(share * 100)
 }
 
 /**
@@ -127,9 +135,9 @@ export function TopicRow({ topic, runId, expanded, onToggle, onAsk }: TopicRowPr
   const lang = useLang()
   const labelId = useId()
   const panelId = useId()
-  const evidence = useTopicEvidence(topic.id, expanded)
-  const documents = useTopicDocuments(topic.id, expanded)
-  const chunks = useTopicChunks(topic.id, expanded)
+  const evidence = useTopicEvidence(runId, topic.id, expanded)
+  const documents = useTopicDocuments(runId, topic.id, expanded)
+  const chunks = useTopicChunks(runId, topic.id, expanded)
 
   const label = topic.label || `T${topic.id}`
   const keywords = topic.keywords.slice(0, ROW_KEYWORDS).map(([word]) => word)
@@ -148,7 +156,10 @@ export function TopicRow({ topic, runId, expanded, onToggle, onAsk }: TopicRowPr
               {label}
             </span>
             <span className="text-xs tabular-nums text-muted-foreground">
-              {t('topics.size_share', { size: topic.size, share: sharePercent(topic.share, lang) })}
+              {t(topic.size === 1 ? 'topics.size_share_one' : 'topics.size_share_other', {
+                size: topic.size,
+                share: sharePercent(topic.share, lang)
+              })}
             </span>
           </div>
           {(topic.origin === 'discover' || keywords.length > 0 || seen) && (

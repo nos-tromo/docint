@@ -445,8 +445,11 @@ export const en = {
   'analysis.summary_building_progress': 'Summarizing {mapped}/{total} units…',
 
   // topics (Analysis: Topics tab). Stages and warnings are keyed by the job's protocol codes.
-  'topics.caption':
-    '{topics} topics · {assigned} of {total} chunks assigned · {unassigned} unassigned · {pending} pending',
+  // The caption is two parts joined by ' · ', so each carries one count to pluralise.
+  'topics.caption_topics_one': '{count} topic',
+  'topics.caption_topics_other': '{count} topics',
+  'topics.caption_coverage_one': '{assigned} of {total} chunk assigned · {unassigned} unassigned · {pending} pending',
+  'topics.caption_coverage_other': '{assigned} of {total} chunks assigned · {unassigned} unassigned · {pending} pending',
   'topics.select_collection': 'Select a collection to see its topics.',
   'topics.empty': 'No topics for this collection yet.',
   'topics.build': 'Build topics',
@@ -490,7 +493,8 @@ export const en = {
   'topics.documents_more': 'More documents are not listed.',
   'topics.passages': 'All passages',
   'topics.section_empty': 'None.',
-  'topics.size_share': '{size} chunks · {share}%',
+  'topics.size_share_one': '{size} chunk · {share}%',
+  'topics.size_share_other': '{size} chunks · {share}%',
   'topics.seen_range': '{first} – {last}',
 
   // report

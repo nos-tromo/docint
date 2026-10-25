@@ -17,6 +17,7 @@ import type { IngestEvent } from '@/api/types'
 import type { TopicsOverview } from '@/api/topics'
 
 const SCOPE = { collection: 'docs', owner: null }
+const RUN = '20260102-030405-a1b2c3'
 
 const OVERVIEW: TopicsOverview = {
   run_id: '20260102-030405-a1b2c3',
@@ -128,7 +129,8 @@ describe('useTopicsJob', () => {
       total: 0,
       warnings: [],
       error: null,
-      finished: false
+      finished: false,
+      live: false
     })
 
     act(() => useUiStore.getState().setSelectedCollection('other'))
@@ -215,6 +217,22 @@ describe('useTopicsJob', () => {
     deliver('job-1', terminal, { collection: 'docs' })
 
     expect(result.current).toMatchObject({ jobId: 'job-1', running: false, finished: true, error: null })
+  })
+
+  it('reports a job watched as it ran as live, and one only replayed as not', () => {
+    const at = (jobId: string, event: IngestEvent['event'], receivedAt: number, data: Record<string, unknown> = {}) =>
+      act(() =>
+        useIngestJobsStore.getState().appendEvent(jobId, { event, data: { job_id: jobId, ...data }, receivedAt })
+      )
+    at('job-replayed', 'topics_started', 100, { collection: 'docs', action: 'build' })
+    at('job-replayed', 'topics_completed', 100)
+    const { result } = renderHook(() => useTopicsJob(), { wrapper })
+    expect(result.current).toMatchObject({ jobId: 'job-replayed', live: false })
+
+    at('job-watched', 'topics_started', 200, { collection: 'docs', action: 'align' })
+    expect(result.current).toMatchObject({ jobId: 'job-watched', live: false })
+    at('job-watched', 'topics_completed', 1200)
+    expect(result.current).toMatchObject({ jobId: 'job-watched', live: true, finished: true })
   })
 
   it('reports warnings and the failure code', () => {
@@ -380,7 +398,7 @@ describe('topic reads', () => {
   it('read nothing until asked to', async () => {
     const { fetchMock } = stubApi()
 
-    renderHook(() => ({ e: useTopicEvidence(3, false), d: useTopicDocuments(3, false), c: useTopicChunks(3, false) }), {
+    renderHook(() => ({ e: useTopicEvidence(RUN, 3, false), d: useTopicDocuments(RUN, 3, false), c: useTopicChunks(RUN, 3, false) }), {
       wrapper
     })
 
@@ -392,7 +410,7 @@ describe('topic reads', () => {
     const { fetchMock } = stubApi()
     useUiStore.setState({ selectedCollection: null })
 
-    renderHook(() => ({ e: useTopicEvidence(3, true), d: useTopicDocuments(3, true), c: useTopicChunks(3, true) }), {
+    renderHook(() => ({ e: useTopicEvidence(RUN, 3, true), d: useTopicDocuments(RUN, 3, true), c: useTopicChunks(RUN, 3, true) }), {
       wrapper
     })
 
@@ -405,9 +423,9 @@ describe('topic reads', () => {
     const { result } = renderHook(
       () => ({
         overview: useTopicsOverview(),
-        evidence: useTopicEvidence(3, true),
-        documents: useTopicDocuments(3, true),
-        chunks: useTopicChunks(3, true)
+        evidence: useTopicEvidence(RUN, 3, true),
+        documents: useTopicDocuments(RUN, 3, true),
+        chunks: useTopicChunks(RUN, 3, true)
       }),
       { wrapper }
     )
@@ -427,16 +445,42 @@ describe('topic reads', () => {
     ).toEqual(
       expect.arrayContaining([
         ['topics', SCOPE],
-        ['topics', SCOPE, 'evidence', 3],
-        ['topics', SCOPE, 'documents', 3],
-        ['topics', SCOPE, 'chunks', 3]
+        ['topics', SCOPE, RUN, 'evidence', 3],
+        ['topics', SCOPE, RUN, 'documents', 3],
+        ['topics', SCOPE, RUN, 'chunks', 3]
+      ])
+    )
+  })
+
+  it('keep one run’s reads of a topic apart from another run’s', async () => {
+    // Topic ids restart at 0 with every build, so the run is part of what a read is.
+    const { fetchMock } = stubApi()
+    const { result } = renderHook(
+      () => ({ before: useTopicEvidence('20260101-000000-aaaaaa', 3, true), after: useTopicEvidence(RUN, 3, true) }),
+      { wrapper }
+    )
+
+    await waitFor(() => {
+      expect(result.current.before.isSuccess).toBe(true)
+      expect(result.current.after.isSuccess).toBe(true)
+    })
+    expect(reads(fetchMock).filter((r) => r.path.endsWith('/topics/3/evidence'))).toHaveLength(2)
+    expect(
+      client
+        .getQueryCache()
+        .findAll({ queryKey: ['topics', SCOPE] })
+        .map((query) => query.queryKey)
+    ).toEqual(
+      expect.arrayContaining([
+        ['topics', SCOPE, '20260101-000000-aaaaaa', 'evidence', 3],
+        ['topics', SCOPE, RUN, 'evidence', 3]
       ])
     )
   })
 
   it('walk a topic’s chunks by the cursor each page hands back', async () => {
     const { fetchMock } = stubApi()
-    const { result } = renderHook(() => useTopicChunks(3, true), { wrapper })
+    const { result } = renderHook(() => useTopicChunks(RUN, 3, true), { wrapper })
     await waitFor(() => expect(result.current.hasNextPage).toBe(true))
 
     await act(async () => {

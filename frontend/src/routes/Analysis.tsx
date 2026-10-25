@@ -158,6 +158,9 @@ export function Analysis() {
   const tabIds = topicsEnabled ? TAB_IDS : TAB_IDS.filter((id) => id !== 'topics')
   const activeTab: Tab = tab === 'topics' && !topicsEnabled ? 'ner' : tab
   const tabStripRef = useRef<HTMLDivElement>(null)
+  // Stable, so a frame of a running topics job never re-renders the topic rows.
+  // Asking in chat about a topic needs the chat's topic filter; until it exists the action is a no-op.
+  const askInChat = useCallback(() => {}, [])
 
   // A remembered tab past a narrow screen's edge is scrolled into view.
   useEffect(() => {
@@ -199,7 +202,9 @@ export function Analysis() {
               aria-current={activeTab === id || undefined}
               onClick={() => setTab(id)}
               className={cn(
+                // The focus outline is drawn inside the tab, where the scrolling strip cannot clip it.
                 'shrink-0 whitespace-nowrap px-2 py-2 text-sm border-b-2 sm:px-3',
+                'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary',
                 activeTab === id ? 'border-foreground' : 'border-transparent text-muted-foreground'
               )}
             >
@@ -294,8 +299,7 @@ export function Analysis() {
         />
       )}
       {activeTab === 'summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
-      {/* Asking in chat about a topic needs the chat's topic filter; until it exists the action is a no-op. */}
-      {activeTab === 'topics' && <TopicsPanel onAsk={() => {}} />}
+      {activeTab === 'topics' && <TopicsPanel onAsk={askInChat} />}
     </div>
   )
 }

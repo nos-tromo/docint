@@ -9,6 +9,19 @@ import { LanguageContext } from '@/i18n/LanguageContext'
 import type { IngestEvent } from '@/api/types'
 import type { TopicSummary, TopicsOverview } from '@/api/topics'
 
+// Counts every render of a topic row; the real row still renders underneath.
+const rowRenders = vi.hoisted(() => ({ count: 0 }))
+vi.mock('./TopicRow', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./TopicRow')>()
+  return {
+    ...actual,
+    TopicRow: (props: import('./TopicRow').TopicRowProps) => {
+      rowRenders.count += 1
+      return <actual.TopicRow {...props} />
+    }
+  }
+})
+
 const COLLECTION = 'projekt-alpha'
 const RUN_ID = '20260102-030405-a1b2c3'
 
@@ -117,9 +130,14 @@ function posts(fetchMock: ReturnType<typeof stubApi>) {
     }))
 }
 
-/** Deliver one frame as the job stream does: tagged with its job and stamped on arrival. */
-function deliver(jobId: string, event: IngestEvent['event'], data: Record<string, unknown> = {}) {
-  clock += 1
+/**
+ * Deliver one frame as the job stream does: tagged with its job and stamped on arrival.
+ *
+ * Frames land a millisecond apart unless `at` says when, which is how a test
+ * spreads a run over the second that marks it as watched live.
+ */
+function deliver(jobId: string, event: IngestEvent['event'], data: Record<string, unknown> = {}, at?: number) {
+  clock = at ?? clock + 1
   act(() =>
     useIngestJobsStore.getState().appendEvent(jobId, { event, data: { job_id: jobId, ...data }, receivedAt: clock })
   )
@@ -222,6 +240,23 @@ describe('TopicsPanel', () => {
     expect(screen.getByText('Neu')).toBeInTheDocument()
   })
 
+  it.each([
+    ['en', '1 topic · 1 of 1 chunk assigned · 0 unassigned · 0 pending', '1 chunk · 100.0%'],
+    ['de', '1 Thema · 1 von 1 Chunk zugeordnet · 0 nicht zugeordnet · 0 ausstehend', '1 Chunk · 100,0 %']
+  ] as const)('counts one topic and one chunk in the singular in %s', async (lang, caption, sizeShare) => {
+    stubApi({
+      overview: {
+        ...OVERVIEW,
+        coverage: { total: 1, assigned: 1, unassigned: 0, pending: 0 },
+        topics: [topic({ id: 0, label: 'Knots and sails', size: 1, share: 1 })]
+      }
+    })
+    renderPanel(lang)
+
+    expect(await screen.findByText(caption)).toBeInTheDocument()
+    expect(screen.getByText(sizeShare)).toBeInTheDocument()
+  })
+
   it('orders the header actions rebuild, find new, align, download', async () => {
     stubApi()
     renderPanel()
@@ -266,6 +301,18 @@ describe('TopicsPanel', () => {
   })
 
   it.each([
+    [0, 5, true, false],
+    [5, 0, false, true]
+  ])('gates find-new on %s unassigned and align on %s pending, each on its own count', async (unassigned, pending, discoverOff, alignOff) => {
+    stubApi({ overview: { ...OVERVIEW, coverage: { total: 120, assigned: 100, unassigned, pending } } })
+    renderPanel()
+    await screen.findByText(/3 topics/)
+
+    expect(header.discover().hasAttribute('disabled')).toBe(discoverOff)
+    expect(header.align().hasAttribute('disabled')).toBe(alignOff)
+  })
+
+  it.each([
     ['Find new topics', 'discover'],
     ['Align pending chunks', 'align']
   ])('starts %s without asking', async (name, action) => {
@@ -281,8 +328,9 @@ describe('TopicsPanel', () => {
 
   it('shows the running stage and localized warnings', async () => {
     stubApi()
-    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' })
-    deliver('job-1', 'topics_progress', { stage: 'assigning', done: 30, total: 120, message: 'Assigning topics: 30/120' })
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' }, 0)
+    // A second after its start: a run this page watched as it went.
+    deliver('job-1', 'topics_progress', { stage: 'assigning', done: 30, total: 120, message: 'Assigning topics: 30/120' }, 1000)
     deliver('job-1', 'warning', { code: 'none_found', message: 'Backend prose that is not for display.' })
     deliver('job-1', 'warning', { code: 'never_heard_of_it', message: 'More backend prose.' })
     renderPanel()
@@ -307,6 +355,22 @@ describe('TopicsPanel', () => {
     expect(screen.queryByTestId('topics-progress')).not.toBeInTheDocument()
   })
 
+  it('leaves the topic rows alone while progress frames arrive', async () => {
+    stubApi()
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'align' }, 0)
+    deliver('job-1', 'topics_progress', { stage: 'aligning', done: 1, total: 100, message: 'x' }, 1000)
+    renderPanel()
+    await screen.findByText(/3 topics/)
+    expect(screen.getByText('Aligning pending chunks: 1 of 100')).toBeInTheDocument()
+    const before = rowRenders.count
+
+    deliver('job-1', 'topics_progress', { stage: 'aligning', done: 2, total: 100, message: 'x' }, 2000)
+    deliver('job-1', 'topics_progress', { stage: 'aligning', done: 3, total: 100, message: 'x' }, 3000)
+
+    expect(screen.getByText('Aligning pending chunks: 3 of 100')).toBeInTheDocument()
+    expect(rowRenders.count).toBe(before)
+  })
+
   it('says a stage it has no words for is under way, not which', async () => {
     stubApi()
     deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' })
@@ -320,8 +384,8 @@ describe('TopicsPanel', () => {
 
   it('words the stages and warnings in German', async () => {
     stubApi()
-    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'discover' })
-    deliver('job-1', 'topics_progress', { stage: 'sampling', done: 3, total: 9, message: 'x' })
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'discover' }, 0)
+    deliver('job-1', 'topics_progress', { stage: 'sampling', done: 3, total: 9, message: 'x' }, 1000)
     deliver('job-1', 'warning', { code: 'none_new', message: 'x' })
     renderPanel('de')
 
@@ -351,34 +415,55 @@ describe('TopicsPanel', () => {
     expect(header.rebuild()).toBeEnabled()
   })
 
-  it('shows how a run it did not start is going, but not how it ended', async () => {
+  it('shows how a run it did not start ended once it has watched that run live, across a remount', async () => {
     stubApi()
-    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' })
-    deliver('job-1', 'topics_progress', { stage: 'fitting', done: 5, total: 0, message: 'x' })
-    deliver('job-1', 'warning', { code: 'topics_busy', message: 'x' })
-    renderPanel()
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' }, 0)
+    deliver('job-1', 'topics_progress', { stage: 'fitting', done: 5, total: 0, message: 'x' }, 100)
+    deliver('job-1', 'warning', { code: 'topics_busy', message: 'x' }, 200)
+    const first = renderPanel()
     await screen.findByText(/3 topics/)
+    // Progress shows for any running job; how it is going wrong waits until it has been watched live.
     expect(screen.getByText('Fitting topics: 5 s')).toBeInTheDocument()
-    expect(screen.getByText('The topics service stayed busy; try again later.')).toBeInTheDocument()
-
-    deliver('job-1', 'error', { code: 'topics_failed', message: 'x' })
-
-    await waitFor(() => expect(screen.queryByText('Fitting topics: 5 s')).not.toBeInTheDocument())
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByText('The topics service stayed busy; try again later.')).not.toBeInTheDocument()
+    first.unmount()
+
+    deliver('job-1', 'error', { code: 'topics_failed', message: 'x' }, 1600)
+    renderPanel()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The topics run failed.')
+    expect(alert).toHaveTextContent('The topics service stayed busy; try again later.')
+    expect(screen.queryByText('Fitting topics: 5 s')).not.toBeInTheDocument()
     expect(header.rebuild()).toBeEnabled()
   })
 
+  it('keeps a run watched live through a later replay of its history', async () => {
+    stubApi()
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'discover' }, 0)
+    deliver('job-1', 'warning', { code: 'none_new', message: 'x' }, 1200)
+    deliver('job-1', 'topics_completed', { collection: COLLECTION, empty: true }, 1300)
+    renderPanel()
+    const warning = 'No new topics were found; the unassigned chunks stay unassigned.'
+    expect(await screen.findByText(warning)).toBeInTheDocument()
+
+    // A reconnect restarts the job's log and delivers its history in one burst.
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'discover' }, 9000)
+    deliver('job-1', 'warning', { code: 'none_new', message: 'x' }, 9000)
+    deliver('job-1', 'topics_completed', { collection: COLLECTION, empty: true }, 9000)
+
+    expect(screen.getByText(warning)).toBeInTheDocument()
+  })
+
   it('shows nothing of a finished run the stream replays frame by frame', async () => {
-    // A reconnect replays a finished job's history as a burst, so it passes
-    // through "running" on its way to finished.
+    // A reconnect replays a finished job's history as a burst stamped alike,
+    // so it passes through "running" on its way to finished.
     stubApi()
     renderPanel()
     await screen.findByText(/3 topics/)
 
-    deliver('job-old', 'topics_started', { collection: COLLECTION, action: 'discover' })
-    deliver('job-old', 'warning', { code: 'too_few_unassigned', message: 'x' })
-    deliver('job-old', 'topics_completed', { collection: COLLECTION, empty: true })
+    deliver('job-old', 'topics_started', { collection: COLLECTION, action: 'discover' }, 5000)
+    deliver('job-old', 'warning', { code: 'too_few_unassigned', message: 'x' }, 5000)
+    deliver('job-old', 'topics_completed', { collection: COLLECTION, empty: true }, 5000)
 
     await waitFor(() => expect(screen.queryByText('Starting the topics run…')).not.toBeInTheDocument())
     expect(screen.queryByText('Too few unassigned chunks to look for new topics.')).not.toBeInTheDocument()
@@ -454,6 +539,39 @@ describe('TopicsPanel', () => {
     ).toBeInTheDocument()
     expect(screen.queryByText(/Aligning pending chunks:/)).not.toBeInTheDocument()
     await waitFor(() => expect(header.rebuild()).toBeEnabled())
+  })
+
+  it("hides a watched run's outcome from the click until the new run's first frame", async () => {
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    stubApi({
+      post: async () => {
+        await answered
+        return { status: 202, body: { job_id: 'job-new' } }
+      }
+    })
+    deliver('job-old', 'topics_started', { collection: COLLECTION, action: 'discover' }, 0)
+    deliver('job-old', 'warning', { code: 'none_new', message: 'x' }, 1500)
+    deliver('job-old', 'topics_completed', { collection: COLLECTION, empty: true }, 1600)
+    renderPanel()
+    const warning = 'No new topics were found; the unassigned chunks stay unassigned.'
+    await screen.findByText(/3 topics/)
+    expect(screen.getByText(warning)).toBeInTheDocument()
+
+    await userEvent.click(header.align())
+    expect(screen.getByText('Starting the topics run…')).toBeInTheDocument()
+    expect(screen.queryByText(warning)).not.toBeInTheDocument()
+
+    await act(async () => {
+      answer()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(screen.queryByText(warning)).not.toBeInTheDocument()
+
+    deliver('job-new', 'topics_started', { collection: COLLECTION, action: 'align' }, 2000)
+    expect(screen.queryByText(warning)).not.toBeInTheDocument()
   })
 
   it("shows its own run's outcome even when the stream reports it before the queueing answer", async () => {
@@ -552,6 +670,57 @@ describe('TopicsPanel', () => {
     await screen.findByText(/3 topics/)
 
     expect(screen.queryByText(/embedded with a different model/)).not.toBeInTheDocument()
+  })
+
+  it("never shows an earlier run's passage under a new run's topic of the same number", async () => {
+    // Topic ids restart at 0 with every build, so T0 names another topic after a rebuild.
+    const earlier = '20260101-000000-aaaaaa'
+    const later = '20260102-000000-bbbbbb'
+    let overview: TopicsOverview = { ...OVERVIEW, run_id: earlier, topics: [topic({ id: 0, label: 'Tides and harbours' })] }
+    let release!: () => void
+    const laterEvidence = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const respond = (body: unknown, status = 200) => ({
+      ok: status < 400,
+      status,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://localhost')
+        if (url.pathname.endsWith('/config')) return respond({ topics_enabled: true })
+        if (url.pathname.endsWith('/topics')) return respond(overview)
+        if (url.pathname.endsWith('/topics/0/evidence')) {
+          if (overview.run_id === earlier) {
+            return respond({ topic: 0, sources: [{ id: 'a1', filename: 'log-a.txt', text: 'A passage from the earlier build.' }] })
+          }
+          await laterEvidence
+          return respond({ topic: 0, sources: [{ id: 'b1', filename: 'log-b.txt', text: 'A passage from the new build.' }] })
+        }
+        if (url.pathname.endsWith('/documents')) return respond({ documents: [], more: false })
+        if (url.pathname.endsWith('/chunks')) return respond({ items: [], next_cursor: null })
+        return respond({})
+      })
+    )
+    renderPanel()
+    await userEvent.click(await screen.findByRole('button', { name: 'Show Tides and harbours' }))
+    expect(await screen.findByText('A passage from the earlier build.')).toBeInTheDocument()
+
+    // A rebuild ends: the job's end refetches everything under the topics prefix.
+    overview = { ...overview, run_id: later, topics: [topic({ id: 0, label: 'Orchards and pruning' })] }
+    act(() => void client.invalidateQueries({ queryKey: ['topics'] }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Show Orchards and pruning' }))
+
+    const evidence = screen.getByRole('region', { name: 'Evidence' })
+    expect(within(evidence).getByText('Loading…')).toBeInTheDocument()
+    expect(screen.queryByText('A passage from the earlier build.')).not.toBeInTheDocument()
+
+    await act(async () => release())
+    expect(await within(evidence).findByText('A passage from the new build.')).toBeInTheDocument()
+    expect(screen.queryByText('A passage from the earlier build.')).not.toBeInTheDocument()
   })
 
   it('opens one topic at a time and hands Ask in chat the topic and its run', async () => {

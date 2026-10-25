@@ -28,34 +28,37 @@ export function useTopicsOverview() {
   })
 }
 
+// A topic's reads are keyed by its run as well as its id: ids restart at 0 with every build, so
+// without the run a rebuilt T0 would show the cached passages of the topic T0 used to name.
+
 /** A topic's passages nearest its centre. */
-export function useTopicEvidence(topicId: number, enabled: boolean) {
+export function useTopicEvidence(runId: string, topicId: number, enabled: boolean) {
   const scope = useActiveCollection()
   const { collection } = scope
   return useQuery({
-    queryKey: ['topics', scope, 'evidence', topicId],
+    queryKey: ['topics', scope, runId, 'evidence', topicId],
     queryFn: () => getTopicEvidence(collection ?? '', topicId),
     enabled: !!collection && enabled
   })
 }
 
 /** The source files a topic's chunks come from. */
-export function useTopicDocuments(topicId: number, enabled: boolean) {
+export function useTopicDocuments(runId: string, topicId: number, enabled: boolean) {
   const scope = useActiveCollection()
   const { collection } = scope
   return useQuery({
-    queryKey: ['topics', scope, 'documents', topicId],
+    queryKey: ['topics', scope, runId, 'documents', topicId],
     queryFn: () => getTopicDocuments(collection ?? '', topicId),
     enabled: !!collection && enabled
   })
 }
 
 /** A topic's chunks, a page at a time. */
-export function useTopicChunks(topicId: number, enabled: boolean) {
+export function useTopicChunks(runId: string, topicId: number, enabled: boolean) {
   const scope = useActiveCollection()
   const { collection } = scope
   return useInfiniteQuery({
-    queryKey: ['topics', scope, 'chunks', topicId],
+    queryKey: ['topics', scope, runId, 'chunks', topicId],
     queryFn: ({ pageParam }) =>
       getTopicChunksPage({ collection: collection ?? '', topicId, cursor: pageParam as string | null }),
     initialPageParam: null as string | null,
@@ -94,6 +97,8 @@ export interface TopicsJobState {
   error: string | null
   /** Ended by completing or by being cancelled. A refusal completes too, with a coded warning. */
   finished: boolean
+  /** Watched while it ran on this page, not only replayed on a connect (see `IngestJobsState.liveJobs`). */
+  live: boolean
 }
 
 const NO_JOB: TopicsJobState = {
@@ -105,7 +110,8 @@ const NO_JOB: TopicsJobState = {
   total: 0,
   warnings: [],
   error: null,
-  finished: false
+  finished: false,
+  live: false
 }
 
 function isTopicsAction(value: unknown): value is TopicsAction {
@@ -140,7 +146,7 @@ function newestTopicsJob(events: Record<string, IngestEvent[]>, collection: stri
 }
 
 /** Fold one job's frames into its state. */
-function readJob(jobId: string, frames: IngestEvent[]): TopicsJobState {
+function readJob(jobId: string, frames: IngestEvent[], live: boolean): TopicsJobState {
   let action: TopicsAction | null = null
   let stage: string | null = null
   let done = 0
@@ -174,7 +180,7 @@ function readJob(jobId: string, frames: IngestEvent[]): TopicsJobState {
         break
     }
   }
-  return { jobId, action, running: !finished && error === null, stage, done, total, warnings, error, finished }
+  return { jobId, action, running: !finished && error === null, stage, done, total, warnings, error, finished, live }
 }
 
 /**
@@ -194,7 +200,8 @@ export function useTopicsJob(): TopicsJobState {
   const queryClient = useQueryClient()
   const jobId = useIngestJobsStore((s) => newestTopicsJob(s.events, scope.collection))
   const frames = useIngestJobsStore(selectJobEvents(jobId))
-  const job = useMemo(() => (jobId ? readJob(jobId, frames) : NO_JOB), [jobId, frames])
+  const live = useIngestJobsStore((s) => (jobId ? s.liveJobs[jobId] === true : false))
+  const job = useMemo(() => (jobId ? readJob(jobId, frames, live) : NO_JOB), [jobId, frames, live])
   const ended = job.finished || job.error !== null
   // Created on first use: `useRef(new Set())` would build a set on every render.
   const invalidatedRef = useRef<Set<string> | null>(null)

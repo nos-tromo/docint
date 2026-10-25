@@ -461,8 +461,13 @@ export const de: Strings = {
   'analysis.summary_building_progress': 'Fasse {mapped}/{total} Einheiten zusammen…',
 
   // topics (Analysis: Topics tab). Stages and warnings are keyed by the job's protocol codes.
-  'topics.caption':
-    '{topics} Themen · {assigned} von {total} Chunks zugeordnet · {unassigned} nicht zugeordnet · {pending} ausstehend',
+  // The caption is two parts joined by ' · ', so each carries one count to pluralise.
+  'topics.caption_topics_one': '{count} Thema',
+  'topics.caption_topics_other': '{count} Themen',
+  'topics.caption_coverage_one':
+    '{assigned} von {total} Chunk zugeordnet · {unassigned} nicht zugeordnet · {pending} ausstehend',
+  'topics.caption_coverage_other':
+    '{assigned} von {total} Chunks zugeordnet · {unassigned} nicht zugeordnet · {pending} ausstehend',
   'topics.select_collection': 'Wählen Sie eine Sammlung aus, um ihre Themen zu sehen.',
   'topics.empty': 'Für diese Sammlung gibt es noch keine Themen.',
   'topics.build': 'Themen erstellen',
@@ -510,7 +515,8 @@ export const de: Strings = {
   'topics.documents_more': 'Weitere Dokumente sind nicht aufgeführt.',
   'topics.passages': 'Alle Passagen',
   'topics.section_empty': 'Keine.',
-  'topics.size_share': '{size} Chunks · {share} %',
+  'topics.size_share_one': '{size} Chunk · {share} %',
+  'topics.size_share_other': '{size} Chunks · {share} %',
   'topics.seen_range': '{first} – {last}',
 
   // report
