@@ -13,7 +13,7 @@ it, and what it can do) with topic-by-topic deep dives.
 | [architecture.md](architecture.md) | Runtime architecture, component map, end-to-end request flow |
 | [configuration.md](configuration.md) | Every environment variable grouped by the dataclass that reads it, with defaults |
 | [api-reference.md](api-reference.md) | Every FastAPI route, method, tag, request/response shape, and streaming semantics |
-| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `topics`, `search-index`, `search-index-all`, `retention-report`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
+| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `extract`, `topics`, `search-index`, `search-index-all`, `retention-report`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
 | [ingestion.md](ingestion.md) | Document ingestion pipeline: triage, layout, OCR, extraction, chunking, embedding |
 | [retrieval-and-agents.md](retrieval-and-agents.md) | Agent turns, agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
 | [ui-guide.md](ui-guide.md) | React SPA pages — Dashboard, Chat, Ingest, Analysis, Inspector, Report — plus localization |
