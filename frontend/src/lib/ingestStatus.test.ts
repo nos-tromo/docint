@@ -105,6 +105,22 @@ describe('parseProgressMessage', () => {
     })
   })
 
+  it('parses the aligning-topics stage into a task bar', () => {
+    // The ingest run aligns each batch's chunks to the collection's topics.
+    expect(parseProgressMessage('Aligning topics: 120/4000 chunks processed')).toEqual({
+      kind: 'task',
+      taskKey: 'topics',
+      label: 'Aligning topics',
+      current: 120,
+      total: 4000
+    })
+    const status = deriveIngestStatus([
+      progress('Aligning topics: 120/4000 chunks processed'),
+      progress('Aligning topics: 400/4000 chunks processed')
+    ])
+    expect(status.tasks).toEqual([{ key: 'topics', label: 'Aligning topics', current: 400, total: 4000 }])
+  })
+
   it('returns kind=unknown for unparseable input without throwing', () => {
     expect(() => parseProgressMessage('utterly unknown payload')).not.toThrow()
     expect(parseProgressMessage('utterly unknown payload')).toEqual({
@@ -132,6 +148,19 @@ describe('appendCollapsedEvent', () => {
     }
     expect(log.map((e) => e.event)).toEqual(['report_pdf_started', 'report_pdf_progress'])
     expect(log[1].data.page).toBe(40)
+  })
+
+  it('collapses repeated topics progress', () => {
+    // The fit reports a heartbeat every few seconds for as long as it runs.
+    let log: IngestEvent[] = [{ event: 'topics_started', data: { job_id: 'j1', collection: 'docs' } }]
+    for (let seconds = 5; seconds <= 600; seconds += 5) {
+      log = appendCollapsedEvent(log, {
+        event: 'topics_progress',
+        data: { job_id: 'j1', message: `Fitting topics: ${seconds} s`, stage: 'fitting', done: seconds, total: 0 }
+      })
+    }
+    expect(log.map((e) => e.event)).toEqual(['topics_started', 'topics_progress'])
+    expect(log[1].data.done).toBe(600)
   })
 })
 

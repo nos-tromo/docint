@@ -38,15 +38,16 @@ export interface IngestJobsState {
  * SSE event names that open a run, across every job kind this store can hold:
  * an ingest job starts with `ingestion_started`, a summary job with
  * `summary_started`, an extract job with `extract_started`, a report-PDF job
- * with `report_pdf_started`. The backend replays a job's collapsed history
- * from its started frame on every reconnect, so all of them must reset the
- * local log.
+ * with `report_pdf_started`, a topics job with `topics_started`. The backend
+ * replays a job's collapsed history from its started frame on every
+ * reconnect, so all of them must reset the local log.
  */
 const STARTED_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_started',
   'summary_started',
   'extract_started',
-  'report_pdf_started'
+  'report_pdf_started',
+  'topics_started'
 ])
 
 /**
@@ -119,20 +120,23 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
  * run. Mirrors the backend's `jobs.py::TERMINAL_EVENTS` — an ingest job
  * terminates on `ingestion_complete`, a summary job on `summary_completed`,
  * an extract job on `extract_completed`, a report-PDF job on
- * `report_pdf_completed`, any kind on `error`. The stream is multiplexed
- * across kinds with no kind filter (`useIngestJobStream.ts`), so every kind
- * must be recognized here or its finished jobs would look permanently
- * "running" to the selector below and leave the sidebar badge stuck on.
+ * `report_pdf_completed`, a topics job on `topics_completed`, any kind on
+ * `error`. The stream is multiplexed across kinds with no kind filter
+ * (`useIngestJobStream.ts`), so every kind must be recognized here or its
+ * finished jobs would look permanently "running" to the selector below and
+ * leave the sidebar badge stuck on.
  */
 const TERMINAL_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_complete',
   'summary_completed',
   'extract_completed',
   'report_pdf_completed',
+  'topics_completed',
   'ingestion_cancelled',
   'summary_cancelled',
   'extract_cancelled',
   'report_pdf_cancelled',
+  'topics_cancelled',
   'error'
 ])
 

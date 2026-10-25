@@ -75,6 +75,7 @@ export type AgentAction =
   | 'keyframes'
   | 'read'
   | 'keyword'
+  | 'topics'
 
 /** One step of an agent turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
@@ -82,8 +83,9 @@ export interface AgentStep {
   action: AgentAction
   /**
    * The search's words, the image search's cues or the keyword check's words; the
-   * clip, with ` #n` when one frame was asked for; the passage number read; or the
-   * note's text. Empty for `seed`, `carried` and `answer`.
+   * clip, with ` #n` when one frame was asked for; the passage number read; the topic
+   * read (`T12`); or the note's text. Empty for `seed`, `carried`, `answer` and a
+   * listing of the topics.
    */
   detail: string
   found: number
@@ -338,6 +340,8 @@ export interface DocumentRecord {
   row_count?: number
   node_count?: number
   entity_types?: string[]
+  /** The topics the file's chunks sit in, each as `<run id>:<topic id>` with its chunk count. */
+  topics?: { topic: string; count: number }[]
 }
 
 export interface FileTypeCount {
@@ -693,6 +697,10 @@ export interface IngestEvent {
     | 'report_pdf_progress'
     | 'report_pdf_completed'
     | 'report_pdf_cancelled'
+    | 'topics_started'
+    | 'topics_progress'
+    | 'topics_completed'
+    | 'topics_cancelled'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
@@ -763,7 +771,7 @@ export interface IngestJobSnapshot {
   empty: boolean
   resolution: Record<string, number> | null
   /** Which job kind this is; drives the event names its frames carry. */
-  kind?: 'ingest' | 'summary' | 'extract' | 'report_pdf'
+  kind?: 'ingest' | 'summary' | 'extract' | 'report_pdf' | 'topics'
   /**
    * The one source an extract job covers, or null for a whole collection. A
    * report-PDF job carries its report's id here, as a string.
@@ -815,6 +823,11 @@ export interface AppConfig {
    * retention leaves every deadline surface hidden.
    */
   collection_retention?: string
+  /**
+   * `TOPICS_ENABLED`. Optional: a backend predating topics leaves every topics
+   * surface hidden.
+   */
+  topics_enabled?: boolean
 }
 
 /** One collection's retention clock and deletion date (`GET /collections/retention`). */

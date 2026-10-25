@@ -167,6 +167,29 @@ describe('IngestionStatus task bars', () => {
     expect(screen.getByText('12/412')).toBeInTheDocument()
     expect(screen.queryByText('Summarizing collection')).not.toBeInTheDocument()
   })
+
+  it('labels the topics task', () => {
+    render(
+      <LanguageContext value="de">
+        <IngestionStatus
+          status={
+            {
+              phase: 'processing',
+              totalFiles: 1,
+              filesSaved: 1,
+              indexed: 0,
+              totalChunks: 0,
+              tasks: [{ key: 'topics', label: 'Aligning topics', current: 30, total: 400 }],
+              warnings: [],
+            } as IngestStatus
+          }
+        />
+      </LanguageContext>
+    )
+    expect(screen.getByText('Themen werden zugeordnet')).toBeInTheDocument()
+    expect(screen.getByText('30/400')).toBeInTheDocument()
+    expect(screen.queryByText('Aligning topics')).not.toBeInTheDocument()
+  })
 })
 
 describe('IngestionStatus preprocess bars', () => {

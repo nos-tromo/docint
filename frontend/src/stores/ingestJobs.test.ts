@@ -256,6 +256,50 @@ describe('report-PDF jobs share the store', () => {
   })
 })
 
+describe('topics jobs share the store', () => {
+  beforeEach(() => useIngestJobsStore.getState().clear())
+
+  it('treats topics_started as the start of a fresh fold', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'topics_started', data: {} } as IngestEvent)
+    store.appendEvent('j1', { event: 'warning', data: { message: 'a warning' } } as IngestEvent)
+    // A reconnect replays the job's history from its started frame.
+    store.appendEvent('j1', { event: 'topics_started', data: {} } as IngestEvent)
+    expect(useIngestJobsStore.getState().events.j1).toHaveLength(1)
+  })
+
+  it('a topics job lights the badge until it completes', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'topics_started', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(true)
+    store.appendEvent('j1', { event: 'topics_completed', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
+  })
+
+  it('a topics job lights the badge until it is cancelled', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'topics_started', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(true)
+    store.appendEvent('j1', { event: 'topics_cancelled', data: {} } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
+  })
+
+  it('stops lighting the badge when a topics job fails with the plain error frame', () => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'topics_started', data: {} } as IngestEvent)
+    store.appendEvent('j1', { event: 'error', data: { code: 'topics_failed' } } as IngestEvent)
+    expect(selectHasRunningJob(useIngestJobsStore.getState())).toBe(false)
+  })
+
+  it.each(['topics_completed', 'topics_cancelled'] as const)('marks the job terminal on %s', (terminal) => {
+    const store = useIngestJobsStore.getState()
+    store.appendEvent('j1', { event: 'topics_started', data: {} } as IngestEvent)
+    expect(useIngestJobsStore.getState().terminal.j1).toBeUndefined()
+    store.appendEvent('j1', { event: terminal, data: {} } as IngestEvent)
+    expect(useIngestJobsStore.getState().terminal.j1).toBe(true)
+  })
+})
+
 describe('terminal job tracking', () => {
   it('marks a job terminal on its completion frame and clears it on a replay', () => {
     const { appendEvent } = useIngestJobsStore.getState()

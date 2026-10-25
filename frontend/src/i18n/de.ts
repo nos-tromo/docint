@@ -224,6 +224,9 @@ export const de: Strings = {
   'chat.agent_trail_keyframes_other': 'Keyframes von „{clip}“ angesehen: {count} neue Keyframes',
   'chat.agent_trail_keyframe': 'Keyframe #{index} von „{clip}“ angesehen',
   'chat.agent_trail_read': 'Passage [{n}] gelesen',
+  'chat.agent_trail_topics_list': 'Themen aufgelistet',
+  'chat.agent_trail_topic_one': 'Thema {topic} gelesen: {count} Passage',
+  'chat.agent_trail_topic_other': 'Thema {topic} gelesen: {count} Passagen',
   'chat.agent_trail_note': 'Notiz: {text}',
   'chat.agent_trail_answer': 'Einschätzung wird geschrieben…',
   'chat.agent_reason.tools_unavailable':
@@ -646,6 +649,7 @@ export const de: Strings = {
   'ingest.task_linking_images': 'Bilder werden Postings zugeordnet',
   'ingest.task_embedding': 'Embeddings und Speicherung',
   'ingest.task_summary': 'Zusammenfassung',
+  'ingest.task_topics': 'Themen werden zugeordnet',
   'ingest.stage_progress': '{current} von {total}',
   'ingest.preprocess_pdf': 'PDFs werden gelesen',
   'ingest.preprocess_ocr_pages': 'Gescannte Seiten werden erkannt',

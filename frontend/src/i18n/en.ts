@@ -212,6 +212,9 @@ export const en = {
   'chat.agent_trail_keyframes_other': 'Viewed the keyframes of “{clip}”: {count} new keyframes',
   'chat.agent_trail_keyframe': 'Viewed keyframe #{index} of “{clip}”',
   'chat.agent_trail_read': 'Read passage [{n}]',
+  'chat.agent_trail_topics_list': 'Listed the topics',
+  'chat.agent_trail_topic_one': 'Read topic {topic}: {count} passage',
+  'chat.agent_trail_topic_other': 'Read topic {topic}: {count} passages',
   'chat.agent_trail_note': 'Note: {text}',
   'chat.agent_trail_answer': 'Writing the assessment…',
   'chat.agent_reason.tools_unavailable':
@@ -629,6 +632,7 @@ export const en = {
   'ingest.task_linking_images': 'Linking images to posts',
   'ingest.task_embedding': 'Embedding and storing',
   'ingest.task_summary': 'Summarizing collection',
+  'ingest.task_topics': 'Aligning topics',
   'ingest.stage_progress': '{current} of {total}',
   'ingest.preprocess_pdf': 'Reading PDFs',
   'ingest.preprocess_ocr_pages': 'Recognizing scanned pages',
