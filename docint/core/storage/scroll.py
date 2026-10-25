@@ -47,7 +47,7 @@ def iter_scroll(
     scroll_filter: Any | None = None,
     page_size: int = 256,
     with_payload: bool | Sequence[str] | models.PayloadSelector = True,
-    with_vectors: bool = False,
+    with_vectors: bool | Sequence[str] = False,
     max_pages: int | None = None,
     on_error: ScrollErrorMode = "warn",
     error_context: str = "",
@@ -61,7 +61,7 @@ def iter_scroll(
         page_size (int): Points per page (the Qdrant ``limit`` parameter).
         with_payload (bool | Sequence[str] | models.PayloadSelector): Whether
             to fetch payloads, or which payload keys to fetch or leave out.
-        with_vectors (bool): Whether to fetch vectors.
+        with_vectors (bool | Sequence[str]): Whether to fetch vectors, or which named vectors.
         max_pages (int | None): If set, stop after this many pages.
         on_error (ScrollErrorMode): How to react to scroll exceptions:
             ``"raise"`` propagates the exception; ``"warn"`` logs at WARNING
