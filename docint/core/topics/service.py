@@ -360,6 +360,20 @@ def _inherit(sample: FitSample, overrides: dict[str, int]) -> dict[str, int]:
     return {**overrides, **copies}
 
 
+def _refuse_if_replaced(owner_created_at: Callable[[], str | None], created: str | None) -> None:
+    """Refuse a job whose collection was replaced since it started.
+
+    Args:
+        owner_created_at: Reads the ownership row's ``created_at`` now.
+        created: Its value when the job started.
+
+    Raises:
+        TopicsRefused: ``collection_changed`` when the two differ.
+    """
+    if owner_created_at() != created:
+        raise TopicsRefused("collection_changed")
+
+
 class TopicsService:
     """Builds, extends and maintains a collection's topics."""
 
@@ -532,7 +546,7 @@ class TopicsService:
         if dense.dim != run.table.dim:
             raise TopicsRefused("dimension_changed")
         if action == "discover":
-            return self._discover(physical, dense, run, progress, warn, job)
+            return self._discover(physical, dense, run, created, owner_created_at, progress, warn, job)
         return self._align(physical, dense, run, progress, job)
 
     def _build(
@@ -551,7 +565,7 @@ class TopicsService:
             physical: Physical collection name.
             dense: The collection's dense vector.
             created: The ownership row's ``created_at`` when the job started.
-            owner_created_at: Reads it again before activation.
+            owner_created_at: Reads it again before the run is written and before activation.
             progress: The progress channel.
             warn: The warning channel.
             job: What the job has written.
@@ -560,7 +574,7 @@ class TopicsService:
             The outcome.
 
         Raises:
-            TopicsRefused: ``too_few_chunks``, or ``collection_changed`` before activation.
+            TopicsRefused: ``too_few_chunks``, or ``collection_changed`` before the run is written or activated.
         """
         deps, store = self._deps, self._deps.store
         fitted = self._fit_pool(physical, dense, eligible_filter(), "too_few_chunks", progress)
@@ -584,6 +598,7 @@ class TopicsService:
         }
         run = TopicRun(run_id, record, table)
         try:
+            _refuse_if_replaced(owner_created_at, created)
             store.save(physical, run)
             overrides = {
                 p.point_id: int(label)
@@ -593,8 +608,7 @@ class TopicsService:
             assigned = self._pending_loop(
                 physical, dense, run_id, table, _inherit(fitted.sample, overrides), "assigning", progress, job
             )
-            if owner_created_at() != created:
-                raise TopicsRefused("collection_changed")
+            _refuse_if_replaced(owner_created_at, created)
             store.activate(physical, run_id)
         except BaseException:
             store.delete_run(physical, run_id)
@@ -605,7 +619,15 @@ class TopicsService:
         return TopicsOutcome("build", run_id, len(saved.table.topics), len(table.topics), assigned, empty=False)
 
     def _discover(
-        self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress, warn: Warn, job: _Job
+        self,
+        physical: str,
+        dense: DenseVector,
+        run: TopicRun,
+        created: str | None,
+        owner_created_at: Callable[[], str | None],
+        progress: Progress,
+        warn: Warn,
+        job: _Job,
     ) -> TopicsOutcome:
         """Fit the unassigned pool and append the topics that are new.
 
@@ -613,6 +635,8 @@ class TopicsService:
             physical: Physical collection name.
             dense: The collection's dense vector.
             run: The active run.
+            created: The ownership row's ``created_at`` when the job started.
+            owner_created_at: Reads it again before the extended run is written.
             progress: The progress channel.
             warn: The warning channel.
             job: What the job has written.
@@ -621,7 +645,7 @@ class TopicsService:
             The outcome.
 
         Raises:
-            TopicsRefused: ``too_few_unassigned``.
+            TopicsRefused: ``too_few_unassigned``, or ``collection_changed`` before the extended run is written.
         """
         deps, run_id = self._deps, run.run_id
         assigned = self._pending_loop(physical, dense, run_id, run.table, {}, "aligning", progress, job)
@@ -646,6 +670,7 @@ class TopicsService:
         table = self._labelled(table, fitted, {new: old for old, new in mapping.items()}, progress)
         fits = [*run.record.get("fits", []), {**self._fit_entry("discover", fitted), "kept": len(mapping)}]
         run = TopicRun(run_id, {**run.record, "fits": fits, "updated_at": self._now_iso()}, table)
+        _refuse_if_replaced(owner_created_at, created)
         deps.store.save(physical, run)
         overrides = {
             p.point_id: mapping[int(label)]

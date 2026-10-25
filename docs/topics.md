@@ -22,7 +22,7 @@ actions work on it, each as a background job:
 | Action | What it does | Refused when |
 |---|---|---|
 | `build` | Samples the collection, fits a new run, assigns every eligible chunk to it, activates it and deletes every other run. | The sample is too small (`too_few_chunks`), or the collection was deleted and created again while the build ran (`collection_changed`). |
-| `discover` | Fits the active run's unassigned chunks and appends the topics that are new. Existing topics are untouched. | There is no active run (`no_run`), the dense vectors changed size since the build (`dimension_changed`), or too few chunks are unassigned (`too_few_unassigned`). |
+| `discover` | Fits the active run's unassigned chunks and appends the topics that are new. Existing topics are untouched. | There is no active run (`no_run`), the dense vectors changed size since the build (`dimension_changed`), too few chunks are unassigned (`too_few_unassigned`), or the collection was deleted and created again while the discover ran (`collection_changed`). |
 | `align` | Assigns every eligible chunk the active run has not placed yet: chunks ingested since, or left behind by an interrupted job. | `no_run` or `dimension_changed`, as for discover. |
 
 A refusal is not a failure: the job completes with `empty: true` and a warning
@@ -61,12 +61,12 @@ cannot stay pending forever.
    at a time. The prompt is `docint/utils/prompts/{en,de}/topic_label.txt`,
    and the reply is constrained by a JSON schema while the endpoint accepts one.
    A topic whose label cannot be written is named by its first four keywords.
-6. **Assign.** The run is saved, then every eligible chunk is written (see
-   [Assignment](#assignment)).
-7. **Activate.** If the collection's ownership row still has the creation time
-   it had when the build started, the run becomes active and every other run
-   directory is deleted. A last align pass then places the chunks ingested
-   while the build ran.
+6. **Assign.** If the collection's ownership row still has the creation time
+   it had when the build started, the run is saved, then every eligible chunk
+   is written (see [Assignment](#assignment)).
+7. **Activate.** If the creation time is still the same, the run becomes
+   active and every other run directory is deleted. A last align pass then
+   places the chunks ingested while the build ran.
 
 A build that fails or is cancelled before it activates deletes its run, and the
 previous run stays active. The chunks it had already written name the deleted
@@ -97,11 +97,12 @@ whose `docint_topic` is `<run_id>:-1`.
    centre is below `TOPICS_MERGE_MIN_SIMILARITY`. The kept topics are labelled
    and appended with the ids `max + 1`, `max + 2`, … in the order of their
    pool-fit ids. When none is kept, the job ends with the warning `none_new`.
-5. The pool is placed against the extended run: the members that stayed in a
-   kept topic take it, and so do their exact-duplicate copies. Every other pool
-   chunk, a member set aside included, is aligned against all the run's
-   topics, old and new; one that is not admitted stays unassigned and is not
-   rewritten.
+5. If the collection's ownership row still has the creation time it had when
+   the discover started, the extended run is saved and the pool is placed
+   against it: the members that stayed in a kept topic take it, and so do
+   their exact-duplicate copies. Every other pool chunk, a member set aside
+   included, is aligned against all the run's topics, old and new; one that is
+   not admitted stays unassigned and is not rewritten.
 
 Existing topic ids, centres and floors never change, and the run keeps its id.
 
@@ -204,8 +205,11 @@ only.
   from it counts as absent: reads answer as if there were no run, and the next
   job on the collection, the ingest stage included, deletes it.
 - **Deletion.** Deleting a collection, by hand or by retention, removes its
-  whole directory. A build still running on it is caught by the creation-time
-  check before it activates.
+  whole directory. A build or discover still running on it is refused by the
+  creation-time check (`collection_changed`) between its fit and the writes
+  that follow, and a build checks again before it activates; only a
+  collection replaced while those writes run can still receive the rest of
+  them, which stay.
 
 ## The fit service
 
@@ -333,11 +337,11 @@ holds the lock. A build then reports `scanning`, `sampling`, `fitting`,
 `scanning` through `labelling` as a build does, `assigning` for the pool's
 re-align, and `aligning` again; an align reports `aligning` alone. A stage with
 nothing to do may send no frame, and `labelling` sends none while
-`TOPICS_LABELS` is off. A frame's `message` is static English, such as `Aligning topics: 1200/4000 chunks processed`; the SPA
-writes its own copy from `stage`, `done` and `total`. In the artifact, `topics`
-counts the run's topics after the job, `added` the topics it added, and
-`assigned` the chunks it placed in a topic (chunks written as unassigned are
-not counted).
+`TOPICS_LABELS` is off. A frame's `message` is static English, such as
+`Aligning topics: 1200/4000 chunks processed`; the SPA writes its own copy
+from `stage`, `done` and `total`. In the artifact, `topics` counts the run's
+topics after the job, `added` the topics it added, and `assigned` the chunks
+it placed in a topic (chunks written as unassigned are not counted).
 
 Warning codes:
 
@@ -347,7 +351,7 @@ Warning codes:
 | `too_few_unassigned` | completes, `empty` | Too few unassigned chunks to look for new topics. |
 | `no_run` | completes, `empty` | There is no active run to discover on or align. |
 | `dimension_changed` | completes, `empty` | The dense vectors changed size since the build; rebuild. |
-| `collection_changed` | completes, `empty` | The collection was replaced while the build ran. |
+| `collection_changed` | completes, `empty` | The collection was replaced while a build or discover ran. |
 | `none_found` | completes, `empty` | The fit found no topics; the current run stays. |
 | `none_new` | completes, `empty` | No pool topic was new; the unassigned chunks stay unassigned. |
 | `topics_unreachable` … `topics_failed` | fails | An endpoint fault (see [The fit service](#the-fit-service)). |

@@ -52,7 +52,7 @@ from docint.core.topics.service import (
     progress_message,
     progress_payload,
 )
-from docint.core.topics.store import TopicStore
+from docint.core.topics.store import TopicRun, TopicStore
 from docint.utils import topics_client
 from docint.utils.env_cfg import TopicsConfig
 from docint.utils.topics_client import FitParams, FitResult, TopicsBusy, encode_texts
@@ -861,6 +861,95 @@ def test_build_refuses_activation_when_the_collection_was_recreated(client: Qdra
     assert caught.value.message == "The collection was replaced while its topics were built."
     assert _run_dirs(root) == set()
     assert TopicStore(root).active_id(COLL) is None
+
+
+def _replacing(fit: FakeFit, clock: dict[str, str]) -> Callable[[Sequence[str], np.ndarray, FitParams], FitResult]:
+    """Wrap a fit so the collection is replaced while it runs.
+
+    Args:
+        fit: The fit to delegate to.
+        clock: The ownership-row clock, moved by the wrapper.
+
+    Returns:
+        The wrapped fit.
+    """
+
+    def replacing(texts: Sequence[str], vectors: np.ndarray, params: FitParams) -> FitResult:
+        """Replace the collection, then fit.
+
+        Args:
+            texts: Texts.
+            vectors: Vectors.
+            params: Settings.
+
+        Returns:
+            The fake result.
+        """
+        clock["value"] = "2026-02-02T00:00:00+00:00"
+        return fit(texts, vectors, params)
+
+    return replacing
+
+
+def test_build_refuses_before_writing_when_the_collection_is_replaced_during_the_fit(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A collection replaced while the fit runs gets neither a run nor a payload write.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+    """
+    _add_blobs(client)
+    saved: list[str] = []
+    save = TopicStore.save
+
+    def recording(self: TopicStore, physical: str, run: TopicRun) -> None:
+        """Record the run's id, then save it.
+
+        Args:
+            self: The store.
+            physical: Collection name.
+            run: The run.
+        """
+        saved.append(run.run_id)
+        save(self, physical, run)
+
+    monkeypatch.setattr(TopicStore, "save", recording)
+    clock = {"value": CREATED}
+    spy = WriteSpy(client)
+    with pytest.raises(TopicsRefused) as caught:
+        _run(_service(spy, root, _replacing(FakeFit(BLOBS), clock)), "build", created=lambda: clock["value"])
+    assert caught.value.code == "collection_changed"
+    assert spy.written == []
+    assert saved == []
+    assert _run_dirs(root) == set()
+    assert TopicStore(root).active_id(COLL) is None
+
+
+def test_discover_refuses_before_writing_when_the_collection_is_replaced_during_the_fit(
+    client: QdrantClient, root: Path
+) -> None:
+    """A collection replaced while the pool is fitted gets neither the new topics nor a payload write.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60)
+    built = _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    assert built.run_id is not None
+    clock = {"value": CREATED}
+    spy = WriteSpy(client)
+    with pytest.raises(TopicsRefused) as caught:
+        _run(_service(spy, root, _replacing(FakeFit(BLOBS), clock)), "discover", created=lambda: clock["value"])
+    assert caught.value.code == "collection_changed"
+    assert spy.written == []
+    run = TopicStore(root).load(COLL, built.run_id)
+    assert run is not None
+    assert len(run.table.topics) == 2
+    assert [f["kind"] for f in run.record["fits"]] == ["build"]
 
 
 # Concurrency
