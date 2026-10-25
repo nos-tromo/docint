@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
 import { Analysis } from './Analysis'
@@ -41,9 +41,12 @@ const graphEdges = [
   { source: 'acme::org', target: 'rivertown::loc', label: 'located_in', kind: 'relation', weight: 3 }
 ]
 
-function mockFetch() {
+function mockFetch({ topicsEnabled = false }: { topicsEnabled?: boolean } = {}) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const path = typeof input === 'string' ? input : input.toString()
+    if (path.includes('/topics')) {
+      return { ok: true, status: 204, json: async () => null }
+    }
     if (path.includes('/collections/ner/stats')) {
       return { ok: true, status: 200, json: async () => ({ top_entities: entities }) }
     }
@@ -63,7 +66,8 @@ function mockFetch() {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ graph_top_k: 80, graph_max_top_k: 500 })
+        // Omitted rather than false when off: a backend predating topics sends no flag.
+        json: async () => ({ graph_top_k: 80, graph_max_top_k: 500, ...(topicsEnabled ? { topics_enabled: true } : {}) })
       }
     }
     return { ok: true, status: 200, json: async () => ({}) }
@@ -189,15 +193,62 @@ describe('Analysis position', () => {
   })
 })
 
+describe('Analysis topics tab', () => {
+  it('shows the topics tab only when topics are enabled', async () => {
+    const off = mockFetch()
+    vi.stubGlobal('fetch', off)
+    const { unmount } = renderAnalysis()
+    await waitFor(() => expect(off.mock.calls.some(([input]) => String(input).includes('/config'))).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(screen.getByRole('button', { name: 'Summary' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Topics' })).not.toBeInTheDocument()
+    unmount()
+
+    vi.stubGlobal('fetch', mockFetch({ topicsEnabled: true }))
+    renderAnalysis()
+    const tabs = await screen.findByRole('button', { name: 'Topics' })
+    // The fourth tab, after the three that came before it.
+    expect(within(tabs.parentElement as HTMLElement).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Entities',
+      'Hate speech',
+      'Summary',
+      'Topics'
+    ])
+
+    await userEvent.click(tabs)
+
+    expect(tabs).toHaveClass('border-foreground')
+    expect(tabs).toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('button', { name: 'Entities' })).not.toHaveAttribute('aria-current')
+    expect(useAnalysisUiStore.getState().tab).toBe('topics')
+    expect(await screen.findByRole('button', { name: 'Build topics' })).toBeInTheDocument()
+  })
+
+  it('falls back to the entities tab when a remembered topics tab is switched off', async () => {
+    useAnalysisUiStore.setState({ tab: 'topics', nerView: 'table', entity: null })
+    vi.stubGlobal('fetch', mockFetch())
+    renderAnalysis()
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
+    )
+    expect(screen.getByRole('button', { name: 'Entities' })).toHaveClass('border-foreground')
+    expect(screen.queryByRole('button', { name: 'Build topics' })).not.toBeInTheDocument()
+    // Shown, not rewritten: the remembered tab returns once the flag is back on.
+    expect(useAnalysisUiStore.getState().tab).toBe('topics')
+  })
+})
+
 describe('Analysis German smoke test', () => {
   it('renders the German heading and tab labels', async () => {
-    vi.stubGlobal('fetch', mockFetch())
+    vi.stubGlobal('fetch', mockFetch({ topicsEnabled: true }))
     renderAnalysisInLanguage('de')
 
     expect(await screen.findByRole('heading', { name: 'Analyse' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Hatespeech' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Entitäten' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Zusammenfassung' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Themen' })).toBeInTheDocument()
   })
 })
 

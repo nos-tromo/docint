@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { PageHeader } from '@infra/ui'
 import { useHateSpeechPages, useNerGraph, useNerSources, useNerStats } from '@/hooks/useNer'
 import { useReportDedupeKeys } from '@/hooks/useReports'
@@ -10,6 +10,7 @@ import { EntityGraph } from '@/components/analysis/EntityGraph'
 import { EntityFindingsTable } from '@/components/analysis/EntityFindingsTable'
 import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
+import { TopicsPanel } from '@/components/analysis/TopicsPanel'
 import { warmCollectionNer } from '@/api/collections'
 import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
@@ -18,13 +19,29 @@ import { ENTITY_MERGE_MODE, type NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 
-const TAB_IDS = ['ner', 'hate', 'summary'] as const
+const TAB_IDS = ['ner', 'hate', 'summary', 'topics'] as const
 type Tab = (typeof TAB_IDS)[number]
 
 const NER_VIEW_IDS = ['table', 'graph'] as const
 type NerView = (typeof NER_VIEW_IDS)[number]
 
 const keyOf = entityKey
+
+/**
+ * Scroll a tab strip sideways just far enough to show its current tab.
+ *
+ * Only the strip moves: `scrollIntoView` would also scroll the page to it.
+ *
+ * @param strip - The scrolling strip holding the tabs.
+ */
+function revealCurrentTab(strip: HTMLElement): void {
+  const tab = strip.querySelector('[aria-current]')
+  if (!tab) return
+  const box = strip.getBoundingClientRect()
+  const rect = tab.getBoundingClientRect()
+  if (rect.right > box.right) strip.scrollLeft += rect.right - box.right
+  else if (rect.left < box.left) strip.scrollLeft -= box.left - rect.left
+}
 
 export function Analysis() {
   const t = useT()
@@ -135,10 +152,33 @@ export function Analysis() {
     []
   )
 
+  // The tab is remembered across sessions, so one saved while topics were on
+  // reads as the entities tab while the deployment has them off.
+  const topicsEnabled = cfg.data?.topics_enabled === true
+  const tabIds = topicsEnabled ? TAB_IDS : TAB_IDS.filter((id) => id !== 'topics')
+  const activeTab: Tab = tab === 'topics' && !topicsEnabled ? 'ner' : tab
+  const tabStripRef = useRef<HTMLDivElement>(null)
+
+  // A remembered tab past a narrow screen's edge is scrolled into view.
+  useEffect(() => {
+    const strip = tabStripRef.current
+    const current = strip?.querySelector('[aria-current]')
+    if (!strip || !current) return
+    revealCurrentTab(strip)
+    if (typeof ResizeObserver === 'undefined') return
+    // The web font widening the tabs, or the page's scrollbar arriving with the
+    // content and narrowing the strip, can push the current tab back out.
+    const observer = new ResizeObserver(() => revealCurrentTab(strip))
+    observer.observe(strip)
+    observer.observe(current)
+    return () => observer.disconnect()
+  }, [activeTab])
+
   const tabLabel: Record<Tab, string> = {
     ner: t('analysis.tab_ner'),
     hate: t('analysis.tab_hate'),
-    summary: t('analysis.tab_summary')
+    summary: t('analysis.tab_summary'),
+    topics: t('analysis.tab_topics')
   }
   const nerViewLabel: Record<NerView, string> = {
     table: t('entities.view_table'),
@@ -148,22 +188,27 @@ export function Analysis() {
   return (
     <div className="p-8 space-y-4">
       <PageHeader title={t('analysis.title')} caption={t('analysis.caption')} />
-      <nav className="flex gap-2 border-b border-border">
-        {TAB_IDS.map((id) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            className={cn(
-              'px-3 py-2 text-sm -mb-px border-b-2',
-              tab === id ? 'border-foreground' : 'border-transparent text-muted-foreground'
-            )}
-          >
-            {tabLabel[id]}
-          </button>
-        ))}
+      <nav className="border-b border-border">
+        {/* Scrolls rather than wraps, which would float a row's underline; the strip
+            rather than each tab overlaps the border, so the scroll box clips no tab. */}
+        <div ref={tabStripRef} className="-mb-px flex gap-1 overflow-x-auto [scrollbar-width:thin] sm:gap-2">
+          {tabIds.map((id) => (
+            <button
+              key={id}
+              type="button"
+              aria-current={activeTab === id || undefined}
+              onClick={() => setTab(id)}
+              className={cn(
+                'shrink-0 whitespace-nowrap px-2 py-2 text-sm border-b-2 sm:px-3',
+                activeTab === id ? 'border-foreground' : 'border-transparent text-muted-foreground'
+              )}
+            >
+              {tabLabel[id]}
+            </button>
+          ))}
+        </div>
       </nav>
-      {tab === 'ner' && (
+      {activeTab === 'ner' && (
         <div className="space-y-3">
           {collection && (
             // Full width, halves: the two views are peers, and the pair now
@@ -238,7 +283,7 @@ export function Analysis() {
           )}
         </div>
       )}
-      {tab === 'hate' && (
+      {activeTab === 'hate' && (
         <HateSpeechTable
           rows={hateRows}
           isFetching={hate.isFetching}
@@ -248,7 +293,9 @@ export function Analysis() {
           reportDedupeKeys={reportDedupeKeys}
         />
       )}
-      {tab === 'summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
+      {activeTab === 'summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
+      {/* Asking in chat about a topic needs the chat's topic filter; until it exists the action is a no-op. */}
+      {activeTab === 'topics' && <TopicsPanel onAsk={() => {}} />}
     </div>
   )
 }

@@ -196,11 +196,13 @@ export function useTopicsJob(): TopicsJobState {
   const frames = useIngestJobsStore(selectJobEvents(jobId))
   const job = useMemo(() => (jobId ? readJob(jobId, frames) : NO_JOB), [jobId, frames])
   const ended = job.finished || job.error !== null
-  const invalidatedRef = useRef(new Set<string>())
+  // Created on first use: `useRef(new Set())` would build a set on every render.
+  const invalidatedRef = useRef<Set<string> | null>(null)
 
   useEffect(() => {
-    if (!jobId || !ended || invalidatedRef.current.has(jobId)) return
-    invalidatedRef.current.add(jobId)
+    const invalidated = (invalidatedRef.current ??= new Set())
+    if (!jobId || !ended || invalidated.has(jobId)) return
+    invalidated.add(jobId)
     void queryClient.invalidateQueries({ queryKey: ['topics', scope] })
     void queryClient.invalidateQueries({ queryKey: ['documents-pages', scope] })
   }, [jobId, ended, scope, queryClient])

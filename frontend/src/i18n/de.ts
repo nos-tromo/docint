@@ -379,6 +379,7 @@ export const de: Strings = {
   'analysis.tab_ner': 'Entitäten',
   'analysis.tab_hate': 'Hatespeech',
   'analysis.tab_summary': 'Zusammenfassung',
+  'analysis.tab_topics': 'Themen',
   'entities.view_group_aria': 'Entitätsansicht',
   'entities.view_table': 'Tabelle',
   'entities.view_graph': 'Graph',
@@ -458,6 +459,59 @@ export const de: Strings = {
   'analysis.summary_sources': 'Quellen',
   'analysis.summary_building': 'Sammlungszusammenfassung wird erstellt…',
   'analysis.summary_building_progress': 'Fasse {mapped}/{total} Einheiten zusammen…',
+
+  // topics (Analysis: Topics tab). Stages and warnings are keyed by the job's protocol codes.
+  'topics.caption':
+    '{topics} Themen · {assigned} von {total} Chunks zugeordnet · {unassigned} nicht zugeordnet · {pending} ausstehend',
+  'topics.select_collection': 'Wählen Sie eine Sammlung aus, um ihre Themen zu sehen.',
+  'topics.empty': 'Für diese Sammlung gibt es noch keine Themen.',
+  'topics.build': 'Themen erstellen',
+  'topics.rebuild': 'Themen neu erstellen',
+  'topics.rebuild_confirm':
+    'Die Themen neu erstellen? Chat-Filter auf die aktuellen Themen greifen danach nicht mehr.',
+  'topics.discover': 'Neue Themen suchen',
+  'topics.align': 'Ausstehende Chunks zuordnen',
+  'topics.download_csv': 'CSV herunterladen',
+  'topics.stage_starting': 'Themenlauf wird gestartet…',
+  'topics.stage_waiting': 'Wartet auf einen anderen Themenlauf dieser Sammlung: {done} s',
+  'topics.stage_scanning': 'Chunks werden gescannt: {done} gescannt',
+  'topics.stage_sampling': 'Stichprobe wird gelesen: {done} von {total} Chunks',
+  'topics.stage_fitting': 'Themen werden berechnet: {done} s',
+  'topics.stage_labelling': 'Themen werden benannt: {done} von {total}',
+  'topics.stage_assigning': 'Chunks werden zugeordnet: {done} von {total}',
+  'topics.stage_aligning': 'Ausstehende Chunks werden zugeordnet: {done} von {total}',
+  'topics.stage_other': 'Themen werden bearbeitet…',
+  'topics.warning_none_found':
+    'Die Berechnung hat keine Themen gefunden; die Sammlung behält ihre bisherigen Themen.',
+  'topics.warning_none_new':
+    'Es wurden keine neuen Themen gefunden; die nicht zugeordneten Chunks bleiben nicht zugeordnet.',
+  'topics.warning_too_few_chunks':
+    'Die Sammlung hat zu wenige Chunks mit genug Text, um Themen zu erstellen.',
+  'topics.warning_too_few_unassigned': 'Zu wenige nicht zugeordnete Chunks, um nach neuen Themen zu suchen.',
+  'topics.warning_no_run': 'Erstellen Sie zuerst die Themen.',
+  'topics.warning_dimension_changed':
+    'Die Vektoren der Sammlung haben seit der Erstellung der Themen ihre Größe geändert; erstellen Sie die Themen neu.',
+  'topics.warning_collection_changed': 'Die Sammlung wurde ersetzt, während ihre Themen erstellt wurden.',
+  'topics.warning_topics_unreachable': 'Der Themendienst war nicht erreichbar.',
+  'topics.warning_topics_busy': 'Der Themendienst blieb ausgelastet; versuchen Sie es später erneut.',
+  'topics.warning_topics_too_large': 'Der Themendienst hat eine so große Stichprobe abgelehnt.',
+  'topics.warning_topics_rejected': 'Der Themendienst hat die Anfrage abgelehnt.',
+  'topics.warning_topics_bad_response': 'Der Themendienst hat eine unbrauchbare Antwort gesendet.',
+  'topics.warning_generic': 'Der Themenlauf hat ein Problem gemeldet.',
+  'topics.failed': 'Der Themenlauf ist fehlgeschlagen.',
+  'topics.embed_model_changed':
+    'Diese Sammlung wird inzwischen mit einem anderen Modell eingebettet als bei der Erstellung ihrer Themen. Erstellen Sie die Themen neu, damit neue Chunks richtig zugeordnet werden.',
+  'topics.origin_new': 'Neu',
+  'topics.show': '{label} anzeigen',
+  'topics.hide': '{label} ausblenden',
+  'topics.ask_in_chat': 'Im Chat fragen',
+  'topics.evidence': 'Belege',
+  'topics.documents': 'Dokumente',
+  'topics.documents_more': 'Weitere Dokumente sind nicht aufgeführt.',
+  'topics.passages': 'Alle Passagen',
+  'topics.section_empty': 'Keine.',
+  'topics.size_share': '{size} Chunks · {share} %',
+  'topics.seen_range': '{first} – {last}',
 
   // report
   'report.title': 'Berichte',
