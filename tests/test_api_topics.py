@@ -133,6 +133,17 @@ class _TopicsRAG:
         """
         return self.store
 
+    def _active_topic_run(self, physical: str) -> object | None:
+        """Read the scripted store as the real engine does.
+
+        Args:
+            physical: Physical collection name.
+
+        Returns:
+            The scripted run, or ``None``.
+        """
+        return self.store.active(physical, owner_created_at=self.collection_created_at(physical))
+
     def collection_created_at(self, physical: str) -> str | None:
         """Return a fixed creation time.
 
@@ -432,6 +443,40 @@ def test_a_second_post_answers_409_with_the_running_job_id(make_client: Callable
         "message": "A topics run is already in progress.",
         "job_id": first.json()["job_id"],
     }
+
+
+@pytest.mark.parametrize("action", ["discover", "align"])
+def test_discover_or_align_while_a_job_is_active_answers_409_not_400(
+    make_client: Callable[[JobRunner], TestClient], action: str
+) -> None:
+    """A busy collection is reported as busy even before its first run exists.
+
+    Args:
+        make_client: The client factory.
+        action: The action.
+    """
+    gate = threading.Event()
+
+    def blocking(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Hold the job until released.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        gate.wait(timeout=5)
+        return {"empty": True, "resolution": None}
+
+    client = make_client(blocking)
+    first = client.post("/collections/docs/topics", json={})
+    second = client.post("/collections/docs/topics", json={"action": action})
+    gate.set()
+
+    assert second.status_code == 409
+    assert second.json()["detail"]["job_id"] == first.json()["job_id"]
 
 
 @pytest.mark.parametrize("action", ["discover", "align"])

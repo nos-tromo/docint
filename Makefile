@@ -16,7 +16,7 @@ NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache sessions-storage source-preview-cache pipeline-storage
 include make/common.mk
 
-.PHONY: help resolve health search-index search-index-all extract retention-report
+.PHONY: help resolve health search-index search-index-all extract topics retention-report
 
 help:
 	@echo "docint — build-host helpers."
@@ -34,6 +34,7 @@ help:
 	@echo "  make health     check backend dependency status (Qdrant reachability); chain as 'make up health'"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
 	@echo "  make extract    write a collection's data extract to RESULTS_PATH (COLLECTION=<name> optional)"
+	@echo "  make topics     build, extend or inspect a collection's topics (OP=build|align|discover|status, COLLECTION=<name> optional)"
 	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
 	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
 	@echo "  make retention-report  show what COLLECTION_RETENTION deletes, and when (WINDOW=6m optional; read-only)"
@@ -80,6 +81,17 @@ extract:
 		$(COMPOSE) run --rm -T backend extract "$(COLLECTION)"; \
 	else \
 		$(COMPOSE) run --rm backend extract; \
+	fi
+
+# Build, extend or inspect a collection's topics (docs/topics.md). Runs the
+# `topics` CLI in a one-off backend container so it reaches the qdrant and
+# vllm-router aliases. OP is build, align, discover or status (the default);
+# pass COLLECTION=<name> to run non-interactively.
+topics:
+	@if [ -n "$(COLLECTION)" ]; then \
+		$(COMPOSE) run --rm -T backend topics "$(or $(OP),status)" "$(COLLECTION)"; \
+	else \
+		$(COMPOSE) run --rm backend topics "$(or $(OP),status)"; \
 	fi
 
 # Build the full-text search index for a collection: creates the `search_text`

@@ -9133,3 +9133,27 @@ def test_a_keyword_match_run_outside_its_collection_raises_before_reading_anythi
 
     assert (client.counted, built) == ([], [])
     assert matcher.run("Kontrollgruppe", "text").matches == 4
+
+
+def test_deleting_a_collection_removes_its_topics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Stored topic runs and the index cache entry go with the collection.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory standing in for the topic store root.
+    """
+    topics = tmp_path / "topics"
+    monkeypatch.setenv("TOPICS_DIR", str(topics))
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path / "sources"
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    stored = topics / "target" / "20260102-030405-abcdef"
+    stored.mkdir(parents=True)
+    rag._topic_indexes_ensured.add("target")
+
+    rag.delete_collection("target")
+
+    assert not (topics / "target").exists()
+    assert "target" not in rag._topic_indexes_ensured

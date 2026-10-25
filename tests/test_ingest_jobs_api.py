@@ -21,7 +21,7 @@ from docint.core import collection_writes
 from docint.core.collection_writes import WriteState
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.ingest.preprocess import PreprocessPool, StageProgress
-from docint.core.jobs import IngestJobManager, IngestJobState, JobRunner
+from docint.core.jobs import IngestJobManager, IngestJobState, JobCancelled, JobRunner
 from docint.core.rag import RAG, IngestStats
 
 
@@ -864,3 +864,157 @@ def test_a_summary_job_leaves_the_tally_alone(monkeypatch: pytest.MonkeyPatch) -
         assert pool.progress.snapshot(state.physical) == [StageProgress("pdf", 0, 2, 0)]
     finally:
         pool.shutdown()
+
+
+class _AlignService:
+    """A topics service whose ``align_on_ingest`` is scripted."""
+
+    def __init__(self, outcome: Any = None, error: Exception | None = None, ticks: int = 0) -> None:
+        """Script the answer.
+
+        Args:
+            outcome (Any): What the stage returns.
+            error (Exception | None): Raised instead of returning.
+            ticks (int): Progress calls made before answering.
+        """
+        self.outcome = outcome
+        self.error = error
+        self.ticks = ticks
+        self.calls: list[str] = []
+
+    def align_on_ingest(self, physical: str, *, owner_created_at: Any, progress: Any) -> Any:
+        """Record the call, report progress, then answer.
+
+        Args:
+            physical (str): Physical collection name.
+            owner_created_at (Any): Reads the ownership time.
+            progress (Any): Receives ``(done, total)``.
+
+        Returns:
+            Any: The scripted outcome.
+
+        Raises:
+            Exception: The scripted error.
+        """
+        self.calls.append(physical)
+        for done in range(1, self.ticks + 1):
+            progress(done, self.ticks)
+        if self.error is not None:
+            raise self.error
+        return self.outcome
+
+
+def _run_with_align(
+    monkeypatch: pytest.MonkeyPatch, service: _AlignService
+) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+    """Run an ingest job with a scripted topics service and no summary.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        service (_AlignService): The scripted service.
+
+    Returns:
+        tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]: The result and the pushed events.
+    """
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setattr(api_module.rag, "topics_service", lambda: service)
+    monkeypatch.setattr(api_module.rag, "collection_created_at", lambda physical: None)
+    pushed: list[tuple[str, dict[str, Any]]] = []
+    result = api_module._run_ingest_job(_make_state(kind="ingest"), lambda ev, p: pushed.append((ev, p)))
+    return result, pushed
+
+
+def test_ingest_aligns_topics_after_resolution_and_before_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The alignment stage reports its counter between the resolution and the summary stages.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "true")
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", lambda progress=None: {})
+    monkeypatch.setattr(
+        api_module.rag,
+        "resolve_entities",
+        lambda: SimpleNamespace(processed=0, minted=0, attached=0, skipped=0, entities_touched=0),
+    )
+    service = _AlignService(ticks=2)
+    monkeypatch.setattr(api_module.rag, "topics_service", lambda: service)
+    monkeypatch.setattr(api_module.rag, "collection_created_at", lambda physical: None)
+    pushed: list[tuple[str, dict[str, Any]]] = []
+
+    api_module._run_ingest_job(_make_state(kind="ingest", resolve=True), lambda ev, p: pushed.append((ev, p)))
+
+    messages = [p["message"] for ev, p in pushed if ev == "ingestion_progress"]
+    assert service.calls == ["u0123456789ab__mydocs"]
+    assert messages.index("Resolving entities...") < messages.index("Aligning topics: 1/2 chunks processed")
+    assert messages.index("Aligning topics: 2/2 chunks processed") < messages.index("Building collection summary...")
+
+
+def test_ingest_topics_stage_is_silent_without_a_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no run the stage pushes nothing at all.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    service = _AlignService(outcome=None)
+
+    result, pushed = _run_with_align(monkeypatch, service)
+
+    assert service.calls
+    assert result["empty"] is False
+    assert [ev for ev, _ in pushed] == ["ingestion_progress"]
+    assert pushed[0][1]["message"] == "Collection summary skipped."
+
+
+def test_ingest_defers_alignment_with_a_warning_when_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A held lock becomes a coded warning, not a failure.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    outcome = SimpleNamespace(deferred=True)
+
+    result, pushed = _run_with_align(monkeypatch, _AlignService(outcome=outcome))
+
+    assert result["empty"] is False
+    assert [p["code"] for ev, p in pushed if ev == "warning"] == ["topics_deferred"]
+
+
+def test_a_failed_alignment_is_a_warning_and_the_ingest_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure of the stage warns with a code and the run still completes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    result, pushed = _run_with_align(monkeypatch, _AlignService(error=RuntimeError("boom")))
+
+    assert result["empty"] is False
+    assert [p["code"] for ev, p in pushed if ev == "warning"] == ["topics_align_failed"]
+    assert "boom" not in str(pushed)
+
+
+def test_a_cancel_during_alignment_cancels_the_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel raised inside the stage is not swallowed into a warning.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    with pytest.raises(JobCancelled):
+        _run_with_align(monkeypatch, _AlignService(error=JobCancelled()))
+
+
+def test_topics_align_on_ingest_false_skips_the_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the flag off the service is never built.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("TOPICS_ALIGN_ON_INGEST", "false")
+    service = _AlignService(outcome=SimpleNamespace(deferred=True))
+
+    _, pushed = _run_with_align(monkeypatch, service)
+
+    assert service.calls == []
+    assert not [ev for ev, _ in pushed if ev == "warning"]

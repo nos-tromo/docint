@@ -7487,6 +7487,12 @@ class RAG:
         except Exception as e:
             logger.warning("Failed to delete stored extracts for collection '{}': {}", target, e)
 
+        try:
+            TopicStore(self.path_config.topics).delete_collection(target)
+        except Exception as e:
+            logger.warning("Failed to delete stored topics for collection '{}': {}", target, e)
+        self._topic_indexes_ensured.discard(target)
+
         # 4. PDF pipeline artifacts nothing else uses.
         if artifacts is not None:
             self._remove_orphaned_artifacts(target, *artifacts)
@@ -10457,10 +10463,14 @@ class RAG:
                         "max_rows": 0,
                         "max_duration": 0.0,
                         "entity_types": set(),
+                        "topics": defaultdict(int),
                     }
 
                 entry = docs_map[filename]
                 entry["node_count"] += 1
+                topic = payload.get("docint_topic")
+                if isinstance(topic, str) and topic:
+                    entry["topics"][topic] += 1
 
                 # Extract entities from payload
                 ents = payload.get("entities") or []
@@ -10513,6 +10523,11 @@ class RAG:
         for _, data in docs_map.items():
             data["page_count"] = len(data.pop("pages"))
             data["entity_types"] = sorted(list(data.get("entity_types", set())))
+            tally = data.pop("topics")
+            if tally:
+                data["topics"] = [
+                    {"topic": t, "count": n} for t, n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+                ]
             if "entity_types" in data and isinstance(data["entity_types"], set):
                 # Fallback if get didn't return set but pop of set or something (redundant with line above but safer)
                 pass

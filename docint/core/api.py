@@ -67,7 +67,7 @@ from docint.core.extract.store import ExtractStore
 from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preprocess_pool, submit_file
-from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
+from docint.core.jobs import IngestJobManager, IngestJobState, JobCancelled, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retention import (
     RetentionClock,
@@ -5329,6 +5329,29 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
                 "entities_touched": summary.entities_touched,
             }
 
+    topics_cfg = load_topics_env()
+    if topics_cfg.enabled and topics_cfg.align_on_ingest:
+        try:
+            outcome = rag.topics_service().align_on_ingest(
+                state.physical,
+                owner_created_at=lambda: rag.collection_created_at(state.physical),
+                progress=lambda done, total: push("ingestion_progress", progress_payload("aligning", done, total)),
+            )
+        except JobCancelled:
+            raise
+        except Exception:
+            logger.exception("Topic alignment after ingest failed for '{}'", state.logical_name)
+            push("warning", {"message": "Topic alignment failed.", "code": "topics_align_failed"})
+        else:
+            if outcome is not None and outcome.deferred:
+                push(
+                    "warning",
+                    {
+                        "message": "Topic alignment was deferred: another topics run holds this collection.",
+                        "code": "topics_deferred",
+                    },
+                )
+
     # A per-request override of ``SUMMARY_ON_INGEST``: the rebuild maps the
     # whole collection, not just this run's files, so it is the longest tail
     # of a run and the one stage worth skipping for a batch nobody will
@@ -6259,11 +6282,9 @@ async def create_topics(
     _require_topics_enabled()
     physical = _require_owned_collection(name, principal)
     action = payload.action if payload is not None else "build"
-    if (
-        action != "build"
-        and rag.topic_store().active(physical, owner_created_at=rag.collection_created_at(physical)) is None
-    ):
-        raise HTTPException(status_code=400, detail="Build topics first.")
+    if action != "build" and await jobs.active_for(principal.effective_owner, physical, "topics") is None:
+        if await to_thread.run_sync(rag._active_topic_run, physical) is None:
+            raise HTTPException(status_code=400, detail="Build topics first.")
     state, created = await jobs.create_if_idle(
         owner=principal.effective_owner,
         logical_name=name,
