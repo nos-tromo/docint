@@ -46,6 +46,7 @@ from docint.core.topics.model import (
     central_members,
     centres_for,
     floors_for,
+    kept_members,
     merge_new,
 )
 from docint.core.topics.sample import (
@@ -629,6 +630,9 @@ class TopicsService:
         run = self._save_seen(physical, run, run.table, job)
         pool = and_filters(topic_filter(run_id, -1), eligible_filter())
         fitted = self._fit_pool(physical, dense, pool, "too_few_unassigned", progress)
+        # A member nearer another topic, old or new, is aligned with the rest of the pool instead.
+        kept = kept_members(fitted.vectors, fitted.labels, run.table.centres, min_topic_size=fitted.min_topic_size)
+        fitted = replace(fitted, labels=kept)
         candidates = self._candidates(fitted, "discover")
         table, mapping = merge_new(
             run.table,
@@ -760,7 +764,8 @@ class TopicsService:
         Returns:
             One ``(record, centre)`` per topic with members, ascending id.
         """
-        topic_ids = sorted(t.id for t in fitted.result.topics if t.size > 0)
+        members = set(fitted.labels.tolist())
+        topic_ids = sorted(t.id for t in fitted.result.topics if t.id in members)
         if not topic_ids:
             return []
         keywords = {t.id: t.keywords for t in fitted.result.topics}

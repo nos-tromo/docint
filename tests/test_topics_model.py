@@ -9,6 +9,7 @@ from docint.core.topics.model import (
     central_members,
     centres_for,
     floors_for,
+    kept_members,
     merge_new,
     novel,
     unit_rows,
@@ -269,3 +270,86 @@ def test_merge_new_with_no_candidates_returns_the_table_unchanged() -> None:
     merged, mapping = merge_new(table, [], np.zeros((0, 2)), min_similarity=0.7)
     assert merged is table
     assert mapping == {}
+
+
+def test_kept_members_set_aside_a_member_nearer_an_existing_centre() -> None:
+    """A member whose nearest centre is an existing one leaves its topic.
+
+    Returns:
+        None.
+    """
+    existing = np.array([[1.0, 0.0]])
+    vectors = np.array([[0.0, 1.0], [0.1, 1.0], [-0.1, 1.0], [0.9, 0.3]])
+    got = kept_members(vectors, np.array([0, 0, 0, 0]), existing, min_topic_size=2)
+    assert got.tolist() == [0, 0, 0, -1]
+    assert got.dtype == np.int64
+
+
+def test_kept_members_keep_a_member_whose_own_topic_is_nearest() -> None:
+    """A member near an existing centre stays while its own topic is nearer still.
+
+    Returns:
+        None.
+    """
+    existing = np.array([[1.0, 0.0]])
+    vectors = np.array([[0.0, 1.0], [0.1, 1.0], [0.6, 0.8]])
+    assert kept_members(vectors, np.array([4, 4, 4]), existing, min_topic_size=2).tolist() == [4, 4, 4]
+
+
+def test_kept_members_set_aside_a_member_tied_with_an_existing_centre() -> None:
+    """A tie goes to the lowest row, and the existing centres come first.
+
+    Returns:
+        None.
+    """
+    existing = np.array([[1.0, 0.0]])
+    vectors = np.array([[1.0, 1.0], [-1.0, 1.0], [0.0, 1.0]])
+    labels = np.array([0, 0, 0])
+    # The members' unit mean is [0, 1], so the first member scores the same on both centres.
+    scores = unit_rows(vectors[:1]) @ np.vstack([existing, centres_for(vectors, labels, [0])]).T
+    assert scores[0, 0] == scores[0, 1]
+    assert kept_members(vectors, labels, existing, min_topic_size=2).tolist() == [-1, 0, 0]
+
+
+def test_kept_members_drop_a_topic_left_below_the_minimum_size() -> None:
+    """A topic keeping fewer members than the minimum loses them all.
+
+    Returns:
+        None.
+    """
+    existing = np.array([[1.0, 0.0, 0.0]])
+    vectors = np.array(
+        [[0.0, 1.0, 0.0], [0.0, 1.0, 0.1], [0.1, 1.0, 0.0], [0.0, 0.0, 1.0], [0.9, 0.0, 0.3], [0.9, 0.1, 0.3]]
+    )
+    labels = np.array([0, 0, 0, 1, 1, 1])
+    assert kept_members(vectors, labels, existing, min_topic_size=1).tolist() == [0, 0, 0, 1, -1, -1]
+    assert kept_members(vectors, labels, existing, min_topic_size=2).tolist() == [0, 0, 0, -1, -1, -1]
+
+
+def test_kept_members_of_empty_or_memberless_input() -> None:
+    """No rows, no members or no existing centres leave nothing to set aside.
+
+    Returns:
+        None.
+    """
+    existing = np.array([[1.0, 0.0]])
+    empty = kept_members(np.zeros((0, 2)), np.zeros(0, dtype=np.int64), existing, min_topic_size=2)
+    assert empty.shape == (0,) and empty.dtype == np.int64
+    vectors = np.array([[1.0, 0.0], [0.0, 1.0]])
+    assert kept_members(vectors, np.array([-1, -1]), existing, min_topic_size=2).tolist() == [-1, -1]
+    assert kept_members(vectors, np.array([3, 3]), np.zeros((0, 2)), min_topic_size=2).tolist() == [3, 3]
+
+
+def test_kept_members_leave_their_inputs_unchanged() -> None:
+    """The filter writes its answer into a new array, never into an input.
+
+    Returns:
+        None.
+    """
+    existing = np.array([[1.0, 0.0, 0.0]])
+    vectors = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.9, 0.0, 0.3], [0.9, 0.1, 0.3]])
+    labels = np.array([0, 1, 1, 1], dtype=np.int64)
+    before = (vectors.copy(), labels.copy(), existing.copy())
+    assert kept_members(vectors, labels, existing, min_topic_size=2).tolist() == [-1, -1, -1, -1]
+    for original, now in zip(before, (vectors, labels, existing), strict=True):
+        assert np.array_equal(original, now)

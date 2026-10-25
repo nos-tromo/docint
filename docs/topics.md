@@ -83,14 +83,25 @@ whose `docint_topic` is `<run_id>:-1`.
    behind; in the steady state it writes nothing.
 2. The pool is sampled, prepared and fitted like a build's collection. A pool
    too small to fit is refused with `too_few_unassigned`.
-3. A pool topic is kept only when the cosine of its centre to every existing
+3. A pool sample member stays in its pool topic only where that topic is its
+   nearest. Each pool topic gets a provisional centre from all its members,
+   and the member's cosine to it, computed as in alignment, must be the
+   highest among all centres, existing and provisional; a tie goes to an
+   existing topic, or else to the lowest pool-fit id. A pool topic left with
+   fewer members than the minimum topic size is dropped, and each remaining
+   pool topic's centre, floor and fit size come from the members that stayed.
+   The pool also holds chunks of existing topics that fell under their floors,
+   and the fit may put them in a pool topic; one nearer an existing topic is
+   set aside, so it neither joins the new topic nor lowers its floor.
+4. A pool topic is kept only when the cosine of its centre to every existing
    centre is below `TOPICS_MERGE_MIN_SIMILARITY`. The kept topics are labelled
    and appended with the ids `max + 1`, `max + 2`, … in the order of their
    pool-fit ids. When none is kept, the job ends with the warning `none_new`.
-4. The pool is placed against the extended run: pool sample members in a kept
-   topic keep it, and so do their exact-duplicate copies. Every other pool
-   chunk is aligned against all the run's topics, old and new; one that is not
-   admitted stays unassigned and is not rewritten.
+5. The pool is placed against the extended run: the members that stayed in a
+   kept topic take it, and so do their exact-duplicate copies. Every other pool
+   chunk, a member set aside included, is aligned against all the run's
+   topics, old and new; one that is not admitted stays unassigned and is not
+   rewritten.
 
 Existing topic ids, centres and floors never change, and the run keeps its id.
 
@@ -105,21 +116,22 @@ end of an ingest job (see [The ingest stage](#the-ingest-stage)).
 
 Every eligible chunk gets exactly one value:
 
-- a sample member that the fit placed in a topic keeps that topic;
+- a sample member that the fit placed in a topic keeps that topic (in a
+  discover, only where that topic is its nearest; see [Discover](#discover));
 - a copy dropped from the sample as an exact duplicate takes its
   representative's topic;
-- every other chunk is **aligned**: the fit's outliers, the chunks the sample
-  did not reach or that were too short to join it, and every chunk ingested
-  later. Its L2-normalised vector is compared by cosine, in float64, with every
-  unit centre; the highest wins, a tie going to the lowest topic id, and the
-  chunk is admitted only when that cosine reaches the topic's floor. Otherwise
-  it is unassigned (`-1`).
+- every other chunk is **aligned**: the fit's outliers, a discover's members
+  set aside, the chunks the sample did not reach or that were too short to
+  join it, and every chunk ingested later. Its L2-normalised vector is
+  compared by cosine, in float64, with every unit centre; the highest wins, a
+  tie going to the lowest topic id, and the chunk is admitted only when that
+  cosine reaches the topic's floor. Otherwise it is unassigned (`-1`).
 
 A topic's **floor** is the `TOPICS_ADMIT_PERCENTILE`-th percentile (default 5)
-of its fit members' cosines to its centre. At the default, an aligned chunk
-joins its nearest topic when it is at least as close to that centre as all but
-the farthest 5% of the topic's own fit members. A higher percentile admits
-fewer chunks.
+of its fit members' cosines to its centre; a discovered topic counts only the
+members that stayed in it. At the default, an aligned chunk joins its nearest
+topic when it is at least as close to that centre as all but the farthest 5% of
+the topic's own fit members. A higher percentile admits fewer chunks.
 
 ## Payload keys and indexes
 

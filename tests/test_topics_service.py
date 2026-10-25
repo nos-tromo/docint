@@ -41,6 +41,7 @@ from docint.core.topics.gather import (
     pending_filter,
 )
 from docint.core.topics.labels import DEFAULT_TEMPLATE, TopicLabeller
+from docint.core.topics.model import centres_for, floors_for
 from docint.core.topics.sample import top_ranked
 from docint.core.topics.service import (
     BUSY_ATTEMPTS,
@@ -1076,6 +1077,57 @@ def test_discover_moves_only_unassigned_chunks(client: QdrantClient, root: Path)
     assert all(_topic_of(before[pid]) == -1 and _topic_of(after[pid]) == 2 for pid in moved)
     assert sorted(spy.written) == sorted(moved)
     assert outcome.assigned == len(moved)
+
+
+def test_discover_keeps_a_pool_member_only_where_its_new_topic_is_nearest(client: QdrantClient, root: Path) -> None:
+    """Leftovers of an existing topic fitted into a new one stay unassigned and stay out of its floor.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    ids = _add_blobs(client, per=60)
+    built = _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    assert built.run_id is not None
+    store = TopicStore(root)
+    old = store.load(COLL, built.run_id)
+    assert old is not None
+    # Later chunks nearest topic 0 but under its floor, so they wait in the unassigned pool.
+    leftovers = _ids(6, offset=900)
+    noise = np.random.default_rng(1).normal(0.0, 0.01, (6, DIM))
+    vectors = 0.6 * BLOBS[0] + 0.8 * np.eye(1, DIM, 5)[0] + noise
+    add_points(
+        client,
+        COLL,
+        [
+            (pid, vec, {"search_text": f"passage {pid} later words"})
+            for pid, vec in zip(leftovers, vectors, strict=True)
+        ],
+    )
+    _run(_service(client, root), "align")
+    assert (_vectors(client, leftovers) @ old.table.centres.T).argmax(axis=1).tolist() == [0] * 6
+    assert [_topics(client)[pid] for pid in leftovers] == [-1] * 6
+
+    # One pool topic takes every pool chunk, the leftovers included.
+    outcome = _run(_service(client, root, FakeFit(BLOBS[2:], radius=2.0)), "discover")
+
+    new = store.load(COLL, built.run_id)
+    assert new is not None
+    topics = _topics(client)
+    assert [topics[pid] for pid in leftovers] == [-1] * 6
+    assert all(topics[pid] == 2 for pid in ids[120:])
+    members = sorted(ids[120:])
+    member_vectors = _vectors(client, members)
+    labels = np.zeros(len(members), dtype=np.int64)
+    centre = centres_for(member_vectors, labels, [0])
+    added = new.table.topics[2]
+    assert added.fit_size == len(members)
+    assert added.floor == pytest.approx(floors_for(member_vectors, labels, [0], centre, 5.0)[0])
+    assert np.array_equal(new.table.centres[2], centre[0])
+    assert [t.to_json() for t in new.table.topics[:2]] == [t.to_json() for t in old.table.topics]
+    assert new.table.centres[:2].tobytes() == old.table.centres.tobytes()
+    assert new.table.floors[:2].tolist() == old.table.floors.tolist()
+    assert outcome.added == 1 and outcome.assigned == len(members)
 
 
 def test_discover_with_nothing_novel_warns_none_new(client: QdrantClient, root: Path) -> None:

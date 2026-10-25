@@ -772,7 +772,7 @@ exceptions are noted in the table.
 | `TOPICS_SEED` | `42` | Sampling seed and the fit's random seed, `0` to `2³² − 1`. |
 | `TOPICS_MIN_TOPIC_SIZE` | `0` | Smallest topic the fit may form. `0` sizes it from the sample: `n // 1000`, clamped to 10–100. `1` is raised to the service's minimum, `2`. A build needs a sample of at least three times the size, and at least 50 chunks. |
 | `TOPICS_MAX_TOPICS` | `0` | Topic-reduction target; `0` keeps every topic the fit finds. Sent to the service as `nr_topics = N + 1`, because the service counts its outlier class as a topic. |
-| `TOPICS_ADMIT_PERCENTILE` | `5` | Percentile, `0` to `100`, of a topic's fit members' cosines to its centre that sets the topic's admission floor. A higher value admits fewer aligned chunks. |
+| `TOPICS_ADMIT_PERCENTILE` | `5` | Percentile, `0` to `100`, of a topic's fit members' cosines to its centre that sets the topic's admission floor; a discovered topic counts only the members that stayed in it ([topics.md](topics.md#discover)). A higher value admits fewer aligned chunks. |
 | `TOPICS_MERGE_MIN_SIMILARITY` | `0.7` | Centre cosine, above `0` and at most `1`, at or above which a topic found by discover repeats an existing one and is not added. |
 
 A topic keeps the floor it was given when it was added, and `run.json` records

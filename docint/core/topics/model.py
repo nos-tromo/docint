@@ -311,6 +311,44 @@ def floors_for(
     return out
 
 
+def kept_members(vectors: np.ndarray, labels: np.ndarray, existing: np.ndarray, *, min_topic_size: int) -> np.ndarray:
+    """Keep only the members nearest their own topic.
+
+    Each topic's provisional centre is the unit mean of all its members. A
+    member stays only when its own topic's provisional centre is its argmax over
+    the existing centres followed by the provisional ones, scored as
+    :meth:`TopicTable.align` scores. A tie goes to the lowest row, so a tie with
+    an existing centre sets the member aside. A topic left with fewer members
+    than ``min_topic_size`` loses them all.
+
+    Args:
+        vectors: ``(n, dim)`` matrix.
+        labels: Topic id per row, ``-1`` for a row in none.
+        existing: ``(m, dim)`` unit centres the members are weighed against.
+        min_topic_size: Fewest members a topic may keep.
+
+    Returns:
+        A new int64 array: each member kept keeps its topic, every other row is ``-1``.
+    """
+    given = np.asarray(labels, dtype=np.int64)
+    out = given.copy()
+    topic_ids = np.unique(given[given >= 0])
+    if not topic_ids.size:
+        return out
+    units = unit_rows(vectors)
+    provisional = centres_for(vectors, given, topic_ids.tolist())
+    centres = np.vstack([np.asarray(existing, dtype=np.float64).reshape(-1, units.shape[1]), provisional])
+    nearest = (units @ centres.T).argmax(axis=1)
+    # The row of each member's own provisional centre.
+    own = centres.shape[0] - topic_ids.size + np.searchsorted(topic_ids, given)
+    out[(given >= 0) & (nearest != own)] = -1
+    for tid in topic_ids:
+        members = out == tid
+        if np.count_nonzero(members) < min_topic_size:
+            out[members] = -1
+    return out
+
+
 def central_members(
     vectors: np.ndarray, labels: np.ndarray, topic_id: int, centre: np.ndarray, limit: int
 ) -> list[int]:
