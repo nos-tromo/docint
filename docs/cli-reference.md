@@ -130,7 +130,7 @@ and refuses a logical name several users own, listing each physical name.
 | Exit code | When |
 |---|---|
 | `0` | Success, a `status` with no run included. |
-| `1` | An endpoint fault. The logged error names the fit URL and the setting to change. |
+| `1` | An endpoint fault. The logged error names the fit URL (without credentials) and, for a configuration fault, the setting to change. |
 | `2` | A refusal, an unknown or ambiguous collection, no collection name, or `TOPICS_ENABLED` off. |
 
 In Docker the `make topics` target runs it in a one-off `backend` container so

@@ -127,11 +127,11 @@ Everything shows no chip, nor does a turn answered from a hand-picked scope
 (the scope outranks the target) or one saved before the target was recorded.
 
 **Ask in chat** on an Analysis topic sets the chat's **topic focus**
-(`src/stores/topicFocus.ts`), shown as the "Topic filter" chip at the inner end
-of the header's controls (`src/components/chat/TopicFocusChip.tsx`): the
-topic's number and label over one line saying what the next turn does with it,
-and a control that removes it. The focus adds one metadata rule, `docint_topic` equal to
-`<run id>:<topic id>` ([topics.md](topics.md#payload-keys-and-indexes)), to
+(`src/stores/topicFocus.ts`), shown as a chip at the inner end of the header's
+controls (`src/components/chat/TopicFocusChip.tsx`): the topic's number and
+label (`T3 · <label>`) over a line saying what the next turn does with it, and
+a control that removes it. The focus adds one metadata rule, `docint_topic`
+equal to `<run id>:<topic id>` ([topics.md](topics.md#payload-keys-and-indexes)), to
 every search of the search panel, its CSV export included, and to chat turns
 answered from Everything or Documents. The chip has four states; when several
 apply, the first wins:

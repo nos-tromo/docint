@@ -152,7 +152,7 @@ only.
 
 ## The store and its lock
 
-```
+```text
 {TOPICS_DIR}/
   <collection dir>/
     .lock
@@ -166,17 +166,20 @@ only.
   matches `[A-Za-z0-9._-]{1,128}`, and `~` followed by the name's SHA-256
   otherwise, as the extract store names its directories. Every path is checked
   to resolve under `TOPICS_DIR`.
-- **Run ids** are `YYYYMMDD-HHMMSS-<6 hex>`, minted when a build starts. An id
-  is checked against that pattern before it joins a path.
+- **Run ids** are `YYYYMMDD-HHMMSS-<6 hex>`, the time in UTC, minted once a
+  build's topics are fitted and labelled, just before the run is first saved.
+  An id is checked against that pattern before it joins a path.
 - **Writes** are atomic (written beside the target, then renamed) and readable
   by the process user only. A run is saved centres first and `run.json` last; a
   reader that meets new centres beside the old record reads once more.
 - **`run.json`** records the settings the build ran with (`params`), the dense
   vector's name and dimension, the embedding model, the stop-word list's count
   and SHA-256, the ownership row's creation time (`owner_created_at`),
-  `created_at` and `updated_at`, one entry per fit (its kind, time, sample size,
-  topic and outlier counts, and the versions, runtime and timings the service
-  reported; a discover's entry adds how many topics it kept), and the topics:
+  `created_at` and `updated_at`, an entry for the build's fit and one for each
+  discover that added topics (its kind, time, sample size, topic and outlier
+  counts, and the versions, runtime and timings the service reported; a
+  discover's entry adds how many topics it kept; a discover that finds nothing
+  new adds none), and the topics:
   id, label, description, keywords, origin (`build` or `discover`), when it was
   added, its fit size, its floor, and its first and last seen.
 - **The lock** is an exclusive `fcntl.flock` on `.lock`. Every job takes it
@@ -260,8 +263,8 @@ finishes that fit before it takes another.
 | `topics_failed` | Any other fault of the service. |
 
 The warning names no endpoint. The backend's log line for the failed job
-carries the full error, which names the fit URL (without credentials) and the
-setting to change; the CLI prints the same message.
+carries the full error, which names the fit URL (without credentials) and, for
+a configuration fault, the setting to change; the CLI prints the same message.
 
 ## Determinism
 
@@ -311,9 +314,14 @@ frame.
 | `topics_cancelled` | `collection`, `duration_ms` |
 | `error` | `message` (`Topics run failed.`), `code` (`topics_failed`), `duration_ms` |
 
-The stages are, in order, `starting`, `waiting`, `scanning`, `sampling`,
-`fitting`, `labelling`, `assigning` and `aligning`. A frame's `message` is
-static English, such as `Aligning topics: 1200/4000 chunks processed`; the SPA
+Every job opens with `starting`, and `waiting` appears only while another job
+holds the lock. A build then reports `scanning`, `sampling`, `fitting`,
+`labelling`, `assigning` and `aligning`, in that order. A discover reports
+`aligning` first, for the pending chunks and the unassigned pool, then
+`scanning` through `labelling` as a build does, `assigning` for the pool's
+re-align, and `aligning` again; an align reports `aligning` alone. A stage with
+nothing to do may send no frame, and `labelling` sends none while
+`TOPICS_LABELS` is off. A frame's `message` is static English, such as `Aligning topics: 1200/4000 chunks processed`; the SPA
 writes its own copy from `stage`, `done` and `total`. In the artifact, `topics`
 counts the run's topics after the job, `added` the topics it added, and
 `assigned` the chunks it placed in a topic (chunks written as unassigned are
@@ -373,17 +381,9 @@ described in [ui-guide.md](ui-guide.md).
 
 - **The Topics tab** (Analysis) shows the active run's coverage, its topics
   largest first, and the actions that build, extend and align it, plus a CSV
-  download. A text cell of that CSV that starts with `=`, `+`, `-`, `@`, a tab
-  or a carriage return is written with a leading apostrophe, so a spreadsheet
-  reads it as text (`frontend/src/lib/csv.ts`).
-- **A job's outcome** — its warnings, its error, that it finished — shows only
-  for the collection's newest topics job, and only when this tab started it or
-  watched it live. A job counts as watched live once any of its frames arrives
-  1000 ms or more after its started frame, and stays so for the page session
-  (`liveJobs` in `frontend/src/stores/ingestJobs.ts`). A replayed history
-  arrives within milliseconds, so after a reload a run that finished elsewhere
-  does not show its old outcome again; the overview reflects that run all the
-  same.
+  download. Which job outcome it shows, and how its CSV keeps a spreadsheet
+  from reading a cell as a formula, are in
+  [ui-guide.md](ui-guide.md#analysis-srcroutesanalysistsx).
 - **The topic focus** narrows the chat and the search panel to one topic, set
   by a topic row's **Ask in chat**; its states are in
   [ui-guide.md](ui-guide.md#chat-srcrouteschattsx). It is text-only: image

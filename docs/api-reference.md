@@ -867,7 +867,7 @@ The overview:
   "topics": [
     {"id": 2, "label": "Alpha and beta", "description": "Passages that name alpha and beta.",
      "keywords": [["alpha", 0.0412], ["beta", 0.0377], ["gamma", 0.0201]],
-     "size": 640, "share": 0.16, "origin": "build", "added_at": "2026-10-25T10:18:03+00:00",
+     "size": 640, "share": 0.16, "origin": "build", "added_at": "2026-10-25T10:14:21+00:00",
      "first_seen": "2026-03-02T09:14:00+00:00", "last_seen": "2026-09-30T17:05:00+00:00"}
   ]
 }
@@ -1307,14 +1307,17 @@ connection strings or file paths.
 
 ### `GET /ingest/jobs`
 
-Lists the caller's jobs of either `kind`, newest first. Not used by the SPA
+Lists the caller's jobs of any `kind`, newest first. Not used by the SPA
 (reload re-discovery goes through the persisted job id plus the SSE replay);
 available for other clients that want to enumerate a caller's runs.
 
 ### `GET /ingest/jobs/{job_id}`
 
-Point-in-time snapshot of one owned job: `kind` (`"ingest"` or `"summary"`),
-status, latest message, error, and timestamps. The owner-namespaced physical
+Point-in-time snapshot of one owned job: `kind` (`"ingest"`, `"summary"`,
+`"extract"`, `"report_pdf"` or `"topics"`), status, latest message, error, and
+timestamps, plus `action` (a topics job's `build`, `discover` or `align`;
+`null` for every other kind) and `artifact` (what a finished extract,
+report-PDF or topics job produced; `null` otherwise). The owner-namespaced physical
 collection name is deliberately excluded — callers only ever see their own
 logical name.
 
