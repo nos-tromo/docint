@@ -2048,6 +2048,7 @@ class PathConfig:
     hf_hub_cache: Path
     extracts: Path
     report_pdfs: Path
+    topics: Path
 
 
 def load_path_env() -> PathConfig:
@@ -2067,6 +2068,11 @@ def load_path_env() -> PathConfig:
         - extracts (Path): Directory holding rendered collection extracts.
         - report_pdfs (Path): Directory holding each report's newest rendered PDF.
             Scratch space by default: a PDF can always be rendered again.
+        - topics (Path): Directory holding each collection's topic runs.
+
+    Raises:
+        ValueError: When ``TOPICS_DIR`` lies inside ``QDRANT_SRC_DIR`` or
+            ``PIPELINE_ARTIFACTS_DIR``, both of which docint walks.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -2083,17 +2089,28 @@ def load_path_env() -> PathConfig:
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
     default_extracts_dir: Path = docint_home_dir / "extracts"
 
+    artifacts = Path(os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)).expanduser()
+    qdrant_sources = Path(os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)).expanduser()
+    topics = Path(os.getenv("TOPICS_DIR", docint_home_dir / "topics")).expanduser()
+    for walked_name, walked in (("QDRANT_SRC_DIR", qdrant_sources), ("PIPELINE_ARTIFACTS_DIR", artifacts)):
+        if Path(os.path.realpath(topics)).is_relative_to(os.path.realpath(walked)):
+            raise ValueError(
+                f"TOPICS_DIR={topics} lies inside {walked_name}={walked}, "
+                "which docint walks; move TOPICS_DIR outside it."
+            )
+
     return PathConfig(
-        artifacts=Path(os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)).expanduser(),
+        artifacts=artifacts,
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
         docint_home_dir=docint_home_dir,
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
-        qdrant_sources=Path(os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)).expanduser(),
+        qdrant_sources=qdrant_sources,
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
         extracts=Path(os.getenv("EXTRACT_DIR", default_extracts_dir)).expanduser(),
         report_pdfs=Path(os.getenv("REPORT_PDF_DIR", Path(tempfile.gettempdir()) / "docint-report-pdfs")).expanduser(),
+        topics=topics,
     )
 
 
@@ -2794,6 +2811,32 @@ def load_extract_concurrency(default: int = 1) -> int:
     return value
 
 
+def load_topics_concurrency(default: int = 1) -> int:
+    """Max topic jobs run concurrently.
+
+    Read from ``DOCINT_TOPICS_CONCURRENCY``. Defaults to 1: a build holds a
+    collection's sample vectors in memory while the service fits them.
+
+    Args:
+        default (int): Fallback when the variable is unset or unparseable.
+
+    Returns:
+        int: The configured concurrency, at least 1.
+    """
+    raw = os.getenv("DOCINT_TOPICS_CONCURRENCY", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid DOCINT_TOPICS_CONCURRENCY {!r}; using {}.", raw, default)
+        return default
+    if value < 1:
+        logger.warning("DOCINT_TOPICS_CONCURRENCY {} is < 1; clamping to 1.", value)
+        return 1
+    return value
+
+
 @dataclass(frozen=True)
 class ExtractConfig:
     """Configuration for rendered collection extracts.
@@ -2854,6 +2897,153 @@ def load_extract_env() -> ExtractConfig:
         pdf_max_figures=_extract_int("EXTRACT_PDF_MAX_FIGURES", 400),
         sync_max_units=_extract_int("EXTRACT_SYNC_MAX_UNITS", 50, minimum=1),
     )
+
+
+@dataclass(frozen=True)
+class TopicsConfig:
+    """Configuration for scalable collection clustering (topics).
+
+    Attributes:
+        enabled (bool): Whether topics can be built at all.
+        align_on_ingest (bool): Whether ingest assigns new chunks to the active run.
+        labels (bool): Whether topics get a short generated label.
+        fit_max_points (int): Most chunks sampled into one fit.
+        min_text_chars (int): Shortest chunk text that joins a fit.
+        seed (int): Random seed handed to the service.
+        min_topic_size (int): Smallest topic, or 0 to size it from the sample.
+        max_topics (int): Topic-reduction target, or 0 for none.
+        admit_percentile (float): Percentile of a topic's members that sets its admission floor.
+        merge_min_similarity (float): Centre similarity at or above which a discovered topic merges.
+    """
+
+    enabled: bool
+    align_on_ingest: bool
+    labels: bool
+    fit_max_points: int
+    min_text_chars: int
+    seed: int
+    min_topic_size: int
+    max_topics: int
+    admit_percentile: float
+    merge_min_similarity: float
+
+
+def _topics_float(name: str, default: float, *, low: float, high: float, low_open: bool = False) -> float:
+    """Read one float knob within a range, warning on anything unusable.
+
+    Args:
+        name (str): Environment variable to read.
+        default (float): Value used when unset, unparseable or out of range.
+        low (float): Lower bound.
+        high (float): Upper bound, inclusive.
+        low_open (bool): Whether ``low`` itself is excluded.
+
+    Returns:
+        float: The configured value, or ``default``.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid {} {!r}; using {}.", name, raw, default)
+        return default
+    if math.isnan(value) or value > high or value < low or (low_open and value == low):
+        logger.warning("{} {!r} is out of range; using {}.", name, raw, default)
+        return default
+    return value
+
+
+def _topics_bounded_int(name: str, default: int, *, minimum: int, maximum: int | None = None) -> int:
+    """Read one integer knob within a range, falling back with a warning.
+
+    Args:
+        name (str): Environment variable to read.
+        default (int): Value used when unset, unparseable or out of range.
+        minimum (int): Lowest accepted value.
+        maximum (int | None): Highest accepted value, if bounded.
+
+    Returns:
+        int: The configured value, or ``default``.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid {} {!r}; using {}.", name, raw, default)
+        return default
+    if value < minimum or (maximum is not None and value > maximum):
+        logger.warning("{} {!r} is out of range; using {}.", name, raw, default)
+        return default
+    return value
+
+
+def load_topics_env() -> TopicsConfig:
+    """Load the topics configuration from the environment.
+
+    Returns:
+        TopicsConfig: Resolved configuration. A value that is unparseable or
+            out of range falls back to its default with one warning.
+    """
+
+    def flag(name: str) -> bool:
+        return os.getenv(name, "true").strip().lower() in {"true", "1", "yes"}
+
+    min_topic_size = _extract_int("TOPICS_MIN_TOPIC_SIZE", 0)
+    if min_topic_size == 1:
+        logger.warning("TOPICS_MIN_TOPIC_SIZE 1 is below the service minimum; using 2.")
+        min_topic_size = 2
+    return TopicsConfig(
+        enabled=flag("TOPICS_ENABLED"),
+        align_on_ingest=flag("TOPICS_ALIGN_ON_INGEST"),
+        labels=flag("TOPICS_LABELS"),
+        fit_max_points=_topics_bounded_int("TOPICS_FIT_MAX_POINTS", 100_000, minimum=1),
+        min_text_chars=_extract_int("TOPICS_MIN_TEXT_CHARS", 40),
+        seed=_topics_bounded_int("TOPICS_SEED", 42, minimum=0, maximum=2**32 - 1),
+        min_topic_size=min_topic_size,
+        max_topics=_extract_int("TOPICS_MAX_TOPICS", 0),
+        admit_percentile=_topics_float("TOPICS_ADMIT_PERCENTILE", 5.0, low=0.0, high=100.0),
+        merge_min_similarity=_topics_float("TOPICS_MERGE_MIN_SIMILARITY", 0.7, low=0.0, high=1.0, low_open=True),
+    )
+
+
+@dataclass(frozen=True)
+class TopicsClientConfig:
+    """Dataclass for the remote topic-model fit service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_topics_client_env() -> TopicsClientConfig:
+    """Load the topics fit client configuration from the environment.
+
+    Like the NER and CLIP clients, this does not inherit ``OPENAI_*``. The
+    default base is the router alias of the full vllm-service stack; the
+    topics-only shape is ``TOPICS_API_BASE=http://topics-only:8000``.
+
+    Returns:
+        TopicsClientConfig: Base URL without a trailing slash, the Bearer key
+            (``None`` when unset or blank) and the per-request timeout.
+    """
+    raw_key = os.getenv("TOPICS_API_KEY", "").strip()
+    raw_base = os.getenv("TOPICS_API_BASE", "").strip() or "http://vllm-router:4000"
+    raw_timeout = os.getenv("TOPICS_TIMEOUT", "").strip()
+    timeout = 3600.0
+    if raw_timeout:
+        try:
+            timeout = float(raw_timeout)
+        except ValueError:
+            logger.warning("Invalid TOPICS_TIMEOUT {!r}; using {}.", raw_timeout, timeout)
+        else:
+            if not 0 < timeout < math.inf:
+                logger.warning("TOPICS_TIMEOUT {!r} is out of range; using 3600.", raw_timeout)
+                timeout = 3600.0
+    return TopicsClientConfig(api_base=raw_base.rstrip("/"), api_key=raw_key or None, timeout=timeout)
 
 
 #: The idle windows ``COLLECTION_RETENTION`` accepts, in calendar months.
