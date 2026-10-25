@@ -7,6 +7,7 @@ import { searchExportHref } from '@/api/search'
 import type { SearchField, SearchHit } from '@/api/types'
 import { SEARCH_FIELDS } from '@/api/types'
 import { useSearch, useScope } from '@/hooks/useSearch'
+import { useTopicFocusRule } from '@/hooks/useTopics'
 import {
   scopeChunkIds,
   scopeEstTokens,
@@ -78,7 +79,9 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   // and the result is always chunks. `field` is part of the query key, so
   // switching it re-runs the submitted query without re-asking it.
   const search = useSearch(query, field)
-  const filters = useChatFiltersStore().buildPayload()
+  // The export carries the search's own rules, the topic focus's among them.
+  const topicRule = useTopicFocusRule()
+  const filters = [...useChatFiltersStore().buildPayload(), ...(topicRule ? [topicRule] : [])]
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)
 

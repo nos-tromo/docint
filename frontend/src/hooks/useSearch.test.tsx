@@ -6,12 +6,14 @@ import { useChunkText, useScope, useSearch } from './useSearch'
 import { ApiError } from '@/api/client'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
+import { useTopicFocusStore } from '@/stores/topicFocus'
 
 afterEach(() => vi.restoreAllMocks())
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: null })
   useChatFiltersStore.getState().reset()
+  useTopicFocusStore.setState({ focus: null })
 })
 
 function mockFetch(body: unknown, status = 200) {
@@ -183,6 +185,57 @@ describe('useSearch', () => {
       const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/search'))
       expect(JSON.parse(call![1].body)).toMatchObject({ field: 'text' })
     })
+  })
+
+  it('appends the topic rule to a search and its key', async () => {
+    const run = '20260102-030405-a1b2c3'
+    const respond = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = String(input)
+      if (u.includes('/config')) return respond({ topics_enabled: true })
+      if (u.includes('/topics')) {
+        return respond({
+          run_id: run,
+          created_at: '2026-01-02T03:04:05+00:00',
+          updated_at: '2026-01-02T03:04:05+00:00',
+          embed_model: 'embed-small',
+          embed_model_changed: false,
+          coverage: { total: 10, assigned: 8, unassigned: 2, pending: 0 },
+          topics: []
+        })
+      }
+      return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null })
+    useChatFiltersStore.getState().setFilterEnabled(true)
+    useChatFiltersStore.getState().setMimePattern('application/pdf')
+    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: run, topicId: 3, label: 'Harbour cranes' } })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const withClient = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    )
+
+    renderHook(() => useSearch('alpha'), { wrapper: withClient })
+
+    const rules = [
+      { field: 'mimetype', operator: 'mime_match', value: 'application/pdf' },
+      { field: 'docint_topic', operator: 'eq', value: '20260102-030405-a1b2c3:3' }
+    ]
+    await waitFor(() => {
+      const searches = fetchMock.mock.calls.filter(([u]) => String(u).includes('/search'))
+      expect(searches.length).toBeGreaterThan(0)
+      expect(JSON.parse(String(searches.at(-1)![1]!.body)).metadata_filters).toEqual(rules)
+    })
+    // Keyed by the rule too, so dropping the focus re-runs the search instead of showing its hits.
+    const keys = qc.getQueryCache().findAll({ queryKey: ['search'] }).map((query) => query.queryKey)
+    expect(keys).toContainEqual(['search', { collection: 'docs', owner: null }, 'alpha', 'text', rules])
   })
 })
 

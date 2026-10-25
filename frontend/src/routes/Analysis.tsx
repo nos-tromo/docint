@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { PageHeader } from '@infra/ui'
 import { useHateSpeechPages, useNerGraph, useNerSources, useNerStats } from '@/hooks/useNer'
 import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { selectEntityKeyFor, useAnalysisUiStore } from '@/stores/analysisUi'
+import { useTopicFocusStore } from '@/stores/topicFocus'
 import { EntitySelect } from '@/components/analysis/EntitySelect'
 import { EntityGraph } from '@/components/analysis/EntityGraph'
 import { EntityFindingsTable } from '@/components/analysis/EntityFindingsTable'
@@ -12,6 +14,7 @@ import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { TopicsPanel } from '@/components/analysis/TopicsPanel'
 import { warmCollectionNer } from '@/api/collections'
+import type { TopicSummary } from '@/api/topics'
 import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
 import { entityKey, resolveEntityKey } from '@/lib/entityKey'
@@ -45,6 +48,7 @@ function revealCurrentTab(strip: HTMLElement): void {
 
 export function Analysis() {
   const t = useT()
+  const navigate = useNavigate()
   const tab = useAnalysisUiStore((s) => s.tab)
   const setTab = useAnalysisUiStore((s) => s.setTab)
   const nerView = useAnalysisUiStore((s) => s.nerView)
@@ -158,9 +162,18 @@ export function Analysis() {
   const tabIds = topicsEnabled ? TAB_IDS : TAB_IDS.filter((id) => id !== 'topics')
   const activeTab: Tab = tab === 'topics' && !topicsEnabled ? 'ner' : tab
   const tabStripRef = useRef<HTMLDivElement>(null)
-  // Stable, so a frame of a running topics job never re-renders the topic rows.
-  // Asking in chat about a topic needs the chat's topic filter; until it exists the action is a no-op.
-  const askInChat = useCallback(() => {}, [])
+  const setTopicFocus = useTopicFocusStore((s) => s.setFocus)
+  // Stable, so a frame of a running topics job never re-renders the topic rows: the collection is
+  // read when asked rather than closed over.
+  const askInChat = useCallback(
+    (topic: TopicSummary, runId: string) => {
+      const active = useUiStore.getState().selectedCollection
+      if (!active) return
+      setTopicFocus({ collection: active, runId, topicId: topic.id, label: topic.label })
+      navigate('/chat')
+    },
+    [setTopicFocus, navigate]
+  )
 
   // A remembered tab past a narrow screen's edge is scrolled into view.
   useEffect(() => {

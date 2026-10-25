@@ -11,7 +11,8 @@ import {
 import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { useConfig } from '@/hooks/useConfig'
 import { selectJobEvents, useIngestJobsStore } from '@/stores/ingestJobs'
-import type { IngestEvent } from '@/api/types'
+import { topicFocusRule, useTopicFocusStore } from '@/stores/topicFocus'
+import type { IngestEvent, MetadataFilter } from '@/api/types'
 
 /**
  * The active collection's topic run, its coverage and its topics by size; null
@@ -26,6 +27,17 @@ export function useTopicsOverview() {
     queryFn: () => getTopics(collection ?? ''),
     enabled: !!collection && config?.topics_enabled === true
   })
+}
+
+/**
+ * The rule the topic focus adds to a turn or a search: null unless the focus
+ * names a topic of the active collection's active run (see {@link topicFocusRule}).
+ */
+export function useTopicFocusRule(): MetadataFilter | null {
+  const { collection } = useActiveCollection()
+  const focus = useTopicFocusStore((s) => s.focus)
+  const { data } = useTopicsOverview()
+  return topicFocusRule(focus, collection, data?.run_id ?? null)
 }
 
 // A topic's reads are keyed by its run as well as its id: ids restart at 0 with every build, so

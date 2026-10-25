@@ -22,6 +22,7 @@ import {
   DownloadLink
 } from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
+import type { TopicSummary } from '@/api/topics'
 import { csvExportHref } from '@/api/collections'
 import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
 import { cn } from '@/lib/cn'
@@ -55,8 +56,30 @@ type Features = typeof FEATURES
  */
 const GRID_COLUMNS = 'minmax(0,2.4fr) 72px 92px 72px minmax(0,1.8fr) 96px'
 
-/** Column defs depend on the active locale (header labels, copy-button label), so they're built per-render rather than module-level. */
-function buildColumns(t: ReturnType<typeof useT>): ColumnDef<Features, DocumentRecord>[] {
+/** {@link GRID_COLUMNS} with the topics track before the hash. */
+const GRID_COLUMNS_WITH_TOPICS = 'minmax(0,2.4fr) 72px 92px 72px minmax(0,1.8fr) minmax(0,1.4fr) 96px'
+
+/**
+ * Column defs depend on the active locale (header labels, copy-button label), so they're built per-render rather than module-level.
+ *
+ * @param t - The translator.
+ * @param topics - The active run's topics by payload value; without them there is no topics column.
+ * @returns The column defs, in display order.
+ */
+function buildColumns(
+  t: ReturnType<typeof useT>,
+  topics?: Map<string, TopicSummary>
+): ColumnDef<Features, DocumentRecord>[] {
+  const topicsColumn: ColumnDef<Features, DocumentRecord>[] = topics
+    ? [
+        {
+          id: 'topics',
+          header: t('table.col_topics'),
+          enableSorting: false,
+          cell: (c) => <TopicBadges topics={c.row.original.topics ?? []} known={topics} />
+        }
+      ]
+    : []
   return [
     {
       accessorKey: 'filename',
@@ -110,6 +133,7 @@ function buildColumns(t: ReturnType<typeof useT>): ColumnDef<Features, DocumentR
       enableSorting: false,
       cell: (c) => <EntityBadges types={c.row.original.entity_types ?? []} />
     },
+    ...topicsColumn,
     {
       accessorKey: 'file_hash',
       header: t('table.col_hash'),
@@ -138,6 +162,8 @@ interface Props {
   hasNextPage?: boolean
   onLoadMore?: () => void
   collection: string
+  /** The active run's topics, keyed by the payload value a document's topics carry; absent without a run. */
+  topics?: Map<string, TopicSummary>
 }
 
 /** Entity-type chips: sorted, first four, with a `+N` overflow marker. */
@@ -156,6 +182,78 @@ function EntityBadges({ types }: { types: string[] }) {
       {extra > 0 && (
         <span className="text-xs text-muted-foreground" title={sorted.join(', ')}>
           +{extra}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/** Topic badges a cell shows before the rest fold into `+N`. */
+const TOPIC_BADGES = 3
+
+/** Characters of a topic's label a badge shows; the whole label is its tooltip. */
+const TOPIC_LABEL_CHARS = 24
+
+/**
+ * A topic as a badge names it: its number, then its label cut to {@link TOPIC_LABEL_CHARS}.
+ *
+ * @param topic - The topic.
+ * @param cut - Whether to cut the label, marking the cut with an ellipsis.
+ * @returns `T{id} {label}`, or `T{id}` for a topic without a label.
+ */
+function topicName(topic: TopicSummary, cut: boolean): string {
+  if (!topic.label) return `T${topic.id}`
+  // By code point, so a cut never splits a character in two.
+  const chars = Array.from(topic.label)
+  const label =
+    cut && chars.length > TOPIC_LABEL_CHARS ? `${chars.slice(0, TOPIC_LABEL_CHARS).join('').trimEnd()}…` : topic.label
+  return `T${topic.id} ${label}`
+}
+
+/**
+ * A document's topics in the active run, largest first: the first three as
+ * badges with the document's chunk count in each, then `+N`.
+ *
+ * Values of another run, and the run's unassigned chunks, name no topic of the
+ * active run, so they are left out rather than shown under a topic they are not in.
+ */
+function TopicBadges({
+  topics,
+  known
+}: {
+  topics: NonNullable<DocumentRecord['topics']>
+  known: Map<string, TopicSummary>
+}) {
+  const placed = topics
+    .flatMap(({ topic, count }) => {
+      const summary = known.get(topic)
+      return summary ? [{ summary, count }] : []
+    })
+    .sort((a, b) => b.count - a.count)
+  if (placed.length === 0) return <span className="text-muted-foreground">—</span>
+  const shown = placed.slice(0, TOPIC_BADGES)
+  const rest = placed.slice(TOPIC_BADGES)
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {shown.map(({ summary, count }) => (
+        <Badge
+          key={summary.id}
+          variant="neutral"
+          data-testid="topic-badge"
+          className="min-w-0 max-w-full gap-1.5"
+          title={topicName(summary, false)}
+        >
+          {/* The space is for copied text and screen readers; the flex gap draws the spacing. */}
+          <span className="min-w-0 truncate">{topicName(summary, true)}</span>{' '}
+          <span className="shrink-0 font-normal tabular-nums">{count}</span>
+        </Badge>
+      ))}
+      {rest.length > 0 && (
+        <span
+          className="text-xs text-muted-foreground"
+          title={rest.map(({ summary }) => topicName(summary, false)).join(', ')}
+        >
+          +{rest.length}
         </span>
       )}
     </div>
@@ -204,11 +302,12 @@ function HeaderCell({
 }
 
 /** Read-only overview of a collection's documents, one aligned row each. */
-export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, collection }: Props) {
+export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, collection, topics }: Props) {
   const t = useT()
   const [sorting, setSorting] = useState<SortingState>([])
   const data = useMemo(() => docs, [docs])
-  const columns = useMemo(() => buildColumns(t), [t])
+  const columns = useMemo(() => buildColumns(t, topics), [t, topics])
+  const gridColumns = topics ? GRID_COLUMNS_WITH_TOPICS : GRID_COLUMNS
   const table = useTable({
     features: FEATURES,
     data,
@@ -259,7 +358,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
                   key={hg.id}
                   role="row"
                   className="sticky top-0 z-10 grid gap-x-4 border-b border-border bg-muted px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
-                  style={{ gridTemplateColumns: GRID_COLUMNS }}
+                  style={{ gridTemplateColumns: gridColumns }}
                 >
                   {hg.headers.map((h) => (
                     <HeaderCell key={h.id} column={h.column}>
@@ -284,7 +383,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
                     data-index={vRow.index}
                     ref={virtualizer.measureElement}
                     className="group absolute left-0 right-0 grid items-center gap-x-4 border-b border-border/60 px-4 py-2 text-sm hover:bg-white/5"
-                    style={{ gridTemplateColumns: GRID_COLUMNS, transform: `translateY(${vRow.start}px)` }}
+                    style={{ gridTemplateColumns: gridColumns, transform: `translateY(${vRow.start}px)` }}
                   >
                     {/* Every column is always shown here, so these are the
                         visible cells; `getVisibleCells` belongs to the column

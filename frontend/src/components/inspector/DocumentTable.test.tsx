@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { DocumentTable } from './DocumentTable'
 import type { DocumentRecord } from '@/api/types'
+import type { TopicSummary } from '@/api/topics'
 import { useUiStore } from '@/stores/ui'
 import userEvent from '@testing-library/user-event'
 
@@ -186,5 +187,116 @@ describe('DocumentTable sorting', () => {
     render(<DocumentTable docs={SORT_DOCS} collection="mydocs" />, { wrapper })
     expect(screen.queryByRole('button', { name: 'Entities' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Hash' })).not.toBeInTheDocument()
+  })
+})
+
+describe('DocumentTable topics', () => {
+  const RUN = '20260102-030405-a1b2c3'
+  const EARLIER_RUN = '20251201-101010-0f0f0f'
+
+  function topicSummary(id: number, label: string): TopicSummary {
+    return {
+      id,
+      label,
+      description: '',
+      keywords: [],
+      size: 10,
+      share: 0.1,
+      origin: 'build',
+      added_at: '2026-01-02T03:04:05+00:00',
+      first_seen: null,
+      last_seen: null
+    }
+  }
+
+  // The active run's topics, keyed by the payload value a document's topics carry.
+  const TOPICS = new Map<string, TopicSummary>([
+    ['20260102-030405-a1b2c3:0', topicSummary(0, 'Bread, pastry and ovens')],
+    ['20260102-030405-a1b2c3:2', topicSummary(2, 'Orbits and comets')],
+    ['20260102-030405-a1b2c3:4', topicSummary(4, 'Coastal navigation by night and by day')],
+    ['20260102-030405-a1b2c3:5', topicSummary(5, 'Knots and sails')],
+    ['20260102-030405-a1b2c3:6', topicSummary(6, 'Kitchen gardens')]
+  ])
+
+  function doc(filename: string, hash: string, topics: DocumentRecord['topics']): DocumentRecord {
+    return {
+      filename,
+      file_hash: hash.repeat(40),
+      mimetype: 'application/pdf',
+      page_count: 2,
+      row_count: 0,
+      node_count: 20,
+      entity_types: [],
+      topics
+    }
+  }
+
+  const TOPIC_DOCS: DocumentRecord[] = [
+    doc('harbour_log.pdf', '7', [
+      { topic: `${RUN}:2`, count: 9 },
+      // The same id under an earlier build names another topic altogether.
+      { topic: `${EARLIER_RUN}:2`, count: 8 },
+      // Unassigned chunks are no topic.
+      { topic: `${RUN}:-1`, count: 5 },
+      { topic: `${RUN}:0`, count: 3 }
+    ]),
+    doc('field_notes.pdf', '8', [
+      { topic: `${RUN}:5`, count: 6 },
+      { topic: `${RUN}:4`, count: 7 },
+      { topic: `${RUN}:6`, count: 4 },
+      { topic: `${RUN}:0`, count: 2 },
+      { topic: `${RUN}:2`, count: 1 }
+    ]),
+    doc('old_minutes.pdf', '9', [{ topic: `${EARLIER_RUN}:1`, count: 4 }]),
+    doc('blank_form.pdf', 'a', undefined)
+  ]
+
+  /** The row naming a file. */
+  function rowOf(filename: string): HTMLElement {
+    const row = screen.getAllByRole('row').find((r) => within(r).queryByText(filename))
+    if (!row) throw new Error(`no row for ${filename}`)
+    return row
+  }
+
+  /** The tracks of a CSS grid template; a `minmax(…)` is one track. */
+  function tracks(template: string): number {
+    return template.match(/minmax\([^)]*\)|[^\s()]+/g)?.length ?? 0
+  }
+
+  it("shows each document's topics for the active run only", () => {
+    render(<DocumentTable docs={TOPIC_DOCS} collection="mydocs" topics={TOPICS} />, { wrapper })
+
+    const header = screen.getAllByRole('row')[0]
+    expect(header).toHaveTextContent(/Entities\s*Topics\s*Hash/)
+    // As many tracks as cells, or a row's last cell would wrap onto a grid row of its own.
+    expect(tracks(header.style.gridTemplateColumns)).toBe(within(rowOf('harbour_log.pdf')).getAllByRole('cell').length)
+    expect(rowOf('harbour_log.pdf').style.gridTemplateColumns).toBe(header.style.gridTemplateColumns)
+
+    const badges = (filename: string) =>
+      within(rowOf(filename))
+        .queryAllByTestId('topic-badge')
+        .map((badge) => badge.textContent)
+    expect(badges('harbour_log.pdf')).toEqual(['T2 Orbits and comets 9', 'T0 Bread, pastry and ovens 3'])
+    // Largest first, three at most, the label cut to 24 characters.
+    expect(badges('field_notes.pdf')).toEqual([
+      'T4 Coastal navigation by ni… 7',
+      'T5 Knots and sails 6',
+      'T6 Kitchen gardens 4'
+    ])
+    expect(within(rowOf('field_notes.pdf')).getByText('+2')).toBeInTheDocument()
+    expect(within(rowOf('field_notes.pdf')).getByTitle('T4 Coastal navigation by night and by day')).toBeInTheDocument()
+    expect(badges('old_minutes.pdf')).toEqual([])
+    expect(badges('blank_form.pdf')).toEqual([])
+    // Filename, type, units, nodes, entities, then topics.
+    expect(within(rowOf('old_minutes.pdf')).getAllByRole('cell')[5]).toHaveTextContent(/^—$/)
+  })
+
+  it('hides the topics column without a run', () => {
+    render(<DocumentTable docs={TOPIC_DOCS} collection="mydocs" />, { wrapper })
+
+    const header = screen.getAllByRole('row')[0]
+    expect(within(header).queryByText('Topics')).not.toBeInTheDocument()
+    expect(screen.queryAllByTestId('topic-badge')).toEqual([])
+    expect(tracks(header.style.gridTemplateColumns)).toBe(within(rowOf('harbour_log.pdf')).getAllByRole('cell').length)
   })
 })

@@ -10,6 +10,8 @@ import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useSearchUiStore } from '@/stores/searchUi'
+import { useTopicFocusStore } from '@/stores/topicFocus'
+import type { TopicsOverview } from '@/api/topics'
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
   const enc = new TextEncoder()
@@ -1622,5 +1624,128 @@ describe('Chat session switching', () => {
       expect(call).toBeDefined()
       expect(JSON.parse(String(call![1]!.body)).retrieval_target).toBe('visual')
     })
+  })
+})
+
+describe('Chat topic focus', () => {
+  const RUN = '20260102-030405-a1b2c3'
+  const EARLIER_RUN = '20251201-101010-0f0f0f'
+  const OVERVIEW: TopicsOverview = {
+    run_id: RUN,
+    created_at: '2026-01-02T03:04:05+00:00',
+    updated_at: '2026-01-02T03:04:05+00:00',
+    embed_model: 'embed-small',
+    embed_model_changed: false,
+    coverage: { total: 120, assigned: 100, unassigned: 20, pending: 0 },
+    topics: [
+      {
+        id: 3,
+        label: 'Harbour cranes',
+        description: '',
+        keywords: [['crane', 0.4]],
+        size: 60,
+        share: 0.5,
+        origin: 'build',
+        added_at: '2026-01-02T03:04:05+00:00',
+        first_seen: null,
+        last_seen: null
+      }
+    ]
+  }
+
+  /** Serve the topics flag and the active run beside the chat stream. */
+  function stubTopicsApi() {
+    const json = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = String(req)
+      if (u.includes('/stream_query')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: bodyFromString('data: {"response":"ok","sources":[],"session_id":"sess-topic"}\n\n')
+        })
+      }
+      if (u.includes('/config')) return Promise.resolve(json({ topics_enabled: true }))
+      if (u.includes('/topics')) return Promise.resolve(json(OVERVIEW))
+      return Promise.resolve(json({}))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  /** The body of the turn's `/stream_query` request, once it was sent. */
+  function sentTurn(fetchMock: ReturnType<typeof stubTopicsApi>) {
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/stream_query'))
+    return call ? JSON.parse(String(call[1]!.body)) : undefined
+  }
+
+  async function ask() {
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+  }
+
+  beforeEach(() => {
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatFiltersStore.getState().reset()
+    useTopicFocusStore.setState({ focus: null })
+  })
+
+  afterEach(() => {
+    useTopicFocusStore.setState({ focus: null })
+  })
+
+  it('appends the topic rule to a turn', async () => {
+    const fetchMock = stubTopicsApi()
+    useChatFiltersStore.setState({ filterEnabled: true, mimePattern: 'application/pdf' })
+    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChat()
+
+    expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
+    await ask()
+
+    await waitFor(() =>
+      expect(sentTurn(fetchMock)?.metadata_filters).toEqual([
+        { field: 'mimetype', operator: 'mime_match', value: 'application/pdf' },
+        { field: 'docint_topic', operator: 'eq', value: '20260102-030405-a1b2c3:3' }
+      ])
+    )
+  })
+
+  it('skips a topic rule from an earlier build and says so', async () => {
+    const fetchMock = stubTopicsApi()
+    useTopicFocusStore.setState({
+      focus: { collection: 'docs', runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' }
+    })
+    renderChat()
+
+    expect(await screen.findByText('From an earlier build; not applied.')).toBeInTheDocument()
+    await ask()
+
+    // The old run's value matches no chunk, so sending it would empty the answer.
+    await waitFor(() => expect(sentTurn(fetchMock)?.metadata_filters).toEqual([]))
+  })
+
+  it('skips the topic rule on a visual turn and flags it', async () => {
+    const fetchMock = stubTopicsApi()
+    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChat()
+    expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
+
+    // Picked inside the open chat: a chat opened fresh starts from everything.
+    act(() => {
+      useChatFiltersStore.getState().setRetrievalTarget('visual')
+    })
+    expect(screen.getByText('Not applied to imagery.')).toBeInTheDocument()
+    await ask()
+
+    await waitFor(() => expect(sentTurn(fetchMock)).toBeDefined())
+    expect(sentTurn(fetchMock).retrieval_target).toBe('visual')
+    expect(sentTurn(fetchMock).metadata_filters).toEqual([])
   })
 })

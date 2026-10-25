@@ -3,6 +3,7 @@ import { fetchChunkText, searchCollection } from '@/api/search'
 import { clearScope, setScope } from '@/api/scope'
 import type { ChunkText, MetadataFilter, SearchField, SearchResult } from '@/api/types'
 import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
+import { useTopicFocusRule } from '@/hooks/useTopics'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 
@@ -16,12 +17,12 @@ export const searchQueryKey = (
 /**
  * Run a keyword search against the active collection.
  *
- * The panel's metadata filters are part of the key, so tightening a filter
- * re-runs the search rather than showing hits the filter excludes. Disabled
- * until both a collection and a non-empty query exist — a keyword-less search
- * would be an unfiltered scan of the whole collection. `field` chooses which
- * payload field the keywords match; it is part of the key so switching the
- * picker re-runs the search.
+ * The panel's metadata filters, the topic focus's rule among them, are part of
+ * the key, so tightening a filter re-runs the search rather than showing hits
+ * the filter excludes. Disabled until both a collection and a non-empty query
+ * exist — a keyword-less search would be an unfiltered scan of the whole
+ * collection. `field` chooses which payload field the keywords match; it is
+ * part of the key so switching the picker re-runs the search.
  *
  * @param query - The submitted keywords.
  * @param field - The payload field to match; defaults to the chunk text.
@@ -30,10 +31,11 @@ export const searchQueryKey = (
 export function useSearch(query: string, field: SearchField = 'text') {
   const scope = useActiveCollection()
   const { collection } = scope
+  const topicRule = useTopicFocusRule()
   // Whole-store subscription (the idiom Chat.tsx already uses) so any filter
   // edit re-renders and rebuilds the payload. The payload is a fresh array
   // every render, which is harmless — React Query hashes keys structurally.
-  const filters = useChatFiltersStore().buildPayload()
+  const filters = [...useChatFiltersStore().buildPayload(), ...(topicRule ? [topicRule] : [])]
   const trimmed = query.trim()
 
   return useQuery<SearchResult>({

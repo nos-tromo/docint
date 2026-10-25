@@ -1,30 +1,90 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { Analysis } from './Analysis'
 import { useUiStore } from '@/stores/ui'
 import { useAnalysisUiStore } from '@/stores/analysisUi'
+import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useTopicFocusStore } from '@/stores/topicFocus'
 import { LanguageContext } from '@/i18n/LanguageContext'
+import type { TopicsOverview } from '@/api/topics'
+
+// Counts every render of a topic row; the real row still renders underneath.
+const rowRenders = vi.hoisted(() => ({ count: 0 }))
+vi.mock('@/components/analysis/TopicRow', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/analysis/TopicRow')>()
+  return {
+    ...actual,
+    TopicRow: (props: import('@/components/analysis/TopicRow').TopicRowProps) => {
+      rowRenders.count += 1
+      return <actual.TopicRow {...props} />
+    }
+  }
+})
+
+/** The Analysis route, with a stand-in chat route to land on. */
+function routes() {
+  return (
+    <MemoryRouter initialEntries={['/analysis']}>
+      <Routes>
+        <Route path="/analysis" element={<Analysis />} />
+        <Route path="/chat" element={<p>Chat route</p>} />
+      </Routes>
+    </MemoryRouter>
+  )
+}
 
 function renderAnalysis() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
-    <QueryClientProvider client={qc}>
-      <Analysis />
-    </QueryClientProvider>
-  )
+  return render(<QueryClientProvider client={qc}>{routes()}</QueryClientProvider>)
 }
 
 function renderAnalysisInLanguage(lang: 'en' | 'de') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
-      <LanguageContext value={lang}>
-        <Analysis />
-      </LanguageContext>
+      <LanguageContext value={lang}>{routes()}</LanguageContext>
     </QueryClientProvider>
   )
+}
+
+const TOPICS_RUN = '20260102-030405-a1b2c3'
+
+const TOPICS_OVERVIEW: TopicsOverview = {
+  run_id: TOPICS_RUN,
+  created_at: '2026-01-02T03:04:05+00:00',
+  updated_at: '2026-01-02T03:04:05+00:00',
+  embed_model: 'embed-small',
+  embed_model_changed: false,
+  coverage: { total: 120, assigned: 100, unassigned: 20, pending: 5 },
+  topics: [
+    {
+      id: 2,
+      label: 'Orbits and comets',
+      description: '',
+      keywords: [['orbit', 0.4]],
+      size: 60,
+      share: 0.5,
+      origin: 'build',
+      added_at: '2026-01-02T03:04:05+00:00',
+      first_seen: null,
+      last_seen: null
+    },
+    {
+      id: 0,
+      label: 'Bread, pastry and ovens',
+      description: '',
+      keywords: [['dough', 0.5]],
+      size: 40,
+      share: 0.3333,
+      origin: 'build',
+      added_at: '2026-01-02T03:04:05+00:00',
+      first_seen: null,
+      last_seen: null
+    }
+  ]
 }
 
 const entities = [
@@ -41,11 +101,16 @@ const graphEdges = [
   { source: 'acme::org', target: 'rivertown::loc', label: 'located_in', kind: 'relation', weight: 3 }
 ]
 
-function mockFetch({ topicsEnabled = false }: { topicsEnabled?: boolean } = {}) {
+function mockFetch({
+  topicsEnabled = false,
+  overview = null
+}: { topicsEnabled?: boolean; overview?: TopicsOverview | null } = {}) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const path = typeof input === 'string' ? input : input.toString()
     if (path.includes('/topics')) {
-      return { ok: true, status: 204, json: async () => null }
+      return overview
+        ? { ok: true, status: 200, json: async () => overview }
+        : { ok: true, status: 204, json: async () => null }
     }
     if (path.includes('/collections/ner/stats')) {
       return { ok: true, status: 200, json: async () => ({ top_entities: entities }) }
@@ -77,6 +142,8 @@ function mockFetch({ topicsEnabled = false }: { topicsEnabled?: boolean } = {}) 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'alpha', graphTopK: null })
   useAnalysisUiStore.setState({ tab: 'ner', nerView: 'table', entity: null })
+  useTopicFocusStore.setState({ focus: null })
+  useIngestJobsStore.getState().clear()
 })
 
 afterEach(() => {
@@ -236,6 +303,50 @@ describe('Analysis topics tab', () => {
     expect(screen.queryByRole('button', { name: 'Build topics' })).not.toBeInTheDocument()
     // Shown, not rewritten: the remembered tab returns once the flag is back on.
     expect(useAnalysisUiStore.getState().tab).toBe('topics')
+  })
+
+  it('asks about a topic in chat with the collection and run it came from', async () => {
+    useAnalysisUiStore.setState({ tab: 'topics', nerView: 'table', entity: null })
+    vi.stubGlobal('fetch', mockFetch({ topicsEnabled: true, overview: TOPICS_OVERVIEW }))
+    renderAnalysis()
+
+    const [first] = await screen.findAllByTestId('topic-row')
+    await userEvent.click(within(first).getByRole('button', { name: 'Ask in chat' }))
+
+    expect(useTopicFocusStore.getState().focus).toEqual({
+      collection: 'alpha',
+      runId: '20260102-030405-a1b2c3',
+      topicId: 2,
+      label: 'Orbits and comets'
+    })
+    expect(await screen.findByText('Chat route')).toBeInTheDocument()
+  })
+
+  it('keeps the topic rows still when the screen re-renders between progress frames', async () => {
+    useAnalysisUiStore.setState({ tab: 'topics', nerView: 'table', entity: null })
+    vi.stubGlobal('fetch', mockFetch({ topicsEnabled: true, overview: TOPICS_OVERVIEW }))
+    const frame = (event: 'topics_started' | 'topics_progress', data: Record<string, unknown>, at: number) =>
+      act(() =>
+        useIngestJobsStore
+          .getState()
+          .appendEvent('job-1', { event, data: { job_id: 'job-1', ...data }, receivedAt: at })
+      )
+    frame('topics_started', { collection: 'alpha', action: 'align' }, 0)
+    frame('topics_progress', { stage: 'aligning', done: 1, total: 100, message: 'x' }, 1000)
+    renderAnalysis()
+    await screen.findAllByTestId('topic-row')
+    // Let the screen's other reads land first: each answer re-renders it.
+    await waitFor(() => expect(screen.getByText('Aligning pending chunks: 1 of 100')).toBeInTheDocument())
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    const before = rowRenders.count
+
+    frame('topics_progress', { stage: 'aligning', done: 2, total: 100, message: 'x' }, 2000)
+    // Anything the screen itself reads re-renders it, which hands the panel its props again.
+    act(() => useUiStore.setState({ graphTopK: 120 }))
+    frame('topics_progress', { stage: 'aligning', done: 3, total: 100, message: 'x' }, 3000)
+
+    expect(screen.getByText('Aligning pending chunks: 3 of 100')).toBeInTheDocument()
+    expect(rowRenders.count).toBe(before)
   })
 })
 

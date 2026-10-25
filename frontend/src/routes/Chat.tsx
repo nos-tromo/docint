@@ -10,6 +10,7 @@ import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
 import { useStickToBottom } from '@/hooks/useStickToBottom'
 import { useReportDedupeKeys } from '@/hooks/useReports'
+import { useTopicFocusRule } from '@/hooks/useTopics'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { draftKey, useChatUiStore } from '@/stores/chatUi'
@@ -20,6 +21,7 @@ import { ChatControls } from '@/components/chat/ChatControls'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
 import { ScopeBanner } from '@/components/chat/ScopeBanner'
 import { SearchPanel } from '@/components/chat/SearchPanel'
+import { TopicFocusChip } from '@/components/chat/TopicFocusChip'
 import { cn } from '@/lib/cn'
 import { downloadText } from '@/lib/csv'
 import { chatTranscriptToText } from '@/lib/exports'
@@ -143,6 +145,7 @@ export function Chat() {
   const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
   const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
+  const topicRule = useTopicFocusRule()
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
   const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
@@ -268,6 +271,8 @@ export function Chat() {
     // turn, so the guardrail below compares what was asked for against what
     // the server says it did.
     const pinned = scopedChunkIds
+    // Imagery carries no topic, so on a visual turn the rule would empty the answer; the chip says so.
+    const rule = filters.retrievalTarget === 'visual' ? null : topicRule
     dispatch({
       type: 'start',
       user: message,
@@ -295,7 +300,7 @@ export function Chat() {
           // client selection is the single source of truth (no server-side
           // active collection anymore).
           collection: selectedCollection ?? undefined,
-          metadata_filters: filters.buildPayload(),
+          metadata_filters: [...filters.buildPayload(), ...(rule ? [rule] : [])],
           retrieval_mode: filters.retrievalMode,
           retrieval_target: filters.retrievalTarget,
           reasoning: filters.reasoning,
@@ -442,7 +447,7 @@ export function Chat() {
           panel slid every button 20rem to the left — the controls moving
           because something else did. Out here they hold the page's right edge
           and only the panel moves. */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-start justify-between gap-3 mb-4">
         <PageHeader title={t('chat.title')} className="mb-0" />
         {/* The metadata filters and the retrieval mode belong here, to the
             chat, not to the search panel: they narrow what any answer
@@ -452,8 +457,12 @@ export function Chat() {
 
             Order within the group is stable-first: Download appears only once
             a transcript exists, so it sits innermost, where its arrival pushes
-            nothing sideways. */}
-        <div className="flex items-center gap-3">
+            nothing sideways. The topic filter comes and goes too, so it sits
+            innermost of all, and removing it leaves no control sliding under
+            the pointer. Where the row is too narrow for it, it wraps below the
+            controls rather than above them (`flex-wrap-reverse`). */}
+        <div className="flex min-w-0 flex-wrap-reverse items-center justify-end gap-x-3 gap-y-2">
+          <TopicFocusChip />
           {state.turns.length > 0 && (
             <DownloadButton
               label={t('chat.download')}
