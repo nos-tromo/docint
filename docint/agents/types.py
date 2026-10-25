@@ -6,7 +6,9 @@ from typing import Any, Literal, Protocol
 AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
-AgentAction = Literal["seed", "carried", "search", "answer", "note", "search_images", "keyframes", "keyword", "read"]
+AgentAction = Literal[
+    "seed", "carried", "search", "answer", "note", "search_images", "keyframes", "keyword", "topics", "read"
+]
 """What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
 round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages, and
 ``carried`` a follow-up's with the passages its earlier answers cite; ``answer`` is found only in

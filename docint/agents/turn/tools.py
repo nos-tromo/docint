@@ -67,6 +67,7 @@ ErrorKind = Literal[
     "one_value_only",
     "unindexable_word",
     "long_word",
+    "no_such_topic",
     "skipped",
     "no_room",
     "no_time",

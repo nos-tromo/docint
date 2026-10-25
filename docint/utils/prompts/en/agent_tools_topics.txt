@@ -1,0 +1,1 @@
+- topics(topic): a share of chunks it reports is a fact about the collection, not a source: state it without [n]; cite only the passages topic=T<n> returns.

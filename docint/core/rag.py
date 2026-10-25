@@ -149,6 +149,7 @@ from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.passages import passage_label
 from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
+from docint.agents.turn.topics import KEYWORDS_SHOWN, TopicLine, TopicsListing, TopicsSource
 from docint.core import collection_writes
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -200,7 +201,12 @@ from docint.core.retrieval.visual import (
     reciprocal_rank_fusion,
     visual_min_match,
 )
-from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
+from docint.core.retrieval_filters import (
+    build_qdrant_filter,
+    matches_metadata_filters,
+    merge_qdrant_filters,
+    rule_fields,
+)
 from docint.core.search.fields import (
     DEFAULT_SEARCH_FIELD,
     IMAGE_LANE_FIELDS,
@@ -251,7 +257,7 @@ from docint.core.storage.utils import build_quantization_config, qdrant_collecti
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
 from docint.core.topics import views as topic_views
-from docint.core.topics.gather import dense_vector, ensure_topic_indexes
+from docint.core.topics.gather import RUN_FIELD, TOPIC_FIELD, central_points, dense_vector, ensure_topic_indexes
 from docint.core.topics.labels import TopicLabeller
 from docint.core.topics.service import TopicsDeps, TopicsService
 from docint.core.topics.stopwords import load_stop_words, stop_words_digest
@@ -3030,6 +3036,8 @@ _RETRIEVAL_HANDLE_CACHE_MAX = 32
 AGENT_LEDGER_CAP = 64
 #: Longest LLM-visible metadata string an agent turn's passage header shows; a longer one is cut with an ellipsis.
 AGENT_METADATA_VALUE_CHARS = 200
+#: Most central passages one call of an agent turn's topics tool reads.
+AGENT_TOPIC_PASSAGES = 5
 #: What a reference row's header leads with after its citation line: a frame's label, then its file and reference block.
 _AGENT_LEADING_KEYS = ("keyframe", "filename", "reference_metadata")
 #: Who wrote a reference row and when, in the order its reference block leads with them: the row's own
@@ -3054,6 +3062,8 @@ _AGENT_IDENTITY_KEYS = (
 #: Why a collection cannot offer an agent turn a keyword match: the request's filters do not compile for Qdrant, a
 #: lane in scope was not counted, or the text, which a call matches by default, has no index to match.
 KeywordUnavailable = Literal["filters", "coverage", "text_not_ready"]
+#: Why an agent turn is offered no topics tool, as its DEBUG line names it.
+TopicsUnavailable = Literal["visual", "scoped", "disabled", "filters", "no_run", "no_topics"]
 
 #: How long a read of a collection's keyword readiness is reused, unless this process writes the collection meanwhile.
 KEYWORD_READINESS_TTL_S = 30.0
@@ -8713,6 +8723,7 @@ class RAG:
         retrieval_target: str,
         window: ConversationWindow,
         keyword_fields: Sequence[str] | None = None,
+        topics: bool = False,
     ) -> str:
         """Render an agent turn's system prompt.
 
@@ -8722,13 +8733,15 @@ class RAG:
                 ends the prompt.
             keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers, the
                 text first; ``None`` (or empty) when the turn offers no keyword tool.
+            topics (bool): Whether the turn offers the topics tool.
 
         Returns:
             str: ``agent_system`` with the target's tools guide, the assessment rule while
             ``ASSESSMENT_ENABLED`` is on, and the window's summary block. When ``keyword_fields``
             is given, the guide is followed by the keyword line (``agent_tools_keyword``) and,
             when more than the text is offered, by a line naming the fields
-            (``agent_tools_keyword_fields``); without it the prompt is the target's alone.
+            (``agent_tools_keyword_fields``). With ``topics``, the topics line
+            (``agent_tools_topics``) comes last. Without either the prompt is the target's alone.
         """
         rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
         guide = self._agent_prompt(f"agent_tools_{retrieval_target}")
@@ -8737,6 +8750,8 @@ class RAG:
             if len(keyword_fields) > 1:
                 fields_line = self._agent_prompt("agent_tools_keyword_fields").format(fields=", ".join(keyword_fields))
                 guide = f"{guide}\n{fields_line}"
+        if topics:
+            guide = f"{guide}\n{self._agent_prompt('agent_tools_topics')}"
         return self._agent_prompt("agent_system").format(
             tools_guide=guide,
             assessment_rule=rule,
@@ -8787,6 +8802,139 @@ class RAG:
             reason = built
         logger.debug("The keyword tool was withheld from an agent turn: {}", reason)
         return None
+
+    def _agent_topics(
+        self,
+        retrieval_target: RetrievalTarget,
+        *,
+        scoped: bool,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+    ) -> TopicsSource | None:
+        """Offer an agent turn its collection's topics, where an active run has some.
+
+        A visual or scoped turn is never offered them, and neither is a turn whose filters
+        cannot be compiled for Qdrant: a topic's passages would be read outside them. The run is
+        read once, here; the listing reads the overview, and a topic's passages are its members
+        nearest its centre under the request's filter. A withheld offer is logged once at DEBUG
+        by its reason (:data:`TopicsUnavailable`), or as ``fault`` with the exception's type alone.
+
+        Args:
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from.
+            scoped (bool): Whether the turn answers a pinned scope.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+
+        Returns:
+            TopicsSource | None: The topics, bound to this collection, its run and the request's
+            filter; ``None`` when withheld.
+        """
+        reason: TopicsUnavailable
+        if retrieval_target == "visual":
+            reason = "visual"
+        elif scoped:
+            reason = "scoped"
+        else:
+            try:
+                built = self._topics_source(
+                    metadata_filter_rules=metadata_filter_rules, metadata_filters_active=metadata_filters_active
+                )
+            except Exception as exc:
+                logger.debug("The topics tool was withheld from an agent turn: fault ({})", type(exc).__name__)
+                return None
+            if not isinstance(built, str):
+                return built
+            reason = built
+        logger.debug("The topics tool was withheld from an agent turn: {}", reason)
+        return None
+
+    def _topics_source(
+        self, *, metadata_filter_rules: Sequence[Any] | None, metadata_filters_active: bool
+    ) -> TopicsSource | TopicsUnavailable:
+        """Bind a text turn's topics to its collection, its active run and its filter.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+
+        Returns:
+            TopicsSource | TopicsUnavailable: The topics; otherwise why there are none.
+
+        Raises:
+            Exception: Whatever reading the topic store raises.
+        """
+        if not load_topics_env().enabled:
+            return "disabled"
+        request_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and request_filter is None:
+            return "filters"
+        collection = self.qdrant_collection
+        run = self._active_topic_run(collection)
+        if run is None:
+            return "no_run"
+        if not run.table.topics:
+            return "no_topics"
+
+        def _listing() -> TopicsListing:
+            """Read the collection's topics and their sizes from the overview.
+
+            Returns:
+                TopicsListing: The topics in overview order, largest first; none when the run is gone.
+            """
+            overview = self.topics_overview(collection)
+            if overview is None:
+                return TopicsListing(lines=(), total=0)
+            lines = tuple(
+                TopicLine(
+                    topic_id=int(topic["id"]),
+                    label=str(topic.get("label") or ""),
+                    keywords=tuple(str(pair[0]) for pair in (topic.get("keywords") or [])[:KEYWORDS_SHOWN]),
+                    size=int(topic.get("size") or 0),
+                )
+                for topic in overview.get("topics") or []
+            )
+            return TopicsListing(lines=lines, total=int((overview.get("coverage") or {}).get("total") or 0))
+
+        def _passages(topic_id: int) -> list[NodeWithScore] | None:
+            """Read one topic's members nearest its centre, under the request's filter.
+
+            Runs on a search thread, inside the request's collection scope.
+
+            Args:
+                topic_id (int): The topic.
+
+            Returns:
+                list[NodeWithScore] | None: The passages, closest first, at most
+                ``AGENT_TOPIC_PASSAGES``; empty when the vectors no longer match the run's size.
+                ``None`` for a topic the run lacks, the unassigned ``-1`` included.
+
+            Raises:
+                RuntimeError: When the active collection is not the one the topics were built for,
+                    before anything is read; the call is answered as failed.
+            """
+            if self.qdrant_collection != collection:
+                raise RuntimeError("A topics read ran outside the collection it was built for.")
+            centre = run.table.centre(topic_id)
+            if centre is None:
+                return None
+            self._ensure_topic_indexes_once(collection)
+            dense = dense_vector(self.qdrant_client, collection)
+            if dense.dim != run.table.dim:
+                return []
+            points = central_points(
+                self.qdrant_client,
+                collection,
+                centre=centre,
+                dense=dense,
+                run_id=run.run_id,
+                topic_id=topic_id,
+                limit=AGENT_TOPIC_PASSAGES,
+                extra=request_filter,
+            )
+            nodes = (_point_node(str(point.id), dict(point.payload or {})) for point in points)
+            return [scored for scored in nodes if scored is not None]
+
+        return TopicsSource(listing=_listing, passages=_passages)
 
     def _keyword_readiness(self, collection: str, *, with_images: bool) -> _KeywordReadiness | Literal["coverage"]:
         """Read what a collection's keyword match is decided on, or reuse a read still inside its TTL.
@@ -9102,10 +9250,13 @@ class RAG:
         is the same passage; a ``visual`` turn reads nothing else. A lane the target leaves out
         is never read, so an id only that lane holds counts as not found. With raw filter rules,
         a passage they do not match is left out; filters active without them carry nothing,
-        logged once at DEBUG as ``filters``. A passage without text is not carried. A failure of
-        the store or the index carries nothing and is logged by the exception's type alone; a
-        docstore miss of one id only sends that id on to the store. One INFO line counts the
-        outcome. Runs under the caller's collection scope (:meth:`collection_scope`).
+        logged once at DEBUG as ``filters``. A rule on a topic key is checked against the main
+        collection's stored topic keys, read in one batch, since a docstore node holds none; the
+        node itself is never changed, and a picture, which has no topic, does not match it. A
+        passage without text is not carried. A failure of the store or the index carries nothing
+        and is logged by the exception's type alone; a docstore miss of one id only sends that id
+        on to the store. One INFO line counts the outcome. Runs under the caller's collection
+        scope (:meth:`collection_scope`).
 
         Args:
             node_ids (Sequence[str]): The cited node ids, in the order to carry them.
@@ -9126,15 +9277,26 @@ class RAG:
         collection = self.qdrant_collection
         try:
             found: dict[str, NodeWithScore] = {}
+            main: dict[str, NodeWithScore] = {}
             if retrieval_target in ("documents", "all"):
-                found.update(self._carried_main(collection, asked))
+                main = self._carried_main(collection, asked)
+                found.update(main)
             if retrieval_target in ("all", "visual"):
                 found.update(self._carried_images(collection, [node_id for node_id in asked if node_id not in found]))
-            loaded = [found[node_id] for node_id in asked if node_id in found]
+            loaded = [(node_id, found[node_id]) for node_id in asked if node_id in found]
+            # A docstore node carries no topic keys: a topic rule is checked on the stored ones.
+            topic_keys: dict[str, dict[str, Any]] = {}
+            if any(name.startswith(TOPIC_FIELD) for name in rule_fields(metadata_filter_rules)):
+                topic_keys = self._payloads_by_id(
+                    collection, [node_id for node_id in asked if node_id in main], with_payload=[TOPIC_FIELD, RUN_FIELD]
+                )
             carried = [
                 scored
-                for scored in loaded
-                if not metadata_filter_rules or matches_metadata_filters(scored.node.metadata, metadata_filter_rules)
+                for node_id, scored in loaded
+                if not metadata_filter_rules
+                or matches_metadata_filters(
+                    {**scored.node.metadata, **topic_keys.get(node_id, {})}, metadata_filter_rules
+                )
             ]
         except Exception as exc:
             logger.warning("Carried passages could not be loaded ({}); the turn carries none", type(exc).__name__)
@@ -9279,12 +9441,13 @@ class RAG:
         The image tools search the image companion under the request's filter, compiled as the
         visual retriever compiles it. An unscoped ``all`` or ``documents`` turn is also offered
         ``keyword`` where the collection's indexes allow it (:meth:`_agent_keyword_matcher`),
-        with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
+        and ``topics`` where its collection has an active topic run (:meth:`_agent_topics`),
+        each with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
         the request's context, so :meth:`collection_scope` holds there. The budget is measured
         on the rendered system prompt, the offered schemas (none on a pinned scope, whose round
         offers no tools), the window's messages, each with its envelope, and the message. When
-        keyword with every field it can offer leaves the turn less room for tool replies than it
-        needs, the turn is built again with keyword on the text alone, and when even that does
+        the tools leave the turn less room for tool replies than it needs, the turn is built
+        again without topics, then with keyword on the text alone, and when even that does
         not fit, without keyword; each rebuild changes the tools, prompt and budget alike, and
         its INFO line gives the numbers. Only a visual turn shows the model the pictures it
         finds, and only an unscoped turn asks a first round that looked nothing up again, with
@@ -9330,14 +9493,21 @@ class RAG:
                 retrieval_target=retrieval_target,
             )
         )
+        topics_source = self._agent_topics(
+            retrieval_target,
+            scoped=scoped,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+        )
         history_tokens = sum(message_cost(sent.content or "", ratio) for sent in window.messages())
         message_tokens = estimate_tokens(message, ratio)
 
-        def _offer(keyword: KeywordMatcher | None) -> tuple[ToolRegistry, str, TurnBudget]:
+        def _offer(keyword: KeywordMatcher | None, topics: TopicsSource | None) -> tuple[ToolRegistry, str, TurnBudget]:
             """Build the turn's tools, its system prompt and the budget measured on both.
 
             Args:
                 keyword (KeywordMatcher | None): The keyword match to offer; ``None`` for none.
+                topics (TopicsSource | None): The topics to offer; ``None`` for none.
 
             Returns:
                 tuple[ToolRegistry, str, TurnBudget]: The tools, the rendered system prompt and
@@ -9349,10 +9519,13 @@ class RAG:
                 search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
                 list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
                 keyword=keyword,
+                topics=topics,
             )
-            # The keyword lines only where the tools really offer keyword.
+            # The keyword and topics lines only where the tools really offer them.
             fields = keyword.fields if keyword is not None and "keyword" in registry.names else None
-            system_prompt = self._agent_system_prompt(retrieval_target, window, keyword_fields=fields)
+            system_prompt = self._agent_system_prompt(
+                retrieval_target, window, keyword_fields=fields, topics="topics" in registry.names
+            )
             budget = TurnBudget(
                 ctx_window=int(self.openai_ctx_window),
                 reasoning=reasoning,
@@ -9365,7 +9538,15 @@ class RAG:
             )
             return registry, system_prompt, budget
 
-        registry, system_prompt, budget = _offer(matcher)
+        registry, system_prompt, budget = _offer(matcher, topics_source)
+        if "topics" in registry.names and not budget.available:
+            logger.info(
+                "The topics tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            topics_source = None
+            registry, system_prompt, budget = _offer(matcher, topics_source)
         if matcher is not None and len(matcher.fields) > 1 and "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was offered on the text alone in an agent turn: {} tokens of room with its {} "
@@ -9375,14 +9556,14 @@ class RAG:
                 MIN_ROUND_ROOM,
             )
             matcher = KeywordMatcher(fields=(DEFAULT_KEYWORD_FIELD,), check=matcher.check, run=matcher.run)
-            registry, system_prompt, budget = _offer(matcher)
+            registry, system_prompt, budget = _offer(matcher, topics_source)
         if "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
                 budget.round_room,
                 MIN_ROUND_ROOM,
             )
-            registry, system_prompt, budget = _offer(None)
+            registry, system_prompt, budget = _offer(None, topics_source)
         if not budget.available:
             logger.warning(
                 "An agent turn would have {} tokens of room for tool replies, under the {} one needs; none is built",
@@ -10977,7 +11158,11 @@ class RAG:
         Returns:
             TopicRun | None: The run; ``None`` when absent or built for an earlier collection.
         """
-        return self.topic_store().active(physical, owner_created_at=self.collection_created_at(physical))
+        store = self.topic_store()
+        # No pointer, no run: the ownership row is read only when there is a run to check.
+        if store.active_id(physical) is None:
+            return None
+        return store.active(physical, owner_created_at=self.collection_created_at(physical))
 
     def _topic_source_of(self, physical: str) -> Callable[[Any], dict[str, Any]]:
         """Build the function that shapes a topic member as a source.

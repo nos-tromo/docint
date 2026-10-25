@@ -17,6 +17,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import httpx
+import numpy as np
 import openai
 import pytest
 from agent_fakes import (
@@ -63,6 +64,8 @@ from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import BLOB_PAYLOAD_KEYS, RETRIEVAL_TARGETS, RetrievalTarget
 from docint.core.retrieval_filters import build_qdrant_filter
 from docint.core.search.index import image_companion_name
+from docint.core.topics.model import TopicInfo, TopicTable
+from docint.core.topics.store import TopicRun
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.prompt_loader import load_localized_prompt
@@ -3188,7 +3191,7 @@ class _PointStore:
         Args:
             collection_name (str): The collection.
             ids (Sequence[Any]): The point ids, in the types Qdrant takes.
-            with_payload (Any): ``True``, or a selector excluding keys.
+            with_payload (Any): ``True``, a selector excluding keys, or a list of the keys to read.
             with_vectors (bool): Whether vectors are read.
 
         Returns:
@@ -3209,8 +3212,14 @@ class _PointStore:
             raise ConnectionError(f"invented outage while reading {list(ids)}")
         held = self.points.get(collection_name, {})
         excluded = set(getattr(with_payload, "exclude", None) or ())
+        included = set(with_payload) if isinstance(with_payload, list) else None
         return [
-            types.SimpleNamespace(id=point_id, payload={k: v for k, v in held[point_id].items() if k not in excluded})
+            types.SimpleNamespace(
+                id=point_id,
+                payload={
+                    k: v for k, v in held[point_id].items() if k not in excluded and (included is None or k in included)
+                },
+            )
             for point_id in reversed(ids)
             if point_id in held
         ]
@@ -3579,3 +3588,299 @@ def test_a_carried_passage_is_labelled_by_its_header_as_the_agent_reads_it(monke
 
     assert rag.agent_passage_label(section) == "filename: hafenordnung.pdf; page: 4"
     assert rag.agent_passage_label(frame) == f"keyframe: #3 @ 00:12; docint_doc_kind: image; filename: {CLIP}"
+
+
+#: The invented run whose topics the collection's chunks are grouped by.
+TOPIC_RUN_ID = "20260301-101500-a1b2c3"
+#: The line that says a turn was built without topics for want of room, up to its numbers.
+NO_ROOM_FOR_TOPICS = "The topics tool was withheld from an agent turn: "
+
+
+def _topic_run(*, empty: bool = False) -> TopicRun:
+    """Build the invented run: two topics over four-dimensional vectors.
+
+    Args:
+        empty (bool): Whether the run found no topics at all.
+
+    Returns:
+        TopicRun: The run.
+    """
+
+    def _info(topic_id: int, label: str) -> TopicInfo:
+        """Build one topic's record.
+
+        Args:
+            topic_id (int): The topic id.
+            label (str): Its label.
+
+        Returns:
+            TopicInfo: The record.
+        """
+        keywords = (("hafenfest", 0.5), ("stände", 0.4), ("musik", 0.3), ("kai", 0.2))
+        return TopicInfo(
+            id=topic_id,
+            label=label,
+            description="",
+            keywords=keywords,
+            origin="build",
+            added_at="2026-03-01T10:15:00+00:00",
+            fit_size=10,
+            floor=0.5,
+        )
+
+    topics = () if empty else (_info(0, "Hafenfest und Stände"), _info(1, "Regatta am Sonntag"))
+    table = TopicTable(topics=topics, centres=np.eye(len(topics), 4))
+    return TopicRun(run_id=TOPIC_RUN_ID, record={}, table=table)
+
+
+def _overview() -> dict[str, Any]:
+    """Describe the invented run as the overview does: 50 chunks, topic 1 the larger.
+
+    Returns:
+        dict[str, Any]: The overview.
+    """
+    keywords = [["hafenfest", 0.5], ["stände", 0.4], ["musik", 0.3], ["kai", 0.2]]
+    return {
+        "run_id": TOPIC_RUN_ID,
+        "coverage": {"total": 50, "assigned": 30, "unassigned": 20, "pending": 0},
+        "topics": [
+            {"id": 1, "label": "Regatta am Sonntag", "keywords": keywords, "size": 20, "share": 0.4},
+            {"id": 0, "label": "Hafenfest und Stände", "keywords": keywords, "size": 10, "share": 0.2},
+        ],
+    }
+
+
+def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = False) -> list[dict[str, Any]]:
+    """Give the collection an active run, and record every central-passage read with where it ran.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        rag (RAG): The engine, before the turn is built.
+        empty (bool): Whether the run found no topics.
+
+    Returns:
+        list[dict[str, Any]]: One record per read: the collection read, the active one, the run, the topic,
+        the limit and the extra filter.
+    """
+    run = _topic_run(empty=empty)
+    monkeypatch.setattr(rag, "_active_topic_run", lambda physical: run)
+    monkeypatch.setattr(rag, "topics_overview", lambda physical: _overview())
+    monkeypatch.setattr(rag, "_ensure_topic_indexes_once", lambda collection: None)
+    reads: list[dict[str, Any]] = []
+
+    def _central(client: Any, collection: str, **kwargs: Any) -> list[types.SimpleNamespace]:
+        """Record the read and find the programme chunk.
+
+        Args:
+            client (Any): The store client.
+            collection (str): The collection read.
+            **kwargs (Any): The read's arguments.
+
+        Returns:
+            list[types.SimpleNamespace]: The programme chunk, as Qdrant returns a point.
+        """
+        reads.append(
+            {
+                "collection": collection,
+                "active": rag.qdrant_collection,
+                "run_id": kwargs["run_id"],
+                "topic_id": kwargs["topic_id"],
+                "limit": kwargs["limit"],
+                "extra": kwargs.get("extra"),
+            }
+        )
+        return [types.SimpleNamespace(id=7, payload=_chunk_payload())]
+
+    monkeypatch.setattr("docint.core.rag.central_points", _central)
+    monkeypatch.setattr(
+        "docint.core.rag.dense_vector", lambda client, collection: types.SimpleNamespace(name="text-dense", dim=4)
+    )
+    return reads
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_topics_tool_is_offered_only_with_an_active_run(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str
+) -> None:
+    """With a run, a text turn is offered topics, its line and its schema paid for; without one, neither.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+        target (str): The retrieval target.
+    """
+    bare = _turn(_rag(monkeypatch, code=code), target=target)
+    rag = _rag(monkeypatch, code=code)
+    _topics_ready(monkeypatch, rag)
+
+    turn = _turn(rag, target=target)
+
+    assert "topics" not in bare.loop._registry.names
+    assert _prompt("agent_tools_topics", code) not in bare.loop._system_prompt
+    registry = turn.loop._registry
+    assert "topics" in registry.names
+    assert turn.loop._system_prompt == rag._agent_system_prompt(target, ConversationWindow(), topics=True)
+    assert turn.budget.tool_schema_tokens == schema_tokens(registry.schemas(), 3.5)
+    assert turn.budget.system_tokens == estimate_tokens(turn.loop._system_prompt, 3.5)
+    listed = registry.call(tool_call("topics"), _ctx(turn)).text.split("\n")
+    assert listed[:2] == [
+        "2 topics over 50 chunks:",
+        "T1 · Regatta am Sonntag · hafenfest, stände, musik · 20 chunks (40.0%)",
+    ]
+
+
+@pytest.mark.parametrize("reason", ["no-run", "no-topics", "disabled"])
+def test_the_topics_tool_is_withheld_without_topics_to_offer(monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    """A collection with no run, a run with no topics, or topics switched off offers no topics tool.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        reason (str): Why there is nothing to offer.
+    """
+    rag = _rag(monkeypatch)
+    if reason == "no-topics":
+        _topics_ready(monkeypatch, rag, empty=True)
+    elif reason == "disabled":
+        _topics_ready(monkeypatch, rag)
+        monkeypatch.setenv("TOPICS_ENABLED", "false")
+
+    turn = _turn(rag)
+
+    assert "topics" not in turn.loop._registry.names
+    assert turn.loop._system_prompt == _system_prompt("en", "all", rule=False, summary=NO_HISTORY)
+
+
+@pytest.mark.parametrize(
+    ("target", "scoped", "compiled_only"),
+    [("visual", False, False), ("all", True, False), ("documents", True, False), ("documents", False, True)],
+    ids=["visual", "scoped-all", "scoped-documents", "uncompilable"],
+)
+def test_the_topics_tool_is_withheld_on_visual_scoped_or_uncompilable_turns(
+    monkeypatch: pytest.MonkeyPatch, target: str, scoped: bool, compiled_only: bool
+) -> None:
+    """Topics group text, a pinned scope searches nothing, and filters a read cannot apply would widen it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+        scoped (bool): Whether the turn answers a pinned scope.
+        compiled_only (bool): Whether the filters arrived compiled alone, without the rules a read needs.
+    """
+    rag = _rag(monkeypatch)
+    _topics_ready(monkeypatch, rag)
+
+    turn = _turn(
+        rag,
+        target=target,
+        scoped=scoped,
+        pinned_count=2 if scoped else 0,
+        metadata_filters_active=compiled_only,
+        vector_store_kwargs={"qdrant_filters": build_qdrant_filter(RULES)} if compiled_only else None,
+    )
+
+    assert "topics" not in turn.loop._registry.names
+    assert _prompt("agent_tools_topics", "en") not in turn.loop._system_prompt
+
+
+def test_the_topics_tool_is_withheld_first_when_room_is_short(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any
+) -> None:
+    """One token short of room for both, a turn gives up topics and keeps keyword with every field.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog_info (Any): Bridged INFO capture.
+    """
+    both = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, both, fields=KEYWORD_FIELDS)
+    _topics_ready(monkeypatch, both)
+    budget = _turn(both).budget
+    window = _window_with_room(budget, MIN_ROUND_ROOM)
+
+    fits = _rag(monkeypatch, ctx_window=window)
+    _keyword_ready(monkeypatch, fits, fields=KEYWORD_FIELDS)
+    _topics_ready(monkeypatch, fits)
+    assert {"keyword", "topics"} <= _turn(fits).loop._registry.names
+    loguru_caplog_info.clear()
+    short = _rag(monkeypatch, ctx_window=window - 1)
+    _keyword_ready(monkeypatch, short, fields=KEYWORD_FIELDS)
+    _topics_ready(monkeypatch, short)
+
+    turn = _turn(short)
+
+    tools = {schema["function"]["name"]: schema["function"]["parameters"] for schema in turn.loop._registry.schemas()}
+    assert "topics" not in tools
+    assert tools["keyword"]["properties"]["field"]["enum"] == list(KEYWORD_FIELDS)
+    assert turn.loop._system_prompt == short._agent_system_prompt(
+        "all", ConversationWindow(), keyword_fields=KEYWORD_FIELDS
+    )
+    room = replace(budget, ctx_window=window - 1).round_room
+    messages = loguru_caplog_info.messages
+    assert [line for line in messages if line.startswith(NO_ROOM_FOR_TOPICS)] == [
+        f"{NO_ROOM_FOR_TOPICS}{room} tokens of room with it, under the {MIN_ROUND_ROOM} one needs"
+    ]
+    assert [line for line in messages if line.startswith(TEXT_ALONE_FOR_ROOM)] == []
+    assert _withheld_for_room(messages) == []
+
+
+def test_topic_passages_and_in_the_turns_filter_and_stay_in_their_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A topic's passages are read from the turn's collection, under its filter, five at most; nowhere else.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    reads = _topics_ready(monkeypatch, rag)
+
+    with rag.collection_scope(PHYSICAL):
+        turn = _turn(rag, target="documents", metadata_filter_rules=RULES, metadata_filters_active=True)
+        ctx = _ctx(turn)
+        reply = turn.loop._registry.call(tool_call("topics", topic="T1"), ctx)
+        missing = turn.loop._registry.call(tool_call("topics", topic="T5"), ctx)
+
+    assert reads == [
+        {
+            "collection": PHYSICAL,
+            "active": PHYSICAL,
+            "run_id": TOPIC_RUN_ID,
+            "topic_id": 1,
+            "limit": 5,
+            "extra": build_qdrant_filter(RULES),
+        }
+    ]
+    assert reply.found == 1
+    assert [entry.node.node_id for entry in ctx.ledger.entries()] == ["7"]
+    assert reply.text.startswith("T1 · Regatta am Sonntag")
+    assert missing.kind == "no_such_topic"
+    with rag.collection_scope("u0123456789ab__other"), pytest.raises(RuntimeError, match="outside the collection"):
+        turn.loop._registry.call(tool_call("topics", topic="T0"), ctx)
+    assert len(reads) == 1
+
+
+def test_carried_passages_match_a_topic_rule_through_their_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A topic rule is checked on the stored topic keys, read for the text passages alone; no node is changed.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    store = _PointStore(
+        {
+            PHYSICAL: {
+                7: {**_chunk_payload(), "docint_topic": f"{TOPIC_RUN_ID}:0", "docint_topic_run": TOPIC_RUN_ID},
+                SECTION_ID: {"docint_topic": f"{TOPIC_RUN_ID}:1", "docint_topic_run": TOPIC_RUN_ID},
+            },
+            PHYSICAL_IMAGES: {FRAME_ID: _frame_payload()},
+        }
+    )
+    rag = _carrying(monkeypatch, store, _Docstore(_section_node()))
+    rule = [{"field": "docint_topic", "operator": "eq", "value": f"{TOPIC_RUN_ID}:1"}]
+
+    carried = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], rules=rule, active=True)
+    plain = _carry(rag, [SECTION_ID, CHUNK_ID, FRAME_ID], rules=RULES, active=True)
+
+    assert [scored.node.node_id for scored in carried] == [SECTION_ID]
+    assert "docint_topic" not in carried[0].node.metadata
+    topic_reads = [read for read in store.retrieved if read["with_payload"] == ["docint_topic", "docint_topic_run"]]
+    assert [(read["collection_name"], read["ids"]) for read in topic_reads] == [(PHYSICAL, [SECTION_ID, 7])]
+    assert [scored.node.node_id for scored in plain] == [FRAME_ID]

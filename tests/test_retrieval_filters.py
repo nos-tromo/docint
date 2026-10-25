@@ -13,6 +13,7 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     matches_metadata_filters,
     merge_qdrant_filters,
+    rule_fields,
 )
 
 
@@ -336,3 +337,15 @@ def test_neq_emits_no_llama_index_filter() -> None:
     single = [{"field": "a", "operator": "neq", "value": "x"}]
     assert build_metadata_filters(single) is None
     assert build_qdrant_filter(single) is not None
+
+
+def test_rule_fields_names_every_field_the_rules_name() -> None:
+    """Both rule shapes contribute their fields, and a rule that does not normalize contributes none."""
+    rules: list[Any] = [
+        {"field": "page", "operator": "gte", "value": 2},
+        {"fields": ["author", "posting_author"], "operator": "eq", "value": "Person A"},
+        {"field": "docint_topic", "operator": ""},
+    ]
+
+    assert rule_fields(rules) == {"page", "author", "posting_author"}
+    assert rule_fields(None) == set()
