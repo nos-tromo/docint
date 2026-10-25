@@ -952,6 +952,42 @@ def test_discover_refuses_before_writing_when_the_collection_is_replaced_during_
     assert [f["kind"] for f in run.record["fits"]] == ["build"]
 
 
+def test_a_discover_on_a_collection_replaced_during_the_re_align_ends_refused(client: QdrantClient, root: Path) -> None:
+    """A collection replaced while the pool is re-aligned ends the discover refused; the next job drops its run.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60)
+    built = _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    assert built.run_id is not None
+    clock = {"value": CREATED}
+
+    def replace_collection(stage: str, done: int, total: int) -> None:
+        """Replace the collection once the re-align pass has written a page.
+
+        Args:
+            stage: Stage name.
+            done: Units done.
+            total: Units in all.
+        """
+        if stage == "assigning":
+            clock["value"] = "2026-02-02T00:00:00+00:00"
+
+    written: list[str] = []
+    svc = _service(client, root, FakeFit(BLOBS), on_written=written.append)
+    with pytest.raises(TopicsRefused) as caught:
+        _run(svc, "discover", Frames(replace_collection), created=lambda: clock["value"])
+    assert caught.value.code == "collection_changed"
+    assert written == [COLL]
+    assert TopicStore(root).active(COLL, owner_created_at=clock["value"]) is None
+    with pytest.raises(TopicsRefused) as later:
+        _run(_service(client, root), "align", created=lambda: clock["value"])
+    assert later.value.code == "no_run"
+    assert _run_dirs(root) == set()
+
+
 # Concurrency
 
 

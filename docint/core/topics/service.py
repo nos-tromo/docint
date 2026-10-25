@@ -636,7 +636,7 @@ class TopicsService:
             dense: The collection's dense vector.
             run: The active run.
             created: The ownership row's ``created_at`` when the job started.
-            owner_created_at: Reads it again before the extended run is written.
+            owner_created_at: Reads it again before the extended run is written and once the pool is placed.
             progress: The progress channel.
             warn: The warning channel.
             job: What the job has written.
@@ -645,7 +645,8 @@ class TopicsService:
             The outcome.
 
         Raises:
-            TopicsRefused: ``too_few_unassigned``, or ``collection_changed`` before the extended run is written.
+            TopicsRefused: ``too_few_unassigned``, or ``collection_changed`` before the extended run is written
+                or once the pool is placed.
         """
         deps, run_id = self._deps, run.run_id
         assigned = self._pending_loop(physical, dense, run_id, run.table, {}, "aligning", progress, job)
@@ -681,6 +682,8 @@ class TopicsService:
             physical, dense, run_id, table, _inherit(fitted.sample, overrides), "assigning", progress, job
         )
         assigned += self._pending_loop(physical, dense, run_id, table, {}, "aligning", progress, job)
+        # The rows stay, but a discover on a replaced collection must not end as completed.
+        _refuse_if_replaced(owner_created_at, created)
         saved = self._save_seen(physical, run, table, job)
         return TopicsOutcome("discover", run_id, len(saved.table.topics), len(mapping), assigned, empty=False)
 

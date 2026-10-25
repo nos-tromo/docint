@@ -394,9 +394,9 @@ class TopicStore:
         """Remove every run of a collection; a missing one is ignored.
 
         This is the collection-deletion cascade. It takes no lock and removes
-        ``.lock`` with the rest. A job still running against the deleted
-        collection is caught by the ``owner_created_at`` check before it
-        activates.
+        ``.lock`` with the rest. A build still running against the deleted
+        collection is refused by its ``owner_created_at`` checks before it
+        activates, and a discover before it completes.
 
         Args:
             physical (str): Collection name.

@@ -103,6 +103,8 @@ whose `docint_topic` is `<run_id>:-1`.
    their exact-duplicate copies. Every other pool chunk, a member set aside
    included, is aligned against all the run's topics, old and new; one that is
    not admitted stays unassigned and is not rewritten.
+6. If the creation time has changed by then, the discover ends refused with
+   `collection_changed`; the chunks it wrote stay.
 
 Existing topic ids, centres and floors never change, and the run keeps its id.
 
@@ -207,9 +209,9 @@ only.
 - **Deletion.** Deleting a collection, by hand or by retention, removes its
   whole directory. A build or discover still running on it is refused by the
   creation-time check (`collection_changed`) between its fit and the writes
-  that follow, and a build checks again before it activates; only a
-  collection replaced while those writes run can still receive the rest of
-  them, which stay.
+  that follow, and again before a build activates or a discover completes; a
+  collection replaced while those writes run still receives the rest of them,
+  which stay.
 
 ## The fit service
 
