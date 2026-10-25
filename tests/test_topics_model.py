@@ -244,3 +244,28 @@ def test_central_members_order_by_closeness_then_index() -> None:
     centre = np.array([1.0, 0.0])
     assert central_members(vecs, labels, 0, centre, 3) == [1, 3, 2]
     assert central_members(vecs, labels, 0, centre, 10) == [1, 3, 2, 0]
+
+
+def test_merge_new_with_no_novel_candidate_returns_the_table_unchanged() -> None:
+    """Candidates that all repeat an existing topic add nothing.
+
+    Returns:
+        None.
+    """
+    table = _table([[1.0, 0.0]], [0.4])
+    cc = unit_rows(np.array([[1.0, 0.01]]))
+    merged, mapping = merge_new(table, [_info(3)], cc, min_similarity=0.7)
+    assert merged is table
+    assert mapping == {}
+
+
+def test_merge_new_with_no_candidates_returns_the_table_unchanged() -> None:
+    """An empty candidate list adds nothing.
+
+    Returns:
+        None.
+    """
+    table = _table([[1.0, 0.0]], [0.4])
+    merged, mapping = merge_new(table, [], np.zeros((0, 2)), min_similarity=0.7)
+    assert merged is table
+    assert mapping == {}

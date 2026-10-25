@@ -370,12 +370,14 @@ def merge_new(
     Returns:
         The extended table and a map of candidate id to its new id.
     """
+    if not candidates:
+        return table, {}
     keep = novel(table.centres, candidate_centres, min_similarity=min_similarity)
     chosen = sorted((c.id, i) for i, c in enumerate(candidates) if keep[i])
     start = int(table.ids.max()) + 1 if table.topics else 0
     mapping = {cid: start + n for n, (cid, _) in enumerate(chosen)}
     infos = [replace(candidates[i], id=mapping[cid]) for cid, i in chosen]
-    rows = np.asarray(candidate_centres, dtype=np.float64)[[i for _, i in chosen]].reshape(len(chosen), -1)
     if not chosen:
         return table, mapping
+    rows = np.asarray(candidate_centres, dtype=np.float64)[[i for _, i in chosen]]
     return table.appended(infos, _stored(rows)), mapping
