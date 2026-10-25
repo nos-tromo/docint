@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Inspector } from './Inspector'
 import type { TopicsOverview } from '@/api/topics'
-import type { DocumentRecord } from '@/api/types'
+import type { DocumentRecord, IngestEvent } from '@/api/types'
+import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useUiStore } from '@/stores/ui'
 
 const COLLECTION = 'projekt-alpha'
@@ -48,6 +49,9 @@ const DOCS: DocumentRecord[] = [
   }
 ]
 
+/** What the stub serves now; a test changes it to stand for a run the backend replaced. */
+let serving: { overview: TopicsOverview | null; docs: DocumentRecord[] } = { overview: null, docs: [] }
+
 /**
  * Stub the reads the Inspector makes.
  *
@@ -62,11 +66,12 @@ function stubApi({ topicsEnabled, overview }: { topicsEnabled: boolean; overview
     json: async () => body,
     text: async () => JSON.stringify(body)
   })
+  serving = { overview, docs: DOCS }
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost')
     if (url.pathname.endsWith('/config')) return respond(topicsEnabled ? { topics_enabled: true } : {})
-    if (url.pathname.endsWith('/topics')) return overview ? respond(overview) : respond(null, 204)
-    if (url.pathname.endsWith('/collections/documents')) return respond({ items: DOCS, next_cursor: null })
+    if (url.pathname.endsWith('/topics')) return serving.overview ? respond(serving.overview) : respond(null, 204)
+    if (url.pathname.endsWith('/collections/documents')) return respond({ items: serving.docs, next_cursor: null })
     if (url.pathname.endsWith('/extracts')) return respond({ extracts: [] })
     return respond({})
   })
@@ -85,6 +90,7 @@ function renderInspector() {
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: COLLECTION, selectedOwner: null, currentSessionId: null })
+  useIngestJobsStore.getState().clear()
 })
 
 afterEach(() => {
@@ -119,5 +125,34 @@ describe('Inspector topics column', () => {
     await new Promise((resolve) => setTimeout(resolve, 30))
     expect(screen.queryByText('Topics')).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/topics'))).toBe(false)
+  })
+
+  it('reads the column again when a topics job ends while it is open', async () => {
+    stubApi({ topicsEnabled: true, overview: OVERVIEW })
+    renderInspector()
+    expect(await screen.findByTestId('topic-badge')).toHaveTextContent('T2 Orbits and comets 12')
+
+    // A rebuild replaces the run, and the chunks with it; only the job's last frame says so.
+    const rebuilt = '20260103-090000-d4e5f6'
+    serving = {
+      overview: {
+        ...OVERVIEW,
+        run_id: rebuilt,
+        topics: [{ ...OVERVIEW.topics[0], label: 'Comets and meteors' }]
+      },
+      docs: [{ ...DOCS[0], topics: [{ topic: `${rebuilt}:2`, count: 9 }] }]
+    }
+    const frame = (event: IngestEvent['event'], at: number) =>
+      act(() =>
+        useIngestJobsStore.getState().appendEvent('job-1', {
+          event,
+          data: { job_id: 'job-1', collection: COLLECTION, action: 'build' },
+          receivedAt: at
+        })
+      )
+    frame('topics_started', 0)
+    frame('topics_completed', 5000)
+
+    await waitFor(() => expect(screen.getByTestId('topic-badge')).toHaveTextContent('T2 Comets and meteors 9'))
   })
 })

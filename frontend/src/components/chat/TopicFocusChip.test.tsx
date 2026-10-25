@@ -7,6 +7,7 @@ import type { TopicsOverview } from '@/api/topics'
 import type { IngestEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useSearchUiStore } from '@/stores/searchUi'
 import { useTopicFocusStore } from '@/stores/topicFocus'
 import { useUiStore } from '@/stores/ui'
 import { LanguageContext } from '@/i18n/LanguageContext'
@@ -86,10 +87,11 @@ function deliver(jobId: string, event: IngestEvent['event'], data: Record<string
 }
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: COLLECTION, selectedOwner: null })
+  useUiStore.setState({ selectedCollection: COLLECTION, selectedOwner: null, currentSessionId: null })
   useChatFiltersStore.getState().reset()
   useTopicFocusStore.setState({ focus: null })
   useIngestJobsStore.getState().clear()
+  useSearchUiStore.setState({ scopes: {} })
 })
 
 afterEach(() => {
@@ -100,24 +102,24 @@ afterEach(() => {
 describe('TopicFocusChip', () => {
   it('shows the applied, stale and visual states and removes the focus', async () => {
     stubApi()
-    useTopicFocusStore.setState({ focus: { collection: COLLECTION, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChip()
 
     expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
     expect(chip()).toHaveTextContent('Applied to answers and searches.')
 
     act(() => useChatFiltersStore.getState().setRetrievalTarget('visual'))
-    expect(chip()).toHaveTextContent('Not applied to imagery.')
+    expect(chip()).toHaveTextContent('Not applied to answers from images.')
     expect(chip()).not.toHaveTextContent('Applied to answers and searches.')
 
     // An earlier build's topic is applied under no target, and the chip says that first.
     act(() =>
       useTopicFocusStore
         .getState()
-        .setFocus({ collection: COLLECTION, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' })
+        .setFocus({ collection: COLLECTION, owner: null, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' })
     )
     expect(chip()).toHaveTextContent('From an earlier build; not applied.')
-    expect(chip()).not.toHaveTextContent('Not applied to imagery.')
+    expect(chip()).not.toHaveTextContent('Not applied to answers from images.')
     act(() => useChatFiltersStore.getState().setRetrievalTarget('all'))
     expect(chip()).toHaveTextContent('From an earlier build; not applied.')
 
@@ -127,10 +129,71 @@ describe('TopicFocusChip', () => {
     expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
   })
 
+  it('says the topic narrows only searches while chunks are selected', async () => {
+    stubApi()
+    useUiStore.setState({ currentSessionId: 'sess-1' })
+    useSearchUiStore.setState({ scopes: { 'sess-1': { tokens: { p1: 120 }, usableTokens: 0, missing: 0 } } })
+    useTopicFocusStore.setState({
+      focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' }
+    })
+    renderChip()
+
+    // A scoped answer comes from the selected chunks alone, whatever its filters say.
+    const group = await screen.findByRole('group', { name: 'Topic filter' })
+    expect(group).toHaveTextContent('Searches only while chunks are selected.')
+    expect(group).not.toHaveAttribute('data-applied')
+    // Ahead of the target, which a scope outranks too.
+    act(() => useChatFiltersStore.getState().setRetrievalTarget('visual'))
+    expect(chip()).toHaveTextContent('Searches only while chunks are selected.')
+    // Behind an earlier build, which is applied to nothing.
+    act(() =>
+      useTopicFocusStore
+        .getState()
+        .setFocus({ collection: COLLECTION, owner: null, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' })
+    )
+    expect(chip()).toHaveTextContent('From an earlier build; not applied.')
+
+    // The scope is the open chat's own: another chat's selection says nothing about this one.
+    act(() => {
+      useTopicFocusStore
+        .getState()
+        .setFocus({ collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' })
+      useChatFiltersStore.getState().setRetrievalTarget('all')
+      useUiStore.setState({ currentSessionId: 'sess-2' })
+    })
+    expect(chip()).toHaveTextContent('Applied to answers and searches.')
+  })
+
+  it('keeps the focus to the owner it was picked under', async () => {
+    const fetchMock = stubApi()
+    useTopicFocusStore.setState({
+      focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' }
+    })
+    renderChip()
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toBeInTheDocument()
+
+    // An admin moving to another owner's collection of the same name, whose run reads the same.
+    act(() => useUiStore.setState({ selectedCollection: COLLECTION, selectedOwner: 'analyst-b' }))
+    const theirs = () =>
+      fetchMock.mock.calls.filter(([input]) => {
+        const url = new URL(String(input), 'http://localhost')
+        return url.pathname.endsWith('/topics') && url.searchParams.get('owner') === 'analyst-b'
+      })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
+    // Not read at all: the focus is no topic of theirs.
+    expect(theirs()).toEqual([])
+
+    act(() => useUiStore.setState({ selectedCollection: COLLECTION, selectedOwner: null }))
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent(
+      'Applied to answers and searches.'
+    )
+  })
+
   it('notices a rebuild that ends while it is shown', async () => {
     let overview = OVERVIEW
     stubApi(async () => overview)
-    useTopicFocusStore.setState({ focus: { collection: COLLECTION, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChip()
     expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent(
       'Applied to answers and searches.'
@@ -146,7 +209,7 @@ describe('TopicFocusChip', () => {
 
   it('says a topic of a collection that has no run any more is not applied', async () => {
     stubApi(async () => null)
-    useTopicFocusStore.setState({ focus: { collection: COLLECTION, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChip()
 
     expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent(
@@ -160,7 +223,7 @@ describe('TopicFocusChip', () => {
       release = resolve
     })
     const fetchMock = stubApi(() => pending)
-    useTopicFocusStore.setState({ focus: { collection: COLLECTION, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChip()
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/topics'))).toBe(true))
@@ -176,7 +239,7 @@ describe('TopicFocusChip', () => {
 
   it('keeps a focus picked in another collection out of sight until that collection is back', async () => {
     stubApi()
-    useTopicFocusStore.setState({ focus: { collection: 'projekt-beta', runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: 'projekt-beta', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChip()
 
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -191,7 +254,7 @@ describe('TopicFocusChip', () => {
 
   it('names a topic without a label by its number alone', async () => {
     stubApi()
-    useTopicFocusStore.setState({ focus: { collection: COLLECTION, runId: RUN, topicId: 3, label: '' } })
+    useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: '' } })
     renderChip()
 
     const group = await screen.findByRole('group', { name: 'Topic filter' })
@@ -201,13 +264,13 @@ describe('TopicFocusChip', () => {
 
   it('words its states in German', async () => {
     stubApi()
-    useTopicFocusStore.setState({ focus: { collection: COLLECTION, runId: RUN, topicId: 3, label: 'Hafenkräne' } })
+    useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Hafenkräne' } })
     renderChip('de')
 
     const group = await screen.findByRole('group', { name: 'Themenfilter' })
     expect(group).toHaveTextContent('Auf Antworten und Suchen angewendet.')
     act(() => useChatFiltersStore.getState().setRetrievalTarget('visual'))
-    expect(group).toHaveTextContent('Nicht auf Bilder angewendet.')
+    expect(group).toHaveTextContent('Nicht auf Antworten aus Bildern angewendet.')
     expect(screen.getByRole('button', { name: 'Themenfilter entfernen' })).toBeInTheDocument()
   })
 })

@@ -167,9 +167,15 @@ export function Analysis() {
   // read when asked rather than closed over.
   const askInChat = useCallback(
     (topic: TopicSummary, runId: string) => {
-      const active = useUiStore.getState().selectedCollection
-      if (!active) return
-      setTopicFocus({ collection: active, runId, topicId: topic.id, label: topic.label })
+      const { selectedCollection, selectedOwner } = useUiStore.getState()
+      if (!selectedCollection) return
+      setTopicFocus({
+        collection: selectedCollection,
+        owner: selectedOwner,
+        runId,
+        topicId: topic.id,
+        label: topic.label
+      })
       navigate('/chat')
     },
     [setTopicFocus, navigate]

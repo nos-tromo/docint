@@ -216,7 +216,7 @@ describe('useSearch', () => {
     useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null })
     useChatFiltersStore.getState().setFilterEnabled(true)
     useChatFiltersStore.getState().setMimePattern('application/pdf')
-    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: run, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: run, topicId: 3, label: 'Harbour cranes' } })
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const withClient = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={qc}>{children}</QueryClientProvider>
@@ -236,6 +236,109 @@ describe('useSearch', () => {
     // Keyed by the rule too, so dropping the focus re-runs the search instead of showing its hits.
     const keys = qc.getQueryCache().findAll({ queryKey: ['search'] }).map((query) => query.queryKey)
     expect(keys).toContainEqual(['search', { collection: 'docs', owner: null }, 'alpha', 'text', rules])
+  })
+
+  /**
+   * Stub the flag, a topics run held back until released, and the search.
+   *
+   * @returns The fetch mock and the release for the run read.
+   */
+  function stubHeldRun() {
+    const respond = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = String(input)
+      if (u.includes('/config')) return respond({ topics_enabled: true })
+      if (u.includes('/topics')) {
+        await held
+        return respond({
+          run_id: '20260102-030405-a1b2c3',
+          created_at: '2026-01-02T03:04:05+00:00',
+          updated_at: '2026-01-02T03:04:05+00:00',
+          embed_model: 'embed-small',
+          embed_model_changed: false,
+          coverage: { total: 10, assigned: 8, unassigned: 2, pending: 0 },
+          topics: []
+        })
+      }
+      return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return { fetchMock, release }
+  }
+
+  it('reads no topics run without a focus', async () => {
+    const { fetchMock, release } = stubHeldRun()
+    release()
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null })
+
+    const { result } = renderHook(() => useSearch('alpha'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/topics'))).toEqual([])
+  })
+
+  it('searches without the rule when the topics run cannot be read', async () => {
+    const respond = (body: unknown, status = 200) => ({
+      ok: status < 400,
+      status,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = String(input)
+      if (u.includes('/config')) return respond({ topics_enabled: true })
+      if (u.includes('/topics')) return respond({ detail: 'unavailable' }, 503)
+      return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null })
+    useTopicFocusStore.setState({
+      focus: { collection: 'docs', owner: null, runId: '20260102-030405-a1b2c3', topicId: 3, label: 'Harbour cranes' }
+    })
+
+    const { result } = renderHook(() => useSearch('alpha'), { wrapper })
+
+    // A failed read never settles into a run; waiting on it would hold the search for good.
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const searches = fetchMock.mock.calls.filter(([u]) => String(u).includes('/search'))
+    expect(searches).toHaveLength(1)
+    expect(JSON.parse(String(searches[0][1]!.body)).metadata_filters).toEqual([])
+  })
+
+  it('sends one search, carrying the rule, once the topics run is read', async () => {
+    const { fetchMock, release } = stubHeldRun()
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null })
+    useTopicFocusStore.setState({
+      focus: { collection: 'docs', owner: null, runId: '20260102-030405-a1b2c3', topicId: 3, label: 'Harbour cranes' }
+    })
+    const searches = () => fetchMock.mock.calls.filter(([u]) => String(u).includes('/search'))
+
+    const { result } = renderHook(() => useSearch('alpha'), { wrapper })
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/topics'))).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // Whether the rule applies is not known yet; a search sent now would be one without it.
+    expect(searches()).toEqual([])
+
+    release()
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(searches()).toHaveLength(1)
+    expect(JSON.parse(String(searches()[0][1]!.body)).metadata_filters).toEqual([
+      { field: 'docint_topic', operator: 'eq', value: '20260102-030405-a1b2c3:3' }
+    ])
   })
 })
 

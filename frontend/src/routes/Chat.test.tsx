@@ -1703,7 +1703,7 @@ describe('Chat topic focus', () => {
   it('appends the topic rule to a turn', async () => {
     const fetchMock = stubTopicsApi()
     useChatFiltersStore.setState({ filterEnabled: true, mimePattern: 'application/pdf' })
-    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChat()
 
     expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
@@ -1720,7 +1720,7 @@ describe('Chat topic focus', () => {
   it('skips a topic rule from an earlier build and says so', async () => {
     const fetchMock = stubTopicsApi()
     useTopicFocusStore.setState({
-      focus: { collection: 'docs', runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' }
+      focus: { collection: 'docs', owner: null, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' }
     })
     renderChat()
 
@@ -1733,7 +1733,7 @@ describe('Chat topic focus', () => {
 
   it('skips the topic rule on a visual turn and flags it', async () => {
     const fetchMock = stubTopicsApi()
-    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
     renderChat()
     expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
 
@@ -1741,11 +1741,20 @@ describe('Chat topic focus', () => {
     act(() => {
       useChatFiltersStore.getState().setRetrievalTarget('visual')
     })
-    expect(screen.getByText('Not applied to imagery.')).toBeInTheDocument()
+    expect(screen.getByText('Not applied to answers from images.')).toBeInTheDocument()
     await ask()
 
     await waitFor(() => expect(sentTurn(fetchMock)).toBeDefined())
     expect(sentTurn(fetchMock).retrieval_target).toBe('visual')
     expect(sentTurn(fetchMock).metadata_filters).toEqual([])
+  })
+
+  it('reads no topics run without a focus', async () => {
+    const fetchMock = stubTopicsApi()
+    renderChat()
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/config'))).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/topics'))).toEqual([])
   })
 })

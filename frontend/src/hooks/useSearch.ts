@@ -31,7 +31,7 @@ export const searchQueryKey = (
 export function useSearch(query: string, field: SearchField = 'text') {
   const scope = useActiveCollection()
   const { collection } = scope
-  const topicRule = useTopicFocusRule()
+  const { rule: topicRule, pending: topicPending } = useTopicFocusRule()
   // Whole-store subscription (the idiom Chat.tsx already uses) so any filter
   // edit re-renders and rebuilds the payload. The payload is a fresh array
   // every render, which is harmless — React Query hashes keys structurally.
@@ -47,7 +47,8 @@ export function useSearch(query: string, field: SearchField = 'text') {
         metadata_filters: filters,
         field
       }),
-    enabled: !!collection && trimmed.length > 0,
+    // A focused search waits for its run: sent sooner, it would go once without the rule and again with it.
+    enabled: !!collection && trimmed.length > 0 && !topicPending,
     // A blank/too-short query is a 422 the user must fix; retrying it just
     // delays the message.
     retry: false

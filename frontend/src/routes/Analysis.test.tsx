@@ -140,7 +140,7 @@ function mockFetch({
 }
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: 'alpha', graphTopK: null })
+  useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: null, graphTopK: null })
   useAnalysisUiStore.setState({ tab: 'ner', nerView: 'table', entity: null })
   useTopicFocusStore.setState({ focus: null })
   useIngestJobsStore.getState().clear()
@@ -307,6 +307,8 @@ describe('Analysis topics tab', () => {
 
   it('asks about a topic in chat with the collection and run it came from', async () => {
     useAnalysisUiStore.setState({ tab: 'topics', nerView: 'table', entity: null })
+    // An admin in another owner's collection: the owner is half of which collection it is.
+    useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: 'analyst-b' })
     vi.stubGlobal('fetch', mockFetch({ topicsEnabled: true, overview: TOPICS_OVERVIEW }))
     renderAnalysis()
 
@@ -315,6 +317,7 @@ describe('Analysis topics tab', () => {
 
     expect(useTopicFocusStore.getState().focus).toEqual({
       collection: 'alpha',
+      owner: 'analyst-b',
       runId: '20260102-030405-a1b2c3',
       topicId: 2,
       label: 'Orbits and comets'

@@ -145,7 +145,7 @@ export function Chat() {
   const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
   const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
-  const topicRule = useTopicFocusRule()
+  const { rule: topicRule } = useTopicFocusRule()
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
   const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
@@ -449,58 +449,59 @@ export function Chat() {
           and only the panel moves. */}
       <div className="flex items-start justify-between gap-3 mb-4">
         <PageHeader title={t('chat.title')} className="mb-0" />
-        {/* The metadata filters and the retrieval mode belong here, to the
-            chat, not to the search panel: they narrow what any answer
-            retrieves against, whether or not the panel is even open. In the
-            panel they read as controls over the keyword index, which they
-            are not.
-
-            Order within the group is stable-first: Download appears only once
-            a transcript exists, so it sits innermost, where its arrival pushes
-            nothing sideways. The topic filter comes and goes too, so it sits
-            innermost of all, and removing it leaves no control sliding under
-            the pointer. Where the row is too narrow for it, it wraps below the
-            controls rather than above them (`flex-wrap-reverse`). */}
+        {/* The topic filter sits innermost, so its coming and going moves no control; on a row too
+            narrow for it, it alone wraps, below the controls (`flex-wrap-reverse`). */}
         <div className="flex min-w-0 flex-wrap-reverse items-center justify-end gap-x-3 gap-y-2">
           <TopicFocusChip />
-          {state.turns.length > 0 && (
-            <DownloadButton
-              label={t('chat.download')}
-              onClick={() =>
-                downloadText(
-                  `chat_${currentSessionId ?? 'session'}.txt`,
-                  chatTranscriptToText(state.turns, t)
-                )
-              }
-            />
-          )}
-          {/* The sidebar's copy of this is the one reachable from every
-              route; this one is where the wish arrives — at the foot of an
-              answer, without crossing the page to the session list. */}
-          <NewButton label={t('common.new_chat')} onClick={onNewChat} />
-          <ChatControls />
-          {/* The panel toggle is last: it is the control nearest the thing it
-              opens, and it is the one button here that changes the page's
-              shape rather than acting on the chat. It carries one bit of
-              state, because that bit has consequences while the panel is
-              shut — a live scope tints it, since a chat answering from
-              hand-picked chunks behind a closed panel is a trap. */}
-          <button
-            type="button"
-            onClick={toggleSidePanel}
-            aria-expanded={sidePanelOpen}
-            aria-controls="chat-side-panel"
-            aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
-            className={cn(
-              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
-              scopedChunkIds.length > 0
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
+          {/* The metadata filters and the retrieval mode belong here, to the
+              chat, not to the search panel: they narrow what any answer
+              retrieves against, whether or not the panel is even open. In the
+              panel they read as controls over the keyword index, which they
+              are not.
+
+              Order within the group is stable-first: Download appears only once
+              a transcript exists, so it sits innermost, where its arrival pushes
+              nothing sideways. */}
+          <div className="flex items-center gap-3">
+            {state.turns.length > 0 && (
+              <DownloadButton
+                label={t('chat.download')}
+                onClick={() =>
+                  downloadText(
+                    `chat_${currentSessionId ?? 'session'}.txt`,
+                    chatTranscriptToText(state.turns, t)
+                  )
+                }
+              />
             )}
-            data-scoped={scopedChunkIds.length > 0 || undefined}
-          >
-            <RailChevron open={sidePanelOpen} />
-          </button>
+            {/* The sidebar's copy of this is the one reachable from every
+                route; this one is where the wish arrives — at the foot of an
+                answer, without crossing the page to the session list. */}
+            <NewButton label={t('common.new_chat')} onClick={onNewChat} />
+            <ChatControls />
+            {/* The panel toggle is last: it is the control nearest the thing it
+                opens, and it is the one button here that changes the page's
+                shape rather than acting on the chat. It carries one bit of
+                state, because that bit has consequences while the panel is
+                shut — a live scope tints it, since a chat answering from
+                hand-picked chunks behind a closed panel is a trap. */}
+            <button
+              type="button"
+              onClick={toggleSidePanel}
+              aria-expanded={sidePanelOpen}
+              aria-controls="chat-side-panel"
+              aria-label={sidePanelOpen ? t('search.collapse') : t('search.expand')}
+              className={cn(
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border',
+                scopedChunkIds.length > 0
+                  ? 'bg-primary/15 text-primary'
+                  : 'text-muted-foreground hover:text-foreground focus-visible:text-foreground'
+              )}
+              data-scoped={scopedChunkIds.length > 0 || undefined}
+            >
+              <RailChevron open={sidePanelOpen} />
+            </button>
+          </div>
         </div>
       </div>
 

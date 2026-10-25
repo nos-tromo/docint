@@ -80,7 +80,7 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
   // switching it re-runs the submitted query without re-asking it.
   const search = useSearch(query, field)
   // The export carries the search's own rules, the topic focus's among them.
-  const topicRule = useTopicFocusRule()
+  const { rule: topicRule } = useTopicFocusRule()
   const filters = [...useChatFiltersStore().buildPayload(), ...(topicRule ? [topicRule] : [])]
   const { set } = useScope(sessionId)
   const [scopeError, setScopeError] = useState<string | null>(null)

@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { PageHeader } from '@infra/ui'
 import { topicValue, type TopicSummary } from '@/api/topics'
 import { useDocumentsPages, useDocumentsSummary } from '@/hooks/useDocuments'
-import { useTopicsOverview } from '@/hooks/useTopics'
+import { useTopicsOverview, useTopicsRefreshOnJobEnd } from '@/hooks/useTopics'
 import { useUiStore } from '@/stores/ui'
 import { DocumentTable } from '@/components/inspector/DocumentTable'
 import { DocumentSummary } from '@/components/inspector/DocumentSummary'
@@ -17,6 +17,8 @@ export function Inspector() {
   const { data: summary } = useDocumentsSummary()
   // Read only while topics are switched on; without a run there is no column.
   const { data: overview } = useTopicsOverview()
+  // A topics job ending while this is open rewrites the column; nothing else here would refetch it.
+  useTopicsRefreshOnJobEnd()
   const docs = useMemo(
     () => (query.data?.pages ?? []).flatMap((p) => p.items),
     [query.data]

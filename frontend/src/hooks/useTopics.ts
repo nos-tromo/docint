@@ -8,36 +8,54 @@ import {
   startTopics,
   type TopicsAction
 } from '@/api/topics'
-import { useActiveCollection } from '@/hooks/useActiveCollection'
+import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
 import { useConfig } from '@/hooks/useConfig'
 import { selectJobEvents, useIngestJobsStore } from '@/stores/ingestJobs'
-import { topicFocusRule, useTopicFocusStore } from '@/stores/topicFocus'
+import { focusInScope, topicFocusRule, useTopicFocusStore } from '@/stores/topicFocus'
 import type { IngestEvent, MetadataFilter } from '@/api/types'
 
 /**
  * The active collection's topic run, its coverage and its topics by size; null
  * when it has no run yet. Fetched only while the deployment has topics switched on.
+ *
+ * @param enabled - False leaves the run unread, for a caller with nothing to ask of it yet.
  */
-export function useTopicsOverview() {
+export function useTopicsOverview(enabled = true) {
   const scope = useActiveCollection()
   const { collection } = scope
   const { data: config } = useConfig()
   return useQuery({
     queryKey: ['topics', scope],
     queryFn: () => getTopics(collection ?? ''),
-    enabled: !!collection && config?.topics_enabled === true
+    enabled: enabled && !!collection && config?.topics_enabled === true
   })
 }
 
+/** The rule the topic focus adds to a turn or a search, and whether it is decided yet. */
+export interface TopicFocusRuleState {
+  /** Null unless the focus names a topic of the active collection's active run (see {@link topicFocusRule}). */
+  rule: MetadataFilter | null
+  /** True while the focus belongs to the active collection and its run is still being read. */
+  pending: boolean
+}
+
 /**
- * The rule the topic focus adds to a turn or a search: null unless the focus
- * names a topic of the active collection's active run (see {@link topicFocusRule}).
+ * The rule the topic focus adds to a turn or a search.
+ *
+ * The run is read only while a focus belongs to the active collection, so a
+ * chat without one asks nothing of the topics routes.
  */
-export function useTopicFocusRule(): MetadataFilter | null {
-  const { collection } = useActiveCollection()
+export function useTopicFocusRule(): TopicFocusRuleState {
+  const scope = useActiveCollection()
   const focus = useTopicFocusStore((s) => s.focus)
-  const { data } = useTopicsOverview()
-  return topicFocusRule(focus, collection, data?.run_id ?? null)
+  const inScope = focusInScope(focus, scope)
+  const config = useConfig()
+  const overview = useTopicsOverview(inScope)
+  return {
+    rule: topicFocusRule(focus, scope, overview.data?.run_id ?? null),
+    // While the flag is unknown the run may still be read; once it is known, only a read in flight is.
+    pending: inScope && (config.isPending || (config.data?.topics_enabled === true && overview.isPending))
+  }
 }
 
 // A topic's reads are keyed by its run as well as its id: ids restart at 0 with every build, so
@@ -196,25 +214,16 @@ function readJob(jobId: string, frames: IngestEvent[], live: boolean): TopicsJob
 }
 
 /**
- * The newest topics job on the active collection, if any.
+ * Refetch the topics and the document list (which carries each file's topics)
+ * once per ended job, however it ended: once per mounted caller, so a job that
+ * ended while no caller was mounted is refetched by the next caller to mount.
  *
- * Frames come from the shared job store, which the single owner-multiplexed
- * stream in `Shell` feeds, so a run survives leaving the screen it was started
- * from and a reload re-attaches to it.
- *
- * However a job ends, the topics and the document list (which carries each
- * file's topics) are refetched once per job. That is once per mounted caller,
- * so call this where the job is shown, not in every row; a job that ended
- * while no caller was mounted is refetched by the next caller to mount.
+ * @param scope - The collection the job ran on.
+ * @param jobId - The job, or null for none.
+ * @param ended - Whether its frames include its end.
  */
-export function useTopicsJob(): TopicsJobState {
-  const scope = useActiveCollection()
+function useRefreshOnJobEnd(scope: CollectionScope, jobId: string | null, ended: boolean): void {
   const queryClient = useQueryClient()
-  const jobId = useIngestJobsStore((s) => newestTopicsJob(s.events, scope.collection))
-  const frames = useIngestJobsStore(selectJobEvents(jobId))
-  const live = useIngestJobsStore((s) => (jobId ? s.liveJobs[jobId] === true : false))
-  const job = useMemo(() => (jobId ? readJob(jobId, frames, live) : NO_JOB), [jobId, frames, live])
-  const ended = job.finished || job.error !== null
   // Created on first use: `useRef(new Set())` would build a set on every render.
   const invalidatedRef = useRef<Set<string> | null>(null)
 
@@ -225,6 +234,40 @@ export function useTopicsJob(): TopicsJobState {
     void queryClient.invalidateQueries({ queryKey: ['topics', scope] })
     void queryClient.invalidateQueries({ queryKey: ['documents-pages', scope] })
   }, [jobId, ended, scope, queryClient])
+}
 
+/**
+ * Refetch what a topics job changes once the active collection's newest one
+ * ends, for a screen that reads the topics without showing the job: the chat's
+ * topic chip, the Inspector's column.
+ *
+ * Subscribes to whether the job has ended, not to its frames, so a running
+ * job's progress re-renders nothing.
+ */
+export function useTopicsRefreshOnJobEnd(): void {
+  const scope = useActiveCollection()
+  const jobId = useIngestJobsStore((s) => newestTopicsJob(s.events, scope.collection))
+  const ended = useIngestJobsStore((s) => (jobId ? s.terminal[jobId] === true : false))
+  useRefreshOnJobEnd(scope, jobId, ended)
+}
+
+/**
+ * The newest topics job on the active collection, if any.
+ *
+ * Frames come from the shared job store, which the single owner-multiplexed
+ * stream in `Shell` feeds, so a run survives leaving the screen it was started
+ * from and a reload re-attaches to it.
+ *
+ * However a job ends, the topics and the document list are refetched as
+ * {@link useTopicsRefreshOnJobEnd} does, once per job per mounted caller, so
+ * call this where the job is shown, not in every row.
+ */
+export function useTopicsJob(): TopicsJobState {
+  const scope = useActiveCollection()
+  const jobId = useIngestJobsStore((s) => newestTopicsJob(s.events, scope.collection))
+  const frames = useIngestJobsStore(selectJobEvents(jobId))
+  const live = useIngestJobsStore((s) => (jobId ? s.liveJobs[jobId] === true : false))
+  const job = useMemo(() => (jobId ? readJob(jobId, frames, live) : NO_JOB), [jobId, frames, live])
+  useRefreshOnJobEnd(scope, jobId, job.finished || job.error !== null)
   return job
 }

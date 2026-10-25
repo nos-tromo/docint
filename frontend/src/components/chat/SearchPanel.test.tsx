@@ -976,7 +976,7 @@ describe('SearchPanel field picker', () => {
       })
     )
     useChatFiltersStore.setState({ filterEnabled: true, mimePattern: 'application/pdf' })
-    useTopicFocusStore.setState({ focus: { collection: 'docs', runId: run, topicId: 3, label: 'Harbour cranes' } })
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: run, topicId: 3, label: 'Harbour cranes' } })
 
     renderPanel()
 
