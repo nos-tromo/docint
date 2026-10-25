@@ -302,6 +302,12 @@ def _placeholders(text: str) -> set[str]:
     return set(re.findall(r"\{(\w+)\}", text))
 
 
+def test_the_topic_label_prompt_exists_in_both_locales_with_its_two_placeholders() -> None:
+    """The topic label prompt ships in en and de, each with the keywords and passages slots."""
+    for code in ("en", "de"):
+        assert _placeholders(_prompt("topic_label", code)) == {"keywords", "passages"}
+
+
 def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None = None) -> str:
     """Render the system prompt of a turn with no history: the target's guide and the assessment rule filled in.
 
