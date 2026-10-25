@@ -5,6 +5,7 @@ Every message, passage, clip, filter and collection here is invented.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import types
@@ -2264,8 +2265,8 @@ def test_a_turn_during_another_engines_ingest_counts_what_the_ingest_has_written
     The serving engine read the collection before the run: no image companion, every chunk indexed. The run goes
     on an engine of its own, as the API's does, and stores matching images in a new companion and chunks the index
     does not cover yet. Reusing the read made before the run, the turn would count no image and report nothing
-    unchecked, an exact zero for matches the run had stored. Once the run has ended, the next turn reads afresh and
-    that read is kept.
+    unchecked, an exact zero for matches the run had stored. The check says it was made while the collection was
+    written, since the run may store more. Once the run has ended, the next turn reads afresh and that read is kept.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2311,7 +2312,7 @@ def test_a_turn_during_another_engines_ingest_counts_what_the_ingest_has_written
     with serving.collection_scope(PHYSICAL):
         _turn(serving)
 
-    assert [(result.matches, result.unchecked) for result in during] == [(3, 5)]
+    assert [(result.matches, result.unchecked, result.writing) for result in during] == [(3, 5, True)]
     assert read_afresh > after_run
     assert _store_reads(client) == read_afresh
 
@@ -2325,7 +2326,8 @@ def test_a_turn_while_an_upload_is_preprocessing_counts_the_images_already_store
     a real pool task, as the upload handler queues one, and stores matching images in a new companion before it
     goes on running. Reusing the read made before the upload, a turn would count no image and report nothing
     unchecked, an exact zero for matches the task had stored. Instead each turn meanwhile reads the collection
-    afresh and keeps nothing; once the task has settled, the next turn reads afresh once more and that read is kept.
+    afresh and keeps nothing, and the check says it was made while the collection was written; once the task has
+    settled, the next turn reads afresh once more and that read is kept.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2371,7 +2373,7 @@ def test_a_turn_while_an_upload_is_preprocessing_counts_the_images_already_store
     read_afresh = _store_reads(client)
     _offered(serving, PHYSICAL, "all")
 
-    assert (counted.matches, counted.unchecked) == (5, 0)
+    assert (counted.matches, counted.unchecked, counted.writing) == (5, 0, True)
     assert all(later > earlier for earlier, later in pairwise([before_upload, *meanwhile, read_afresh]))
     assert _store_reads(client) == read_afresh
 
@@ -2480,6 +2482,7 @@ def test_a_check_after_a_write_closed_reads_the_readiness_again(monkeypatch: pyt
     The turn read the collection before the write: no image companion, every chunk indexed. The write stored matching
     images in a new companion and chunks the index does not cover yet, and has ended since. Nothing is being written
     and the read the turn kept is not 30 s old, so only the epoch, which the write moved, tells the check it is stale.
+    The write ended before the check began, so the check is not flagged as made while its collection was written.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2498,7 +2501,7 @@ def test_a_check_after_a_write_closed_reads_the_readiness_again(monkeypatch: pyt
 
     assert not closed.writing
     assert closed.epoch > unwritten.epoch
-    assert (result.matches, result.unchecked) == (3, 5)
+    assert (result.matches, result.unchecked, result.writing) == (3, 5, False)
     assert [name for name, _ in client.counted] == [PHYSICAL, f"{PHYSICAL}_images"]
     assert [build["include_images"] for build in built] == [True]
     assert lanes.reads == [PHYSICAL, PHYSICAL]
@@ -2535,7 +2538,7 @@ def test_a_check_whose_field_lost_its_index_reports_its_count_unavailable(monkey
 
     The turn was offered the author field. A write then left the field without its index, so a match on it would no
     longer be exact: the check reports no number and nothing unchecked. The text, whose index stands, is counted as
-    before.
+    before. Both checks are made while the write goes on, and both say so, the unavailable one included.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2551,8 +2554,8 @@ def test_a_check_whose_field_lost_its_index_reports_its_count_unavailable(monkey
         text = _physical_check(rag, matcher, "Hafenfest")
 
     assert matcher.fields == ("text", "author")
-    assert (author.matches, author.unchecked, author.nodes) == (None, 0, [])
-    assert (text.matches, text.unchecked) == (2, 0)
+    assert (author.matches, author.unchecked, author.nodes, author.writing) == (None, 0, [], True)
+    assert (text.matches, text.unchecked, text.writing) == (2, 0, True)
     assert [name for name, _ in client.counted] == [PHYSICAL]
     assert [build["include_images"] for build in built] == [False]
 
@@ -2562,7 +2565,7 @@ def test_a_check_whose_lane_went_uncounted_reports_its_count_unavailable(monkeyp
 
     The turn counted both lanes when it began. While a write goes on, the companion's coverage can no longer be
     counted, so a count could miss what it holds: the check reports no number and nothing unchecked, never the
-    count the read its turn began with would have planned.
+    count the read its turn began with would have planned. It still says it was made while the write went on.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2578,7 +2581,7 @@ def test_a_check_whose_lane_went_uncounted_reports_its_count_unavailable(monkeyp
         del lanes[f"{PHYSICAL}_images"]
         result = _physical_check(rag, matcher, "Hafenfest")
 
-    assert (result.matches, result.unchecked, result.nodes) == (None, 0, [])
+    assert (result.matches, result.unchecked, result.nodes, result.writing) == (None, 0, [], True)
     assert (client.counted, built) == ([], [])
 
 
@@ -2612,6 +2615,262 @@ def test_a_check_whose_readiness_read_raises_fails_the_call(monkeypatch: pytest.
         _physical_check(rag, matcher, "Hafenfest")
 
     assert (client.counted, built) == ([], [])
+
+
+def test_a_check_made_while_its_collection_is_written_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check made while its collection is written says so, though it counted no match and left nothing unchecked.
+
+    Its zero covers only the chunks stored so far: chunks still arriving were not checked, so it is no exact zero.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    matcher = _physical_matcher(rag)
+
+    with collection_writes.writing(PHYSICAL):
+        result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert (result.matches, result.unchecked, result.writing) == (0, 0, True)
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+def test_a_check_with_nothing_written_is_not_flagged(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    """A check while no window on its collection opens or stands open is not flagged, in either lane scope.
+
+    Its zero is exact over what the keyword index covers.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    matcher = _physical_matcher(rag, cast(RetrievalTarget, target))
+
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert (result.matches, result.unchecked, result.writing) == (0, 0, False)
+
+
+@pytest.mark.parametrize("overlap", ["began", "ended", "whole"])
+def test_a_check_a_write_overlaps_is_flagged(monkeypatch: pytest.MonkeyPatch, overlap: str) -> None:
+    """A check is flagged however a write on its collection overlaps it: begun during it, ended during it, or both.
+
+    Each write begins or ends while the match is counted, after the check read its readiness. ``began`` outlasts
+    the check, ``ended`` was open when the check began, and ``whole`` leaves no window open at either end.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        overlap (str): How the write overlaps the check.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, _ = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    matcher = _physical_matcher(rag)
+    real = client.count
+    closers: list[Callable[[], None]] = []
+    if overlap == "ended":
+        closers.append(collection_writes.begin(PHYSICAL))
+
+    def _written_mid_count(**kwargs: Any) -> Any:
+        """Count as the double does, a write on the collection beginning, ending or both as the case says.
+
+        Args:
+            **kwargs (Any): The count's arguments.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if overlap == "began":
+            closers.append(collection_writes.begin(PHYSICAL))
+        elif overlap == "ended":
+            closers.pop()()
+        else:
+            close = collection_writes.begin(PHYSICAL)
+            close()
+        return real(**kwargs)
+
+    monkeypatch.setattr(client, "count", _written_mid_count)
+    result = _physical_check(rag, matcher, "Hafenfest")
+    for close in closers:
+        close()
+
+    assert (result.matches, result.unchecked, result.writing) == (0, 0, True)
+    assert [name for name, _ in client.counted] == [PHYSICAL]
+
+
+@pytest.mark.parametrize("during", ["count", "retriever-build"])
+def test_an_index_ensure_during_a_check_does_not_flag_it(monkeypatch: pytest.MonkeyPatch, during: str) -> None:
+    """A check whose own index ensure forgets its collection's readiness is not flagged, though the epoch moved.
+
+    An ensure forgets by a touch, which opens no window: it only ever makes a kept read more conservative, so it is
+    no write the check could have missed. The forget comes during the count, or during the retriever build, where
+    the image lane's ensure runs.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        during (str): The part of the check that forgets.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL)
+    matcher = _physical_matcher(rag)
+    before = collection_writes.state(PHYSICAL)
+    if during == "count":
+        real_count = client.count
+
+        def _forgetting_count(**kwargs: Any) -> Any:
+            """Forget the collection's readiness as an index ensure does, then count as the double does.
+
+            Args:
+                **kwargs (Any): The count's arguments.
+
+            Returns:
+                Any: The double's answer.
+            """
+            rag.forget_keyword_readiness(PHYSICAL)
+            return real_count(**kwargs)
+
+        monkeypatch.setattr(client, "count", _forgetting_count)
+    else:
+        real_build = rag._build_retriever
+
+        def _forgetting_build(**kwargs: Any) -> Any:
+            """Forget the collection's readiness as the image lane's index ensure does, then build as the double does.
+
+            Args:
+                **kwargs (Any): The build arguments.
+
+            Returns:
+                Any: The double's retriever.
+            """
+            rag.forget_keyword_readiness(PHYSICAL)
+            return real_build(**kwargs)
+
+        monkeypatch.setattr(rag, "_build_retriever", _forgetting_build)
+
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert (result.matches, result.unchecked, result.writing) == (2, 0, False)
+    assert (before, collection_writes.state(PHYSICAL)) == (
+        collection_writes.WriteState(0, False),
+        collection_writes.WriteState(1, False),
+    )
+    assert len(built) == 1
+
+
+@pytest.mark.parametrize("window", [True, False], ids=["written", "not-written"])
+def test_a_check_whose_words_compile_to_no_match_says_whether_it_was_written(
+    monkeypatch: pytest.MonkeyPatch, window: bool
+) -> None:
+    """A check whose words compile to no match is neither counted nor searched, and says whether it was written.
+
+    Several words on a field matched by one exact value compile to nothing. The tool refuses such a call before it
+    runs, but a match run directly still answers it, with its count unavailable. The field is still planned, so this
+    is not the answer of a field that lost its index. The flag follows the window: set while one is open, clear
+    otherwise.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        window (bool): Whether a write window on the collection is open while the check runs.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, built = _keyword_ready(monkeypatch, rag, fields=("text", "uuid"), collection=PHYSICAL)
+    matcher = _physical_matcher(rag, "documents")
+
+    with collection_writes.writing(PHYSICAL) if window else contextlib.nullcontext():
+        result = _physical_check(rag, matcher, "zwei Werte", "uuid")
+
+    assert matcher.fields == ("text", "uuid")
+    assert (client.counted, built) == ([], [])
+    assert (result.matches, result.unchecked, result.nodes, result.writing) == (None, 0, [], window)
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+def test_a_write_that_ends_while_a_check_reads_its_readiness_flags_the_check(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """A write open when a check begins, which ends while the check reads its readiness again, flags the check.
+
+    That read was made while the write was under way, so it may plan the count on a collection caught mid-write, as
+    before its image companion exists. No window is open by the time the match is counted, so only a watch begun
+    before the read sees the write.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        target (str): The retrieval target.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    client, _ = _keyword_ready(monkeypatch, rag, collection=PHYSICAL, matches=0)
+    matcher = _physical_matcher(rag, cast(RetrievalTarget, target))
+    close = collection_writes.begin(PHYSICAL)
+    real = client.get_collection
+    ended: list[str] = []
+
+    def _write_ended_mid_read(collection_name: str) -> Any:
+        """Read a schema as the double does, the write on the collection ending the first time.
+
+        Args:
+            collection_name (str): The collection.
+
+        Returns:
+            Any: The double's answer.
+        """
+        if not ended:
+            ended.append(collection_name)
+            close()
+        return real(collection_name)
+
+    monkeypatch.setattr(client, "get_collection", _write_ended_mid_read)
+    result = _physical_check(rag, matcher, "Hafenfest")
+
+    assert ended == [PHYSICAL]
+    assert collection_writes.state(PHYSICAL).writing is False
+    assert (result.matches, result.unchecked, result.writing) == (0, 0, True)
+
+
+def test_a_write_that_begins_while_a_check_retrieves_flags_the_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write that begins after a check has counted, while it retrieves the matches, flags the check.
+
+    The flag is read once the matches are retrieved, never right after the count, so a write begun in between is not
+    missed.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _readiness_clock(monkeypatch)
+    rag = _rag(monkeypatch)
+    _, built = _keyword_ready(monkeypatch, rag, collection=PHYSICAL)
+    matcher = _physical_matcher(rag)
+    real_build = rag._build_retriever
+    closers: list[Callable[[], None]] = []
+
+    def _written_mid_build(**kwargs: Any) -> Any:
+        """Begin a write on the collection, then build as the double does.
+
+        Args:
+            **kwargs (Any): The build arguments.
+
+        Returns:
+            Any: The double's retriever.
+        """
+        closers.append(collection_writes.begin(PHYSICAL))
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(rag, "_build_retriever", _written_mid_build)
+    try:
+        result = _physical_check(rag, matcher, "Hafenfest")
+    finally:
+        for close in closers:
+            close()
+
+    assert (result.matches, result.writing, len(built)) == (2, True, 1)
 
 
 def _keyword_budgets(monkeypatch: pytest.MonkeyPatch) -> dict[str, TurnBudget]:

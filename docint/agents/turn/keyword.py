@@ -3,13 +3,15 @@
 ``search`` finds passages by meaning; ``keyword`` finds every indexed chunk that
 contains a set of words and says how many there are, which a ranked search
 cannot promise. The count is exact over what the keyword index covers, so a
-zero is an answer rather than a miss. The match itself runs in RAG, which owns
-the index, the filters and the retrieval chain; this module holds what the turn
-does with a match (it anchors each hit on its words, writes the count note and
-keys a check so the same one asked again is known), the :class:`KeywordTool`
-the model calls it by, and the checks block the turn's validator reads its
-counts from. It imports nothing from :mod:`docint.core.rag` or
-:mod:`docint.core.state`.
+zero is an answer rather than a miss, unless this process was writing the
+collection during the check: that count covers only the chunks stored so far,
+and the note, the trail step and the validator's checks block say so. The match
+itself runs in RAG, which owns the index, the filters and the retrieval chain;
+this module holds what the turn does with a match (it anchors each hit on its
+words, writes the count note and keys a check so the same one asked again is
+known), the :class:`KeywordTool` the model calls it by, and the checks block
+the turn's validator reads its counts from. It imports nothing from
+:mod:`docint.core.rag` or :mod:`docint.core.state`.
 """
 
 from __future__ import annotations
@@ -75,6 +77,13 @@ KEYWORD_FIELD_NOTES = {
     "network": "the platform",
     "uuid": "one posting's id",
 }
+#: The note line of a check made while this process was writing its collection: chunks still arriving are not counted.
+WRITING_LINE = (
+    "The collection was being written during this check: report this count only as a count so far, "
+    "since chunks still arriving were not checked and may still contain these words."
+)
+#: The mark that ends the validator's line of a check made while this process was writing its collection.
+WRITING_MARK = "collection being written"
 
 #: A word starts where the index starts one: no letter or digit right before it.
 _WORD_START = rf"(?<![{INDEX_WORD_CLASS}])"
@@ -94,12 +103,16 @@ class KeywordResult:
         unchecked (int): Chunks in the searched material the keyword index does
             not cover, so a count can be that much too low.
         keywords (tuple[str, ...]): The words the match used, as the index reads them.
+        writing (bool): Whether this process was writing the collection at some
+            moment while the check ran, so its count covers only the chunks stored
+            so far, and chunks still arriving are neither counted nor in ``unchecked``.
     """
 
     nodes: list[NodeWithScore]
     matches: int | None
     unchecked: int
     keywords: tuple[str, ...]
+    writing: bool = False
 
 
 @dataclass(frozen=True)
@@ -288,21 +301,26 @@ def _anchor_unstamped(scored: NodeWithScore, text: str, pattern: regex.Pattern[s
     return NodeWithScore(node=node, score=scored.score)
 
 
-def keyword_note(*, matches: int | None, unchecked: int) -> str:
-    """Write the note that leads a keyword reply: the exact count, then what the index does not cover.
+def keyword_note(*, matches: int | None, unchecked: int, writing: bool = False) -> str:
+    """Write the note that leads a keyword reply: the exact count, then what the check could not cover.
 
     The passages, or ``No new passages.``, follow it, rendered by
     :func:`~docint.agents.turn.passages.answer_passages`; this note only says what the
     match counted and what it could not check. Leading, it survives the overflow retry,
     which keeps the head of every tool reply. The chunks it could not check may still
     contain the words, and the coverage line says so: a zero rules out only what was checked.
+    A collection being written also has chunks the index does not know yet, which no coverage
+    count includes; the writing line says so. It comes second, ahead of the coverage line, so a
+    cut tail loses the coverage line before the writing line.
 
     Args:
         matches (int | None): The exact count, or ``None`` when it failed.
         unchecked (int): Chunks the keyword index does not cover.
+        writing (bool): Whether this process was writing the collection at some moment while the check ran.
 
     Returns:
-        str: The count line, then a coverage line when the index is partial, one per line.
+        str: The count line, then the writing line when the collection was written, then a
+        coverage line when the index is partial, one per line.
     """
     if matches is None:
         lines = ["The number of matching chunks is unavailable."]
@@ -312,6 +330,8 @@ def keyword_note(*, matches: int | None, unchecked: int) -> str:
         lines = ["1 indexed chunk in the searched material contains all of these words."]
     else:
         lines = [f"{matches} indexed chunks in the searched material contain all of these words."]
+    if writing:
+        lines.append(WRITING_LINE)
     if unchecked == 1:
         lines.append(
             "1 chunk is not in the keyword index yet, so it was not checked and may still contain these words."
@@ -342,7 +362,11 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
     """Render a turn's keyword checks for its validator, which reads the counts as facts beside the sources.
 
     Only keyword steps whose count is known are listed: a failed count says nothing
-    about the collection. Lines are kept whole, in trail order, while they fit.
+    about the collection. A step whose ``writing`` is ``True`` ends its line in
+    :data:`WRITING_MARK`: its count covers only the chunks stored so far, which the validator
+    takes as a count so far and never as the words being absent. Only that boolean marks a
+    check, since the trail is stored and read back as data. Lines are kept whole, mark included,
+    in trail order, while they fit.
 
     Args:
         actions (Sequence[Mapping[str, Any]]): The turn's trail (``agent.actions``), in order.
@@ -350,7 +374,8 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
 
     Returns:
         str: One ``- "words" (field): count`` line per check, with ``; N chunks not checked``
-        when the index does not cover every chunk; empty when there is none.
+        when the index does not cover every chunk, then ``; collection being written`` when the
+        collection was being written during the check; empty when there is none.
     """
     lines: list[str] = []
     used = 0
@@ -362,6 +387,8 @@ def render_keyword_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: in
         unchecked = action.get("unchecked")
         if type(unchecked) is int and unchecked > 0:
             line += f"; {unchecked} chunk not checked" if unchecked == 1 else f"; {unchecked} chunks not checked"
+        if action.get("writing") is True:
+            line += f"; {WRITING_MARK}"
         cost = len(line) + (1 if lines else 0)
         if used + cost > max_chars:
             break
@@ -523,16 +550,20 @@ class KeywordTool:
             ToolReply: The count note, then the passages, as a :class:`PassageReply` that is news even
             when it admits nothing, so the same call can be answered by number. A plain reply when
             the count failed, which is never remembered, so a retry runs again. Either keeps the
-            note when cleared to make room: no ``read`` shows a count again.
+            note when cleared to make room: no ``read`` shows a count again. The step's trail names
+            the field and the count, then ``unchecked`` when above zero and ``writing`` when the
+            collection was written during the check, so a step without either has neither key.
         """
         nodes = fetched.nodes
         if field == DEFAULT_KEYWORD_FIELD:
             nodes = [anchor_terms(scored, fetched.keywords) for scored in nodes]
-        note = keyword_note(matches=fetched.matches, unchecked=fetched.unchecked)
+        note = keyword_note(matches=fetched.matches, unchecked=fetched.unchecked, writing=fetched.writing)
         shown = passage_reply(nodes, ctx, action=self.name, detail=detail, note=note, note_first=True)
         trail: dict[str, Any] = {"field": field, "matches": fetched.matches}
         if fetched.unchecked > 0:
             trail["unchecked"] = fetched.unchecked
+        if fetched.writing:
+            trail["writing"] = True
         if fetched.matches is None:
             return ToolReply(
                 text=shown.text, found=shown.found, action=shown.action, detail=shown.detail, trail=trail, keep=note
