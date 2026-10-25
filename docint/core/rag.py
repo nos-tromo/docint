@@ -72,6 +72,8 @@ from docint.utils.env_cfg import (
     load_session_env,
     load_sparse_client_env,
     load_summary_env,
+    load_topics_client_env,
+    load_topics_env,
     resolve_enable_hybrid,
 )
 from docint.utils.translate_client import translate as translate_text
@@ -248,6 +250,12 @@ from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
+from docint.core.topics import views as topic_views
+from docint.core.topics.gather import dense_vector, ensure_topic_indexes
+from docint.core.topics.labels import TopicLabeller
+from docint.core.topics.service import TopicsDeps, TopicsService
+from docint.core.topics.stopwords import load_stop_words, stop_words_digest
+from docint.core.topics.store import TopicRun, TopicStore
 from docint.utils import image_description
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
@@ -273,6 +281,7 @@ from docint.utils.retry import (
 )
 from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
 from docint.utils.timefmt import format_short
+from docint.utils.topics_client import TopicsClient
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -282,6 +291,8 @@ SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 # single final synthesized payload.
 SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+#: Source keys that name the physical collection; the topic reads drop them.
+_PHYSICAL_SOURCE_KEYS: tuple[str, ...] = ("preview_url", "document_url", "image_collection")
 
 # The reranker records what it did on the nodes it returns. That is the one
 # place the outcome can ride safely: the postprocessor instance is shared by
@@ -3417,6 +3428,7 @@ class RAG:
     )
     _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _visual_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
+    _topic_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _keyword_readiness_cache: dict[tuple[str, bool], tuple[float, int, _KeywordReadiness]] = field(
         default_factory=dict, init=False, repr=False
@@ -10857,6 +10869,246 @@ class RAG:
         self.forget_keyword_readiness(collection)
         if ok:
             self._field_indexes_ensured.add(collection)
+
+    def _ensure_topic_indexes_once(self, collection: str) -> None:
+        """Ensure the topic payload indexes once per process per collection.
+
+        A server facet needs its index. Nothing is recorded when the ensure
+        raises, so the next read tries again.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        if collection in self._topic_indexes_ensured:
+            return
+        ensure_topic_indexes(self.qdrant_client, collection)
+        self._topic_indexes_ensured.add(collection)
+
+    def topic_store(self) -> TopicStore:
+        """Return the store holding every collection's topic runs.
+
+        Returns:
+            TopicStore: The store under ``TOPICS_DIR``.
+        """
+        return TopicStore(self.path_config.topics)
+
+    def collection_created_at(self, physical: str) -> str | None:
+        """Return when a collection's ownership row was created.
+
+        A topic run records this value, so a run of an earlier collection of
+        the same name reads as stale.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            str | None: ISO-8601 UTC, ``None`` when no such collection is owned.
+        """
+        created = self.ensure_collection_owner_manager().created_at(physical)
+        return created.isoformat() if created is not None else None
+
+    def forget_documents(self, collection: str) -> None:
+        """Drop a collection's cached document rows.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        self._documents_cache.pop(collection, None)
+
+    def topics_service(self) -> TopicsService:
+        """Build the topics service from the current configuration.
+
+        Returns:
+            TopicsService: A service writing to this RAG's Qdrant client and topic store.
+        """
+        cfg = load_topics_env()
+        stop_words = load_stop_words()
+        return TopicsService(
+            TopicsDeps(
+                client=self.qdrant_client,
+                fit=TopicsClient(load_topics_client_env()).fit,
+                store=self.topic_store(),
+                labeller=TopicLabeller(self._topic_label_complete) if cfg.labels else None,
+                config=cfg,
+                embed_model=self.embed_model_id or "",
+                stop_words=stop_words,
+                stop_words_sha256=stop_words_digest(stop_words),
+                on_written=self.forget_documents,
+            )
+        )
+
+    def _topic_label_complete(self, prompt: str, response_format: dict[str, Any] | None) -> str:
+        """Ask the chat model for one topic label.
+
+        Args:
+            prompt (str): The label prompt.
+            response_format (dict[str, Any] | None): The reply schema, ``None`` for an unconstrained reply.
+
+        Returns:
+            str: The reply text.
+        """
+        if response_format is not None:
+            response = self.text_model.complete(prompt, response_format=response_format)
+        else:
+            response = self.text_model.complete(prompt)
+        return str(response.text or "")
+
+    def _active_topic_run(self, physical: str) -> TopicRun | None:
+        """Return a collection's active topic run unless it is stale.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            TopicRun | None: The run; ``None`` when absent or built for an earlier collection.
+        """
+        return self.topic_store().active(physical, owner_created_at=self.collection_created_at(physical))
+
+    def _topic_source_of(self, physical: str) -> Callable[[Any], dict[str, Any]]:
+        """Build the function that shapes a topic member as a source.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            Callable[[Any], dict[str, Any]]: Point to source, without the keys naming the collection.
+        """
+
+        def source_of(point: Any) -> dict[str, Any]:
+            """Shape one point.
+
+            Args:
+                point (Any): A Qdrant record or scored point.
+
+            Returns:
+                dict[str, Any]: The source.
+            """
+            payload = dict(point.payload or {})
+            source = self._source_from_payload(
+                collection=physical,
+                payload=payload,
+                score=getattr(point, "score", None),
+                node_id=str(point.id),
+                text_value=payload.get("search_text") or None,
+            )
+            for key in _PHYSICAL_SOURCE_KEYS:
+                source.pop(key, None)
+            return source
+
+        return source_of
+
+    def _document_names(self, physical: str) -> dict[str, str]:
+        """Map a collection's file hashes to filenames, through the documents cache.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            dict[str, str]: File hash to filename; the first name listed wins.
+        """
+        cached = self._documents_cache.get(physical)
+        if cached is None:
+            with self.collection_scope(physical):
+                cached = self.list_documents()
+            self._documents_cache[physical] = cached
+        names: dict[str, str] = {}
+        for row in cached:
+            file_hash, filename = row.get("file_hash"), row.get("filename")
+            if file_hash and filename:
+                names.setdefault(str(file_hash), str(filename))
+        return names
+
+    def topics_overview(self, physical: str) -> dict[str, Any] | None:
+        """Describe a collection's active topic run.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            dict[str, Any] | None: The overview; ``None`` without a usable run.
+        """
+        return topic_views.overview(
+            self.qdrant_client,
+            self._active_topic_run(physical),
+            physical,
+            embed_model=self.embed_model_id or "",
+            ensure_indexes=self._ensure_topic_indexes_once,
+        )
+
+    def topic_evidence(self, physical: str, topic_id: int, *, limit: int) -> list[dict[str, Any]] | None:
+        """Return one topic's members nearest its centre, as sources.
+
+        Args:
+            physical (str): Physical collection name.
+            topic_id (int): Topic id.
+            limit (int): Most passages.
+
+        Returns:
+            list[dict[str, Any]] | None: Sources, closest first; ``None`` without the run or the topic.
+        """
+        run = self._active_topic_run(physical)
+        if run is None:
+            return None
+        self._ensure_topic_indexes_once(physical)
+        return topic_views.evidence(
+            self.qdrant_client,
+            run,
+            physical,
+            topic_id,
+            dense=dense_vector(self.qdrant_client, physical),
+            limit=limit,
+            source_of=self._topic_source_of(physical),
+        )
+
+    def topic_documents(self, physical: str, topic_id: int, *, limit: int) -> dict[str, Any] | None:
+        """Count one topic's members per source file.
+
+        Args:
+            physical (str): Physical collection name.
+            topic_id (int): Topic id.
+            limit (int): Most files.
+
+        Returns:
+            dict[str, Any] | None: ``{"documents", "more"}``; ``None`` without the run or the topic.
+        """
+        run = self._active_topic_run(physical)
+        if run is None:
+            return None
+        self._ensure_topic_indexes_once(physical)
+        return topic_views.documents(
+            self.qdrant_client,
+            run,
+            physical,
+            topic_id,
+            limit=limit,
+            names=lambda: self._document_names(physical),
+        )
+
+    def topic_chunks(self, physical: str, topic_id: int, *, cursor: str | None, limit: int) -> dict[str, Any] | None:
+        """Read one page of a topic's members, as sources.
+
+        Args:
+            physical (str): Physical collection name.
+            topic_id (int): Topic id.
+            cursor (str | None): The previous page's cursor.
+            limit (int): Page size.
+
+        Returns:
+            dict[str, Any] | None: ``{"items", "next_cursor"}``; ``None`` without the run or the topic.
+        """
+        run = self._active_topic_run(physical)
+        if run is None:
+            return None
+        self._ensure_topic_indexes_once(physical)
+        return topic_views.chunks(
+            self.qdrant_client,
+            run,
+            physical,
+            topic_id,
+            cursor=cursor,
+            limit=limit,
+            source_of=self._topic_source_of(physical),
+        )
 
     def iter_search_matches(
         self,

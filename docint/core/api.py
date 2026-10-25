@@ -92,6 +92,7 @@ from docint.core.state.pdf_progress import ProgressCallback
 from docint.core.state.report_pdf_store import ReportPdfStore
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
+from docint.core.topics.service import Action, TopicsRefused, progress_payload
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
@@ -110,6 +111,7 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
     load_retention_env,
     load_summary_env,
+    load_topics_env,
     resolve_enable_hybrid,
     set_offline_env,
 )
@@ -117,6 +119,7 @@ from docint.utils.hashing import compute_file_hash
 from docint.utils.logfmt import PARTIAL_UPLOAD_SUFFIX, describe_inputs, format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
+from docint.utils.topics_client import TopicsEndpointError
 from docint.utils.translate_client import translate
 
 # Names re-exported for test monkey-patching. pyrefly treats these as
@@ -1599,6 +1602,18 @@ class ExtractIn(BaseModel):
     operator: str | None = None
 
 
+class TopicsIn(BaseModel):
+    """Request payload for queuing a topics run.
+
+    Attributes:
+        action (Literal["build", "discover", "align"]): ``build`` fits a new run,
+            ``discover`` looks for new topics among the unassigned chunks, and
+            ``align`` places chunks the run has not placed yet.
+    """
+
+    action: Literal["build", "discover", "align"] = "build"
+
+
 class IngestDefaultsOut(BaseModel):
     """Deployment-default enrichment toggles for the ingest UI."""
 
@@ -1758,6 +1773,7 @@ class FrontendConfigOut(BaseModel):
     report_batch_max_items: int
     language: str
     collection_retention: str
+    topics_enabled: bool
 
 
 class FileTypeCount(BaseModel):
@@ -1907,7 +1923,7 @@ class ReportListOut(BaseModel):
 
 
 @app.get("/config", response_model=FrontendConfigOut, tags=["Meta"])
-def get_frontend_config() -> dict[str, int | str]:
+def get_frontend_config() -> dict[str, int | str | bool]:
     """Return deploy-time frontend configuration for the SPA.
 
     Served without a principal dependency so the SPA can read it on first load,
@@ -1918,15 +1934,15 @@ def get_frontend_config() -> dict[str, int | str]:
     built with, so the advertised cap is the enforced one.
 
     Returns:
-        dict[str, int | str]: ``graph_top_k``, ``graph_max_top_k``,
+        dict[str, int | str | bool]: ``graph_top_k``, ``graph_max_top_k``,
         ``collection_timeout``, ``max_upload_bytes`` (the per-request upload
         ceiling nginx enforces, which the SPA uses to size its upload batches),
         ``report_batch_max_items`` (the most artifacts one report batch add may
         carry, which the SPA refuses an oversize section against),
         ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
-        ``"de"``), and ``collection_retention`` (``COLLECTION_RETENTION``:
+        ``"de"``), ``collection_retention`` (``COLLECTION_RETENTION``:
         ``"off"`` or the idle window, which the SPA checks before asking for
-        expiry dates).
+        expiry dates), and ``topics_enabled`` (``TOPICS_ENABLED``).
     """
     cfg = load_frontend_env()
     return {
@@ -1937,6 +1953,7 @@ def get_frontend_config() -> dict[str, int | str]:
         "report_batch_max_items": REPORT_BATCH_MAX_ITEMS,
         "language": load_language_env().code,
         "collection_retention": load_retention_env().window,
+        "topics_enabled": load_topics_env().enabled,
     }
 
 
@@ -5588,6 +5605,79 @@ def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     return {"empty": False, "resolution": None, "artifact": record, "stats": bundle.counts}
 
 
+#: Static copy for each topics endpoint fault; the exception text names the endpoint.
+_TOPICS_ENDPOINT_MESSAGES: dict[str, str] = {
+    "topics_unreachable": "The topics service could not be reached.",
+    "topics_busy": "The topics service stayed busy; try again later.",
+    "topics_too_large": "The topics service refused a sample this large.",
+    "topics_rejected": "The topics service refused the request.",
+    "topics_bad_response": "The topics service sent an unusable answer.",
+}
+
+
+def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Execute one topics job: build, discover or align.
+
+    Injected via :func:`_run_job` so ``core/jobs.py`` stays free of docint
+    domain imports. Runs on a worker thread; ``push`` is thread-safe.
+
+    Args:
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any]: ``{"empty", "resolution"}``, plus ``artifact`` and
+            ``stats`` once the run did something. A refusal is an empty
+            completion carrying a coded warning.
+
+    Raises:
+        TopicsEndpointError: When the topics service fails, after a coded warning.
+    """
+    # The first push is the cancel checkpoint for a job stopped while queued.
+    push("topics_progress", progress_payload("starting", 0, 0))
+
+    def _progress(stage: str, done: int, total: int) -> None:
+        """Publish one progress frame.
+
+        Args:
+            stage (str): The stage.
+            done (int): Units done.
+            total (int): Units in all, 0 when unknown.
+        """
+        push("topics_progress", progress_payload(stage, done, total))
+
+    def _warn(code: str, message: str) -> None:
+        """Publish one coded warning.
+
+        Args:
+            code (str): The warning code.
+            message (str): Its static message.
+        """
+        push("warning", {"message": message, "code": code})
+
+    try:
+        outcome = rag.topics_service().run(
+            cast(Action, state.action or "build"),
+            state.physical,
+            logical=state.logical_name,
+            owner_created_at=lambda: rag.collection_created_at(state.physical),
+            progress=_progress,
+            warn=_warn,
+        )
+    except TopicsRefused as exc:
+        _warn(exc.code, exc.message)
+        return {"empty": True, "resolution": None}
+    except TopicsEndpointError as exc:
+        _warn(exc.code, _TOPICS_ENDPOINT_MESSAGES.get(exc.code, "Topics run failed."))
+        raise
+    return {
+        "empty": outcome.empty,
+        "resolution": None,
+        "artifact": outcome.artifact(),
+        "stats": {"topics": outcome.topics, "added": outcome.added, "assigned": outcome.assigned},
+    }
+
+
 def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """Dispatch a job to its kind-specific runner.
 
@@ -5604,6 +5694,8 @@ def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         return _run_extract_job(state, push)
     if state.kind == "report_pdf":
         return _run_report_pdf_job(state, push)
+    if state.kind == "topics":
+        return _run_topics_job(state, push)
     try:
         return _run_ingest_job(state, push)
     finally:
@@ -6125,6 +6217,201 @@ def delete_extract(
     if not _extract_store().delete(physical, extract_id):
         raise HTTPException(status_code=404, detail="Extract not found.")
     return {"ok": True}
+
+
+def _require_topics_enabled() -> None:
+    """Refuse every topics route while topics are switched off.
+
+    Raises:
+        HTTPException: 404 when ``TOPICS_ENABLED`` is false.
+    """
+    if not load_topics_env().enabled:
+        raise HTTPException(status_code=404, detail="Topics are disabled.")
+
+
+@app.post("/collections/{name}/topics", response_model=None, tags=["Query"])
+async def create_topics(
+    name: str,
+    payload: TopicsIn | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+) -> Response:
+    """Queue a topics run over a collection.
+
+    Progress arrives on ``GET /ingest/jobs/events`` as ``topics_started``/
+    ``topics_progress``/``topics_completed``; a refusal completes the job as
+    empty with a coded warning.
+
+    Args:
+        name (str): The caller's logical collection name.
+        payload (TopicsIn | None): The action, ``build`` when omitted.
+        principal (Principal): The resolved request principal.
+        jobs (IngestJobManager): The shared job registry.
+
+    Returns:
+        Response: 202 ``{"job_id"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled or the collection is not
+            owned; 400 for ``discover``/``align`` without a usable run; 409
+            when a topics run for this collection is already in flight.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    action = payload.action if payload is not None else "build"
+    if (
+        action != "build"
+        and rag.topic_store().active(physical, owner_created_at=rag.collection_created_at(physical)) is None
+    ):
+        raise HTTPException(status_code=400, detail="Build topics first.")
+    state, created = await jobs.create_if_idle(
+        owner=principal.effective_owner,
+        logical_name=name,
+        physical=physical,
+        kind="topics",
+        action=action,
+    )
+    if not created:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "A topics run is already in progress.", "job_id": state.job_id},
+        )
+    return JSONResponse({"job_id": state.job_id}, status_code=202)
+
+
+@app.get("/collections/{name}/topics", response_model=None, tags=["Query"])
+def get_topics(name: str, principal: Principal = Depends(resolve_principal)) -> Response | dict[str, Any]:  # noqa: B008 - FastAPI dependency marker
+    """Describe a collection's topics: the run, its coverage and its topics by size.
+
+    Args:
+        name (str): The caller's logical collection name.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        Response | dict[str, Any]: 200 with the overview, or 204 when the
+            collection has no usable run.
+
+    Raises:
+        HTTPException: 404 when topics are disabled or the collection is not
+            owned; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        overview = rag.topics_overview(physical)
+    except Exception as e:
+        logger.exception("Reading the topics of '{}' failed", name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if overview is None:
+        return Response(status_code=204)
+    return overview
+
+
+@app.get("/collections/{name}/topics/{topic_id}/evidence", tags=["Query"])
+def get_topic_evidence(
+    name: str,
+    topic_id: int,
+    limit: int = Query(default=5, ge=1, le=20),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Return a topic's passages nearest its centre.
+
+    Args:
+        name (str): The caller's logical collection name.
+        topic_id (int): Topic id.
+        limit (int): Most passages (1-20).
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"topic", "sources"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled, the collection is not
+            owned, or the topic is unknown; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        sources = rag.topic_evidence(physical, topic_id, limit=limit)
+    except Exception as e:
+        logger.exception("Reading the evidence of topic {} of '{}' failed", topic_id, name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if sources is None:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return {"topic": topic_id, "sources": sources}
+
+
+@app.get("/collections/{name}/topics/{topic_id}/documents", tags=["Query"])
+def get_topic_documents(
+    name: str,
+    topic_id: int,
+    limit: int = Query(default=50, ge=1, le=500),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Count a topic's passages per source file.
+
+    Args:
+        name (str): The caller's logical collection name.
+        topic_id (int): Topic id.
+        limit (int): Most files (1-500).
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"documents", "more"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled, the collection is not
+            owned, or the topic is unknown; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        result = rag.topic_documents(physical, topic_id, limit=limit)
+    except Exception as e:
+        logger.exception("Reading the documents of topic {} of '{}' failed", topic_id, name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if result is None:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return result
+
+
+@app.get("/collections/{name}/topics/{topic_id}/chunks", tags=["Query"])
+def get_topic_chunks(
+    name: str,
+    topic_id: int,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Read one page of a topic's passages.
+
+    Args:
+        name (str): The caller's logical collection name.
+        topic_id (int): Topic id.
+        cursor (str | None): The previous page's ``next_cursor``.
+        limit (int): Page size (1-200).
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"items", "next_cursor"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled, the collection is not
+            owned, or the topic is unknown; 400 for a malformed cursor; 500
+            when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        page = rag.topic_chunks(physical, topic_id, cursor=cursor, limit=limit)
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail="Invalid request.") from e
+    except Exception as e:
+        logger.exception("Reading the passages of topic {} of '{}' failed", topic_id, name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if page is None:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return page
 
 
 def _owned_report_meta(report_id: int, owner: str) -> dict[str, Any]:

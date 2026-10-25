@@ -326,3 +326,19 @@ def test_get_activity_reads_one_collections_clock(mgr: CollectionOwnerManager) -
     assert row is not None
     assert (row.owner, row.logical, row.last_activity_at) == ("alice", "mydocs", T0)
     assert mgr.get_activity("u000000000000__missing") is None
+
+
+def test_created_at_reads_the_row_as_utc_and_changes_when_recreated(mgr: CollectionOwnerManager) -> None:
+    """A recreated collection reads a new creation time; a missing one reads none."""
+    physical = mgr.register("alice", "mydocs")
+    first = mgr.created_at(physical)
+
+    assert first is not None
+    assert first.tzinfo is UTC
+    assert mgr.created_at("u000000000000__missing") is None
+
+    mgr.delete("alice", "mydocs")
+    assert mgr.register("alice", "mydocs") == physical
+    second = mgr.created_at(physical)
+    assert second is not None
+    assert second > first

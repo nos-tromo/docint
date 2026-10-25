@@ -48,6 +48,7 @@ from docint.utils.env_cfg import (
     load_ingest_concurrency,
     load_logging_env,
     load_summary_concurrency,
+    load_topics_concurrency,
 )
 from docint.utils.logfmt import (
     InputInventory,
@@ -94,6 +95,14 @@ KIND_EVENTS: dict[str, dict[str, str]] = {
         "cancelled": "report_pdf_cancelled",
         "failed_code": "report_pdf_failed",
         "failed_message": "Report PDF failed.",
+    },
+    "topics": {
+        "started": "topics_started",
+        "progress": "topics_progress",
+        "complete": "topics_completed",
+        "cancelled": "topics_cancelled",
+        "failed_code": "topics_failed",
+        "failed_message": "Topics run failed.",
     },
 }
 
@@ -256,6 +265,8 @@ class IngestJobState:
     reference_number: str | None = None
     #: Who asked for the extract, printed under its title.
     operator: str | None = None
+    #: A topics job's action: ``build``, ``discover`` or ``align``.
+    action: str | None = None
     #: The stored artifact a finished extract job produced, if any.
     artifact: dict[str, Any] | None = None
     batch_dir: Path | None = None
@@ -415,6 +426,7 @@ class IngestJobState:
             "empty": self.empty,
             "resolution": self.resolution,
             "target": self.target,
+            "action": self.action,
             "artifact": self.artifact,
             "created_at": self.created_at.isoformat(),
             "run_started_at": self.run_started_at.isoformat(),
@@ -462,6 +474,7 @@ class IngestJobManager:
         concurrency: int | None = None,
         summary_concurrency: int | None = None,
         extract_concurrency: int | None = None,
+        topics_concurrency: int | None = None,
     ) -> None:
         """Initialize the manager.
 
@@ -477,6 +490,9 @@ class IngestJobManager:
             extract_concurrency (int | None): Size of the WeasyPrint render
                 slot ``kind="extract"`` and ``kind="report_pdf"`` jobs share. Defaults to
                 :func:`docint.utils.env_cfg.load_extract_concurrency`.
+            topics_concurrency (int | None): Worker semaphore size for
+                ``kind="topics"`` jobs. Defaults to
+                :func:`docint.utils.env_cfg.load_topics_concurrency`.
         """
         self._runner = runner
         self._jobs: dict[str, IngestJobState] = {}
@@ -493,6 +509,9 @@ class IngestJobManager:
             # Both kinds render with WeasyPrint, and a second concurrent render is what OOMs.
             "extract": render_slot,
             "report_pdf": render_slot,
+            "topics": asyncio.Semaphore(
+                topics_concurrency if topics_concurrency is not None else load_topics_concurrency()
+            ),
         }
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -512,6 +531,7 @@ class IngestJobManager:
         target: str | None = None,
         reference_number: str | None = None,
         operator: str | None = None,
+        action: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Register a job and dispatch its worker, unconditionally.
@@ -539,13 +559,14 @@ class IngestJobManager:
                 ``SUMMARY_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"``, ``"summary"``, ``"extract"`` or ``"report_pdf"``. Selects
+            kind (str): ``"ingest"``, ``"summary"``, ``"extract"``, ``"report_pdf"`` or ``"topics"``. Selects
                 the SSE event names (:data:`KIND_EVENTS`) and the worker
                 semaphore this job waits on.
             target (str | None): The one source an extract covers.
             reference_number (str | None): Case file an extract is filed
                 under. Extract-only.
             operator (str | None): Who asked for the extract. Extract-only.
+            action (str | None): A topics job's action. Topics-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports.
@@ -567,6 +588,7 @@ class IngestJobManager:
             target=target,
             reference_number=reference_number,
             operator=operator,
+            action=action,
             upload_lead_s=upload_lead_s,
         )
         async with self._lock:
@@ -590,6 +612,7 @@ class IngestJobManager:
         target: str | None = None,
         reference_number: str | None = None,
         operator: str | None = None,
+        action: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> tuple[IngestJobState, bool]:
         """Atomically check for an in-flight job and create one only if idle.
@@ -630,7 +653,7 @@ class IngestJobManager:
                 ``SUMMARY_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"``, ``"summary"``, ``"extract"`` or ``"report_pdf"``. Selects
+            kind (str): ``"ingest"``, ``"summary"``, ``"extract"``, ``"report_pdf"`` or ``"topics"``. Selects
                 the SSE event names (:data:`KIND_EVENTS`), the worker semaphore
                 this job waits on, and the idleness scope checked before
                 creating.
@@ -638,6 +661,7 @@ class IngestJobManager:
             reference_number (str | None): Case file an extract is filed
                 under. Extract-only.
             operator (str | None): Who asked for the extract. Extract-only.
+            action (str | None): A topics job's action. Topics-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports. Ignored when an in-flight
@@ -669,6 +693,7 @@ class IngestJobManager:
                 target=target,
                 reference_number=reference_number,
                 operator=operator,
+                action=action,
                 upload_lead_s=upload_lead_s,
             )
             self._jobs[state.job_id] = state
@@ -691,6 +716,7 @@ class IngestJobManager:
         target: str | None = None,
         reference_number: str | None = None,
         operator: str | None = None,
+        action: str | None = None,
         upload_lead_s: float = 0.0,
     ) -> IngestJobState:
         """Build a fresh, unregistered job state.
@@ -712,11 +738,12 @@ class IngestJobManager:
                 ``SUMMARY_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
-            kind (str): ``"ingest"``, ``"summary"``, ``"extract"`` or ``"report_pdf"``.
+            kind (str): ``"ingest"``, ``"summary"``, ``"extract"``, ``"report_pdf"`` or ``"topics"``.
             target (str | None): The one source an extract covers.
             reference_number (str | None): Case file an extract is filed
                 under. Extract-only.
             operator (str | None): Who asked for the extract. Extract-only.
+            action (str | None): A topics job's action. Topics-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed. Clamped here — it reaches the server as a
                 client-reported number, and it bounds a log line, so it must
@@ -740,6 +767,7 @@ class IngestJobManager:
             target=target,
             reference_number=reference_number,
             operator=operator,
+            action=action,
             batch_dir=batch_dir,
             hybrid=hybrid,
             ner=ner,
@@ -1235,6 +1263,8 @@ class IngestJobManager:
                 started["total_files"] = inventory.total_files
             if state.target is not None:
                 started["target"] = state.target
+            if state.action is not None:
+                started["action"] = state.action
             _emit(names["started"], started)
             self._log_run_banner(state, inventory)
             try:
