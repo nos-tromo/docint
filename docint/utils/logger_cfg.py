@@ -154,7 +154,7 @@ def init_logger(
     logger.remove()
 
     logger.add(
-        sink=sys.stderr,
+        sink=lambda message: print(message, end="", file=sys.stderr, flush=True),
         level=level,
         backtrace=backtrace,
         diagnose=diagnose,

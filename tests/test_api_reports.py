@@ -32,7 +32,7 @@ from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.report_manager import ReportManager
-from docint.core.state.report_pdf_store import ReportPdfStore
+from docint.core.state.report_pdf_store import ReportPdfRecord, ReportPdfStore
 
 
 class _ReportRAG:
@@ -920,6 +920,41 @@ def test_a_queued_pdf_renders_and_downloads(
     assert download.headers["content-type"] == "application/pdf"
     assert "attachment" in download.headers["content-disposition"]
     assert download.content == b"%PDF-1.7 fake"
+
+
+def test_a_render_finishing_during_a_status_read_does_not_report_completed_without_a_pdf(
+    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completion cannot be paired with a PDF-store read from before the render finished."""
+    gate = threading.Event()
+    _fake_engine(monkeypatch, gate)
+    rid = _create(client)["id"]
+    job_id = client.post(f"/reports/{rid}/pdf").json()["job_id"]
+    original_get = ReportPdfStore.get
+
+    def _finish_after_read(store: ReportPdfStore, report_id: int, report_created_at: str) -> ReportPdfRecord | None:
+        record = original_get(store, report_id, report_created_at)
+        if not gate.is_set():
+            assert record is None
+            gate.set()
+            for _ in range(200):
+                if pdf_jobs._jobs[job_id].status in TERMINAL_STATUSES:
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("render did not finish during the store read")
+        return record
+
+    monkeypatch.setattr(ReportPdfStore, "get", _finish_after_read)
+    try:
+        status = client.get(f"/reports/{rid}/pdf/status").json()
+
+        assert status["job"]["status"] in {"queued", "running"} or status["pdf"] is not None
+        settled = _settled(client, rid)
+        assert settled["job"]["status"] == "completed"
+        assert settled["pdf"]["current"] is True
+    finally:
+        gate.set()
 
 
 def test_a_render_reports_its_pages_as_it_goes(

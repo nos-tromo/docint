@@ -6623,11 +6623,13 @@ async def report_pdf_status(
     """
     owner = principal.effective_owner
     meta = await to_thread.run_sync(_owned_report_meta, report_id, owner)
-    record = await to_thread.run_sync(_report_pdf_store().get, report_id, str(meta["created_at"]))
     key = _report_pdf_key(meta)
     job = next((state for state in await jobs.list_for_owner(owner) if state.physical == key), None)
+    # Keep completion older than the file read, even if the render finishes during that read.
+    snapshot = job.snapshot() if job is not None else None
+    record = await to_thread.run_sync(_report_pdf_store().get, report_id, str(meta["created_at"]))
     pdf = None if record is None else {**record, "current": record["report_updated_at"] == meta["updated_at"]}
-    return {"job": job.snapshot() if job is not None else None, "pdf": pdf}
+    return {"job": snapshot, "pdf": pdf}
 
 
 @app.get("/collections/{name}/sources/{source_id}/extract.{fmt}", response_model=None, tags=["Query"])
