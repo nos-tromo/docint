@@ -461,7 +461,7 @@ export const en = {
   'topics.empty': 'No topics for this collection yet.',
   'topics.build': 'Start analysis',
   'topics.rebuild': 'Restart analysis',
-  'topics.rebuild_confirm': 'Rebuild the topics? Chat filters on the current topics stop matching.',
+  'topics.rebuild_confirm': 'Restart the analysis? Chat filters on the current topics stop matching.',
   'topics.discover': 'Find new topics',
   'topics.align': 'Align pending chunks',
   'topics.download_csv': 'Download CSV',

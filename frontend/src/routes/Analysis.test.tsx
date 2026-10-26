@@ -288,7 +288,7 @@ describe('Analysis topics tab', () => {
     expect(tabs).toHaveAttribute('aria-current', 'true')
     expect(screen.getByRole('button', { name: 'Entities' })).not.toHaveAttribute('aria-current')
     expect(useAnalysisUiStore.getState().tab).toBe('topics')
-    expect(await screen.findByRole('button', { name: 'Build topics' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Start analysis' })).toBeInTheDocument()
   })
 
   it('falls back to the entities tab when a remembered topics tab is switched off', async () => {
@@ -300,7 +300,7 @@ describe('Analysis topics tab', () => {
       expect(screen.getByRole('combobox', { name: 'Entity' })).toHaveTextContent(/Acme/i)
     )
     expect(screen.getByRole('button', { name: 'Entities' })).toHaveClass('border-foreground')
-    expect(screen.queryByRole('button', { name: 'Build topics' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Start analysis' })).not.toBeInTheDocument()
     // Shown, not rewritten: the remembered tab returns once the flag is back on.
     expect(useAnalysisUiStore.getState().tab).toBe('topics')
   })

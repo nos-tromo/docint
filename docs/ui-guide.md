@@ -370,10 +370,10 @@ on what happens to be on screen.
 The **Topics** tab (`src/components/analysis/TopicsPanel.tsx`) shows the active
 collection's topic run ([topics.md](topics.md)). A caption counts its topics
 and its coverage (chunks assigned of the total, unassigned, pending) beside
-four icon actions: **Rebuild topics**, which asks first, since chat filters on
+four icon actions: **Restart analysis**, which asks first, since chat filters on
 the current topics stop matching; **Find new topics**, while some chunks are
 unassigned; **Align pending chunks**, while some are pending; and **Download
-CSV**. A collection without a run shows a **Build topics** button instead.
+CSV**. A collection without a run shows a **Start analysis** button instead.
 While a job runs, a line names its stage, with a bar where the stage has a
 total. A banner suggests a rebuild when the collection is now embedded with
 another model than the run was built with.

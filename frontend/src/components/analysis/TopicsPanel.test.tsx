@@ -154,7 +154,7 @@ function renderPanel(lang: 'en' | 'de' = 'en', onAsk = vi.fn()) {
 }
 
 const header = {
-  rebuild: () => screen.getByRole('button', { name: 'Rebuild topics' }),
+  rebuild: () => screen.getByRole('button', { name: 'Restart analysis' }),
   discover: () => screen.getByRole('button', { name: 'Find new topics' }),
   align: () => screen.getByRole('button', { name: 'Align pending chunks' }),
   download: () => screen.getByRole('button', { name: 'Download CSV' })
@@ -180,10 +180,10 @@ describe('TopicsPanel', () => {
 
     expect(await screen.findByText('No topics for this collection yet.')).toBeInTheDocument()
     // Nothing to rebuild, extend or download before a first run.
-    expect(screen.queryByRole('button', { name: 'Rebuild topics' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Restart analysis' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Download CSV' })).not.toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: 'Build topics' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Start analysis' }))
 
     await waitFor(() =>
       expect(posts(fetchMock)).toEqual([{ path: `/collections/${COLLECTION}/topics`, body: { action: 'build' } }])
@@ -198,7 +198,7 @@ describe('TopicsPanel', () => {
     renderPanel()
 
     expect(screen.getByText('Select a collection to see its topics.')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Build topics' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Start analysis' })).not.toBeInTheDocument()
   })
 
   it('lists topics with coverage and keywords', async () => {
@@ -264,7 +264,7 @@ describe('TopicsPanel', () => {
 
     const toolbar = header.rebuild().parentElement as HTMLElement
     expect(within(toolbar).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Rebuild topics',
+      'Restart analysis',
       'Find new topics',
       'Align pending chunks',
       'Download CSV'
@@ -280,7 +280,7 @@ describe('TopicsPanel', () => {
 
     await userEvent.click(header.rebuild())
 
-    expect(confirm).toHaveBeenCalledWith('Rebuild the topics? Chat filters on the current topics stop matching.')
+    expect(confirm).toHaveBeenCalledWith('Restart the analysis? Chat filters on the current topics stop matching.')
     expect(posts(fetchMock)).toEqual([])
 
     confirm.mockReturnValue(true)
@@ -587,7 +587,7 @@ describe('TopicsPanel', () => {
       }
     })
     renderPanel()
-    await userEvent.click(await screen.findByRole('button', { name: 'Build topics' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Start analysis' }))
 
     // A refusal can start and end before the 202 is read.
     deliver('job-new', 'topics_started', { collection: COLLECTION, action: 'build' })
@@ -598,7 +598,7 @@ describe('TopicsPanel', () => {
     expect(
       await screen.findByText('The collection has too few chunks with enough text to build topics.')
     ).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Build topics' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Start analysis' })).toBeEnabled()
   })
 
   it('says a start that could not be queued failed, in catalog words', async () => {
