@@ -477,10 +477,10 @@ export const de: Strings = {
     '{assigned} von {total} Chunks zugeordnet · {unassigned} nicht zugeordnet · {pending} ausstehend',
   'topics.select_collection': 'Wählen Sie eine Sammlung aus, um ihre Themen zu sehen.',
   'topics.empty': 'Für diese Sammlung gibt es noch keine Themen.',
-  'topics.build': 'Themen erstellen',
-  'topics.rebuild': 'Themen neu erstellen',
+  'topics.build': 'Analyse starten',
+  'topics.rebuild': 'Analyse neu starten',
   'topics.rebuild_confirm':
-    'Die Themen neu erstellen? Chat-Filter auf die aktuellen Themen greifen danach nicht mehr.',
+    'Die Themenanalyse neu starten? Chat-Filter auf die aktuellen Themen greifen danach nicht mehr.',
   'topics.discover': 'Neue Themen suchen',
   'topics.align': 'Ausstehende Chunks zuordnen',
   'topics.download_csv': 'CSV herunterladen',
