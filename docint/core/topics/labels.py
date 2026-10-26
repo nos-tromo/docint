@@ -9,6 +9,7 @@ written is named by its leading keywords, so every topic always has a name.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -114,7 +115,8 @@ def render_prompt(template: str, request: LabelRequest) -> str:
         str: The prompt.
     """
     passages = "\n".join(f"{i}. {p[:PASSAGE_CHARS]}" for i, p in enumerate(request.passages, start=1))
-    return template.replace("{keywords}", ", ".join(request.keywords)).replace("{passages}", passages)
+    values = {"keywords": ", ".join(request.keywords), "passages": passages}
+    return re.sub(r"\{(keywords|passages)\}", lambda match: values[match[1]], template)
 
 
 def _load_object(text: str) -> object:

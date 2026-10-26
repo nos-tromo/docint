@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -953,7 +953,7 @@ def test_discover_refuses_before_writing_when_the_collection_is_replaced_during_
 
 
 def test_a_discover_on_a_collection_replaced_during_the_re_align_ends_refused(client: QdrantClient, root: Path) -> None:
-    """A collection replaced while the pool is re-aligned ends the discover refused; the next job drops its run.
+    """A discover cannot restore a run removed by a collection deletion during re-alignment.
 
     Args:
         client: Qdrant client.
@@ -974,6 +974,7 @@ def test_a_discover_on_a_collection_replaced_during_the_re_align_ends_refused(cl
         """
         if stage == "assigning":
             clock["value"] = "2026-02-02T00:00:00+00:00"
+            TopicStore(root).delete_collection(COLL)
 
     written: list[str] = []
     svc = _service(client, root, FakeFit(BLOBS), on_written=written.append)
@@ -982,10 +983,98 @@ def test_a_discover_on_a_collection_replaced_during_the_re_align_ends_refused(cl
     assert caught.value.code == "collection_changed"
     assert written == [COLL]
     assert TopicStore(root).active(COLL, owner_created_at=clock["value"]) is None
+    assert _run_dirs(root) == set()
     with pytest.raises(TopicsRefused) as later:
         _run(_service(client, root), "align", created=lambda: clock["value"])
     assert later.value.code == "no_run"
     assert _run_dirs(root) == set()
+
+
+@pytest.mark.parametrize("action", ["build", "discover", "align", "ingest"])
+def test_alignment_cannot_restore_a_deleted_collections_run(
+    client: QdrantClient,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: Literal["build", "discover", "align", "ingest"],
+) -> None:
+    """Replacement during a catch-up or align pass refuses without restoring deleted run files.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+        action: Which alignment path runs.
+    """
+    _add_blobs(client)
+    if action != "build":
+        _run(_service(client, root), "build")
+        _add_blobs(client, per=2, offset=1000)
+    else:
+        activate = TopicStore.activate
+
+        def with_pending(self: TopicStore, physical: str, run_id: str) -> None:
+            """Add points just after activation so the build's catch-up has work.
+
+            Args:
+                self: The store.
+                physical: Collection name.
+                run_id: The run being activated.
+            """
+            activate(self, physical, run_id)
+            _add_blobs(client, per=2, offset=1000)
+
+        monkeypatch.setattr(TopicStore, "activate", with_pending)
+    clock = {"value": CREATED}
+
+    def deleted(stage: str, done: int, total: int) -> None:
+        """Run the deletion cascade after the alignment page is written.
+
+        Args:
+            stage: Stage name.
+            done: Units done.
+            total: Units in all.
+        """
+        if stage == "aligning":
+            clock["value"] = "2026-02-02T00:00:00+00:00"
+            TopicStore(root).delete_collection(COLL)
+
+    svc = _service(client, root)
+    if action == "ingest":
+        result = svc.align_on_ingest(
+            COLL,
+            owner_created_at=lambda: clock["value"],
+            progress=lambda done, total: deleted("aligning", done, total),
+        )
+        assert result is None
+    else:
+        with pytest.raises(TopicsRefused) as caught:
+            _run(svc, action, Frames(deleted), created=lambda: clock["value"])
+        assert caught.value.code == "collection_changed"
+    assert _run_dirs(root) == set()
+    assert TopicStore(root).active_id(COLL) is None
+
+
+@pytest.mark.parametrize("action", ["build", "discover"])
+def test_empty_fit_on_a_replaced_collection_is_refused(
+    client: QdrantClient, root: Path, action: service.Action
+) -> None:
+    """An empty fit after replacement reports collection_changed instead of a normal empty result.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        action: The fitted action.
+    """
+    _add_blobs(client, per=60)
+    if action == "discover":
+        _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    clock = {"value": CREATED}
+    frames = Frames()
+    empty = FakeFit(BLOBS, radius=-1.0)
+    with pytest.raises(TopicsRefused) as caught:
+        _run(_service(client, root, _replacing(empty, clock)), action, frames, created=lambda: clock["value"])
+    assert caught.value.code == "collection_changed"
+    assert frames.warnings == []
 
 
 # Concurrency
@@ -1507,7 +1596,7 @@ def test_the_service_logs_counts_only(client: QdrantClient, root: Path) -> None:
         outcome = _run(_service(client, root, labeller=_labeller(SECRET_LABEL)), "build")
     finally:
         logger.remove(sink)
-    expected = f"Topics build | run={outcome.run_id} topics=3 added=3 assigned={outcome.assigned} deferred=False"
+    expected = f"Topics build | run={outcome.run_id} topics=3 added=3 assigned={outcome.assigned} deferred=false"
     assert any(line.strip() == expected for line in lines)
     assert not [line for line in lines if "secret" in line.lower()]
 

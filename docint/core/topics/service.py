@@ -251,7 +251,7 @@ class _Fitted:
     Attributes:
         sample: The fitted points.
         vectors: Their vectors, one row each.
-        labels: The fit's topic id per row.
+        labels: The fit's topic id per row, filtered to kept members during discovery.
         result: The fit response.
         min_topic_size: The minimum topic size used.
     """
@@ -466,7 +466,12 @@ class TopicsService:
             if dense.dim != run.table.dim:
                 logger.warning("Topic alignment after ingest skipped | code={}", "dimension_changed")
                 return None
-            outcome = self._align(physical, dense, run, lambda _stage, done, total: progress(done, total), job)
+            outcome = self._align(
+                physical, dense, run, created, owner_created_at, lambda _stage, done, total: progress(done, total), job
+            )
+        except TopicsRefused as exc:
+            logger.warning("Topic alignment after ingest skipped | code={}", exc.code)
+            return None
         finally:
             try:
                 self._announce(physical, job)
@@ -547,7 +552,7 @@ class TopicsService:
             raise TopicsRefused("dimension_changed")
         if action == "discover":
             return self._discover(physical, dense, run, created, owner_created_at, progress, warn, job)
-        return self._align(physical, dense, run, progress, job)
+        return self._align(physical, dense, run, created, owner_created_at, progress, job)
 
     def _build(
         self,
@@ -578,6 +583,7 @@ class TopicsService:
         """
         deps, store = self._deps, self._deps.store
         fitted = self._fit_pool(physical, dense, eligible_filter(), "too_few_chunks", progress)
+        _refuse_if_replaced(owner_created_at, created)
         if not any(t.size > 0 for t in fitted.result.topics):
             warn("none_found", WARNINGS["none_found"])
             current = store.active(physical, owner_created_at=created)
@@ -614,7 +620,9 @@ class TopicsService:
             store.delete_run(physical, run_id)
             raise
         store.prune(physical, keep=run_id)
+        _refuse_if_replaced(owner_created_at, created)
         assigned += self._pending_loop(physical, dense, run_id, table, {}, "aligning", progress, job)
+        _refuse_if_replaced(owner_created_at, created)
         saved = self._save_seen(physical, run, table, job)
         return TopicsOutcome("build", run_id, len(saved.table.topics), len(table.topics), assigned, empty=False)
 
@@ -652,9 +660,11 @@ class TopicsService:
         assigned = self._pending_loop(physical, dense, run_id, run.table, {}, "aligning", progress, job)
         # Heal a pool an interrupted discover left behind; writes nothing in steady state.
         assigned += self._realign_pool(physical, dense, run_id, run.table, {}, "aligning", progress, job)
+        _refuse_if_replaced(owner_created_at, created)
         run = self._save_seen(physical, run, run.table, job)
         pool = and_filters(topic_filter(run_id, -1), eligible_filter())
         fitted = self._fit_pool(physical, dense, pool, "too_few_unassigned", progress)
+        _refuse_if_replaced(owner_created_at, created)
         # A member nearer another topic, old or new, is aligned with the rest of the pool instead.
         kept = kept_members(fitted.vectors, fitted.labels, run.table.centres, min_topic_size=fitted.min_topic_size)
         fitted = replace(fitted, labels=kept)
@@ -687,20 +697,35 @@ class TopicsService:
         saved = self._save_seen(physical, run, table, job)
         return TopicsOutcome("discover", run_id, len(saved.table.topics), len(mapping), assigned, empty=False)
 
-    def _align(self, physical: str, dense: DenseVector, run: TopicRun, progress: Progress, job: _Job) -> TopicsOutcome:
+    def _align(
+        self,
+        physical: str,
+        dense: DenseVector,
+        run: TopicRun,
+        created: str | None,
+        owner_created_at: Callable[[], str | None],
+        progress: Progress,
+        job: _Job,
+    ) -> TopicsOutcome:
         """Place every pending point in the active run and store the seen ranges.
 
         Args:
             physical: Physical collection name.
             dense: The collection's dense vector.
             run: The active run.
+            created: The ownership row's creation time when the job started.
+            owner_created_at: Reads that time again before the run is saved.
             progress: The progress channel.
             job: What the job has written.
 
         Returns:
             The outcome.
+
+        Raises:
+            TopicsRefused: ``collection_changed`` if the collection was replaced during alignment.
         """
         assigned = self._pending_loop(physical, dense, run.run_id, run.table, {}, "aligning", progress, job)
+        _refuse_if_replaced(owner_created_at, created)
         saved = self._save_seen(physical, run, run.table, job)
         return TopicsOutcome("align", run.run_id, len(saved.table.topics), 0, assigned, empty=False)
 
@@ -1124,5 +1149,5 @@ def _log_outcome(outcome: TopicsOutcome) -> None:
         outcome.topics,
         outcome.added,
         outcome.assigned,
-        outcome.deferred,
+        str(outcome.deferred).lower(),
     )

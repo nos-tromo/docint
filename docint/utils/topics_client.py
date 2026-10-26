@@ -247,17 +247,21 @@ def _validate_params(params: FitParams) -> None:
         raise ValueError("invalid topic fit settings: " + "; ".join(problems))
 
 
-def _detail_of(response: httpx.Response) -> str:
-    """Render a refusal's ``detail`` in either of its forms, cut short.
+def _detail_of(response: httpx.Response, *, api_key: str | None = None) -> str:
+    """Render a FastAPI detail or router error message, cut short.
 
     Args:
         response: The error response.
+        api_key: Configured key to redact before the detail is truncated.
 
     Returns:
         The detail text, or an empty string when there is none.
     """
     try:
-        detail = response.json().get("detail")
+        body = response.json()
+        detail = body.get("detail")
+        if detail is None and isinstance(body.get("error"), dict):
+            detail = body["error"].get("message")
     except (ValueError, AttributeError):
         return ""
     if isinstance(detail, list):
@@ -269,7 +273,10 @@ def _detail_of(response: httpx.Response) -> str:
             else:
                 parts.append(str(item))
         detail = "; ".join(parts)
-    return str(detail or "")[:_DETAIL_MAX_CHARS]
+    text = str(detail or "")
+    if api_key:
+        text = text.replace(api_key, "[redacted]")
+    return text[:_DETAIL_MAX_CHARS]
 
 
 def _retry_after_of(response: httpx.Response) -> float:
@@ -306,12 +313,18 @@ class TopicsClient:
     @property
     def fit_url(self) -> str:
         """The fit URL: the base plus :data:`FIT_PATH`, with any userinfo removed."""
-        parts = urlsplit(self._config.api_base)
-        host = parts.hostname or ""
+        try:
+            parts = urlsplit(self._config.api_base)
+            host = parts.hostname or ""
+            port = parts.port
+            if parts.scheme not in {"http", "https"} or not host:
+                raise ValueError("not an HTTP endpoint")
+        except ValueError:
+            raise TopicsEndpointError("Invalid TOPICS_API_BASE; set an HTTP or HTTPS service base URL") from None
         if ":" in host:
             host = f"[{host}]"
-        if parts.port:
-            host = f"{host}:{parts.port}"
+        if port:
+            host = f"{host}:{port}"
         return f"{parts.scheme}://{host}{parts.path.rstrip('/')}{FIT_PATH}"
 
     def _error_for(self, response: httpx.Response) -> TopicsEndpointError:
@@ -325,8 +338,10 @@ class TopicsClient:
         """
         status = response.status_code
         where = f"{self.fit_url} answered {status}"
-        detail = _detail_of(response)
+        detail = _detail_of(response, api_key=self._config.api_key)
         suffix = f": {detail}" if detail else ""
+        if status == 408:
+            return TopicsUnreachable(f"{where}: the upload timed out; {_UNREACHABLE_REMEDY}")
         if status == 503:
             retry_after = _retry_after_of(response)
             return TopicsBusy(f"{where}: another fit is running; retry in {retry_after:g}s", retry_after)
@@ -339,6 +354,14 @@ class TopicsClient:
         if status == 404:
             remedy = "TOPICS_API_BASE must name the router or the topics-only service, with no path"
             return TopicsRejected(f"{where}; {remedy}", status)
+        if status == 400:
+            try:
+                error = response.json().get("error")
+            except (ValueError, AttributeError):
+                error = None
+            if isinstance(error, dict) and error.get("type") == "no_db_connection":
+                remedy = "check TOPICS_API_KEY and TOPICS_API_BASE: the router could not authenticate the key"
+                return TopicsRejected(f"{where}; {remedy}", status)
         if status in (400, 422):
             return TopicsRejected(f"{where}{suffix}", status)
         return TopicsEndpointError(f"{where}{suffix}")
@@ -443,7 +466,7 @@ class TopicsClient:
         try:
             with httpx.Client(timeout=self._config.timeout, headers=headers, transport=self._transport) as client:
                 response = client.post(self.fit_url, files=files)
-        except httpx.TransportError as exc:
+        except httpx.HTTPError as exc:
             raise TopicsUnreachable(
                 f"{self.fit_url} could not be reached ({type(exc).__name__}); {_UNREACHABLE_REMEDY}"
             ) from None

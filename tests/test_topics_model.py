@@ -353,3 +353,11 @@ def test_kept_members_leave_their_inputs_unchanged() -> None:
     assert kept_members(vectors, labels, existing, min_topic_size=2).tolist() == [-1, -1, -1, -1]
     for original, now in zip(before, (vectors, labels, existing), strict=True):
         assert np.array_equal(original, now)
+
+
+def test_kept_members_preserve_assignments_across_scoring_pages() -> None:
+    """A large sample keeps the same members and tie rule on both sides of page boundaries."""
+    existing = np.array([[1.0, 0.0]])
+    vectors = np.tile([[1.0, 1.0], [-1.0, 1.0], [0.0, 1.0]], (400, 1))
+    labels = np.full(len(vectors), 7)
+    assert kept_members(vectors, labels, existing, min_topic_size=2).tolist() == [-1, 7, 7] * 400

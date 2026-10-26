@@ -23,7 +23,7 @@ actions work on it, each as a background job:
 |---|---|---|
 | `build` | Samples the collection, fits a new run, assigns every eligible chunk to it, activates it and deletes every other run. | The sample is too small (`too_few_chunks`), or the collection was deleted and created again while the build ran (`collection_changed`). |
 | `discover` | Fits the active run's unassigned chunks and appends the topics that are new. Existing topics are untouched. | There is no active run (`no_run`), the dense vectors changed size since the build (`dimension_changed`), too few chunks are unassigned (`too_few_unassigned`), or the collection was deleted and created again while the discover ran (`collection_changed`). |
-| `align` | Assigns every eligible chunk the active run has not placed yet: chunks ingested since, or left behind by an interrupted job. | `no_run` or `dimension_changed`, as for discover. |
+| `align` | Assigns every eligible chunk the active run has not placed yet: chunks ingested since, or left behind by an interrupted job. | `no_run`, `dimension_changed` or `collection_changed`, as for discover. |
 
 A refusal is not a failure: the job completes with `empty: true` and a warning
 carrying the code (see [Jobs and events](#jobs-and-events)).
@@ -273,7 +273,7 @@ finishes that fit before it takes another.
 
 | Code | What it means |
 |---|---|
-| `topics_unreachable` | The service could not be reached, or did not answer within `TOPICS_TIMEOUT`. |
+| `topics_unreachable` | The service could not be reached, the upload timed out (HTTP 408), or it did not answer within `TOPICS_TIMEOUT`. |
 | `topics_busy` | The service stayed busy with another fit through every retry. |
 | `topics_too_large` | The service refused a sample this large. Lower `TOPICS_FIT_MAX_POINTS`. |
 | `topics_rejected` | The service refused the request otherwise, for example for a missing or wrong `TOPICS_API_KEY` on the router, or a `TOPICS_API_BASE` that names no fit service. |
@@ -283,6 +283,9 @@ finishes that fit before it takes another.
 The warning names no endpoint. The backend's log line for the failed job
 carries the full error, which names the fit URL (without credentials) and, for
 a configuration fault, the setting to change; the CLI prints the same message.
+The router's HTTP 400 `no_db_connection` authentication error names
+`TOPICS_API_KEY` and `TOPICS_API_BASE` as settings to check, without echoing
+the rejected key.
 
 ## Determinism
 
@@ -353,7 +356,7 @@ Warning codes:
 | `too_few_unassigned` | completes, `empty` | Too few unassigned chunks to look for new topics. |
 | `no_run` | completes, `empty` | There is no active run to discover on or align. |
 | `dimension_changed` | completes, `empty` | The dense vectors changed size since the build; rebuild. |
-| `collection_changed` | completes, `empty` | The collection was replaced while a build or discover ran. |
+| `collection_changed` | completes, `empty` | The collection was replaced while a build, discover or align ran. |
 | `none_found` | completes, `empty` | The fit found no topics; the current run stays. |
 | `none_new` | completes, `empty` | No pool topic was new; the unassigned chunks stay unassigned. |
 | `topics_unreachable` … `topics_failed` | fails | An endpoint fault (see [The fit service](#the-fit-service)). |

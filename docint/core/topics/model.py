@@ -14,6 +14,7 @@ from typing import Any, Literal
 import numpy as np
 
 Origin = Literal["build", "discover"]
+_ALIGN_BATCH_ROWS = 256
 
 
 @dataclass(frozen=True)
@@ -335,13 +336,16 @@ def kept_members(vectors: np.ndarray, labels: np.ndarray, existing: np.ndarray, 
     topic_ids = np.unique(given[given >= 0])
     if not topic_ids.size:
         return out
-    units = unit_rows(vectors)
     provisional = centres_for(vectors, given, topic_ids.tolist())
-    centres = np.vstack([np.asarray(existing, dtype=np.float64).reshape(-1, units.shape[1]), provisional])
-    nearest = (units @ centres.T).argmax(axis=1)
+    centres = np.vstack([np.asarray(existing, dtype=np.float64).reshape(-1, vectors.shape[1]), provisional])
     # The row of each member's own provisional centre.
     own = centres.shape[0] - topic_ids.size + np.searchsorted(topic_ids, given)
-    out[(given >= 0) & (nearest != own)] = -1
+    # Bound the score matrix even when many topics meet a large sample.
+    for start in range(0, given.size, _ALIGN_BATCH_ROWS):
+        stop = start + _ALIGN_BATCH_ROWS
+        nearest = (unit_rows(vectors[start:stop]) @ centres.T).argmax(axis=1)
+        page = out[start:stop]
+        page[(given[start:stop] >= 0) & (nearest != own[start:stop])] = -1
     for tid in topic_ids:
         members = out == tid
         if np.count_nonzero(members) < min_topic_size:

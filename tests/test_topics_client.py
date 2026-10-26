@@ -297,6 +297,76 @@ def test_a_server_error_is_a_plain_endpoint_error() -> None:
     assert info.value.code == "topics_failed"
 
 
+def test_upload_timeout_names_the_network_and_timeout_settings() -> None:
+    """An HTTP upload deadline is an unreachable service, with the same remedy as a transport timeout."""
+    client = _client(lambda request: httpx.Response(408))
+    with pytest.raises(TopicsUnreachable) as caught:
+        client.fit(TEXTS, _vectors(), PARAMS)
+    assert "TOPICS_API_BASE" in str(caught.value)
+    assert "TOPICS_TIMEOUT" in str(caught.value)
+
+
+def test_router_auth_failure_names_the_key_without_echoing_it() -> None:
+    """The router's no-db auth error names configuration settings without echoing credentials."""
+    body = {"error": {"message": "No connected db. Invalid token synthetic-secret", "type": "no_db_connection"}}
+    client = _client(lambda request: httpx.Response(400, json=body), key="synthetic-secret")
+    with pytest.raises(TopicsRejected) as caught:
+        client.fit(TEXTS, _vectors(), PARAMS)
+    assert "TOPICS_API_KEY" in str(caught.value)
+    assert "TOPICS_API_BASE" in str(caught.value)
+    assert "synthetic-secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("prefix", ["bad sample ", "x" * 295])
+def test_router_message_is_bounded_and_redacts_the_configured_key(prefix: str) -> None:
+    """Router error.message details are useful diagnostics but never echo the configured key.
+
+    Args:
+        prefix: Text before the key, possibly placing it across the truncation boundary.
+    """
+    body = {"error": {"message": prefix + "synthetic-secret " + "x" * 500}}
+    client = _client(lambda request: httpx.Response(422, json=body), key="synthetic-secret")
+    with pytest.raises(TopicsRejected) as caught:
+        client.fit(TEXTS, _vectors(), PARAMS)
+    assert prefix in str(caught.value)
+    assert "synthetic" not in str(caught.value)
+    assert len(str(caught.value)) < 450
+
+
+@pytest.mark.parametrize("base", ["topics-only:8000", "http://topics-only:bad", "http://", "ftp://topics-only"])
+def test_invalid_base_is_a_configuration_error(base: str) -> None:
+    """A malformed endpoint is a coded configuration fault before any request.
+
+    Args:
+        base: The malformed base URL.
+    """
+    with pytest.raises(TopicsEndpointError, match="TOPICS_API_BASE"):
+        _client(lambda request: pytest.fail("request sent"), base=base).fit(TEXTS, _vectors(), PARAMS)
+
+
+@pytest.mark.parametrize("error", [httpx.DecodingError, httpx.TooManyRedirects])
+def test_other_http_errors_are_coded_endpoint_errors(error: type[httpx.HTTPError]) -> None:
+    """HTTP-layer failures cannot escape as uncoded job errors.
+
+    Args:
+        error: HTTP exception to raise from the mock transport.
+    """
+
+    def failing(request: httpx.Request) -> httpx.Response:
+        """Raise the scripted HTTP failure.
+
+        Args:
+            request: The attempted request.
+
+        Raises:
+            httpx.HTTPError: The scripted failure.
+        """
+        raise error("synthetic failure")
+
+    with pytest.raises(TopicsEndpointError):
+        _client(failing).fit(TEXTS, _vectors(), PARAMS)
+
+
 @pytest.mark.parametrize(
     "body",
     [

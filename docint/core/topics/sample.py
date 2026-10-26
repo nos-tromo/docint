@@ -64,7 +64,7 @@ def fit_text(text: str) -> str:
         spaces, stripped and cut to ``TEXT_CHARS``.
     """
     kept = "".join(c for c in text if c.isspace() or unicodedata.category(c) != "Cc")
-    return " ".join(kept.split())[:TEXT_CHARS]
+    return " ".join(kept.split())[:TEXT_CHARS].rstrip()
 
 
 @dataclass(frozen=True)
