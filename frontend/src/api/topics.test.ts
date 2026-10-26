@@ -80,6 +80,15 @@ describe('topics API', () => {
     await expect(getTopics('docs')).resolves.toBeNull()
   })
 
+  it('pins detail reads to the run shown in the overview', async () => {
+    mockFetch(200, {})
+    const runId = OVERVIEW.run_id
+    await getTopicEvidence('docs', 3, runId)
+    await getTopicDocuments('docs', 3, runId)
+    await getTopicChunksPage({ collection: 'docs', topicId: 3, cursor: null, runId })
+    expect(requests().map(({ url }) => url.searchParams.get('run_id'))).toEqual([runId, runId, runId])
+  })
+
   it('returns the overview of a collection that has a run', async () => {
     mockFetch(200, OVERVIEW)
     await expect(getTopics('docs')).resolves.toEqual(OVERVIEW)

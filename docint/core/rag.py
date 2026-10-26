@@ -8896,7 +8896,13 @@ class RAG:
             """
             if request_filter is not None:
                 return _filtered_listing(request_filter)
-            overview = self.topics_overview(collection)
+            overview = topic_views.overview(
+                self.qdrant_client,
+                run,
+                collection,
+                embed_model=self.embed_model_id or "",
+                ensure_indexes=self._ensure_topic_indexes_once,
+            )
             if overview is None:
                 return TopicsListing(lines=(), total=0)
             lines = tuple(
@@ -11285,19 +11291,22 @@ class RAG:
             ensure_indexes=self._ensure_topic_indexes_once,
         )
 
-    def topic_evidence(self, physical: str, topic_id: int, *, limit: int) -> list[dict[str, Any]] | None:
+    def topic_evidence(
+        self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
+    ) -> list[dict[str, Any]] | None:
         """Return one topic's members nearest its centre, as sources.
 
         Args:
             physical (str): Physical collection name.
             topic_id (int): Topic id.
             limit (int): Most passages.
+            run_id (str | None): Expected active run; a different run reads as absent.
 
         Returns:
             list[dict[str, Any]] | None: Sources, closest first; ``None`` without the run or the topic.
         """
         run = self._active_topic_run(physical)
-        if run is None:
+        if run is None or (run_id is not None and run.run_id != run_id):
             return None
         self._ensure_topic_indexes_once(physical)
         return topic_views.evidence(
@@ -11310,19 +11319,22 @@ class RAG:
             source_of=self._topic_source_of(physical),
         )
 
-    def topic_documents(self, physical: str, topic_id: int, *, limit: int) -> dict[str, Any] | None:
+    def topic_documents(
+        self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Count one topic's members per source file.
 
         Args:
             physical (str): Physical collection name.
             topic_id (int): Topic id.
             limit (int): Most files.
+            run_id (str | None): Expected active run; a different run reads as absent.
 
         Returns:
             dict[str, Any] | None: ``{"documents", "more"}``; ``None`` without the run or the topic.
         """
         run = self._active_topic_run(physical)
-        if run is None:
+        if run is None or (run_id is not None and run.run_id != run_id):
             return None
         self._ensure_topic_indexes_once(physical)
         return topic_views.documents(
@@ -11334,7 +11346,9 @@ class RAG:
             names=lambda: self._document_names(physical),
         )
 
-    def topic_chunks(self, physical: str, topic_id: int, *, cursor: str | None, limit: int) -> dict[str, Any] | None:
+    def topic_chunks(
+        self, physical: str, topic_id: int, *, cursor: str | None, limit: int, run_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Read one page of a topic's members, as sources.
 
         Args:
@@ -11342,12 +11356,13 @@ class RAG:
             topic_id (int): Topic id.
             cursor (str | None): The previous page's cursor.
             limit (int): Page size.
+            run_id (str | None): Expected active run; a different run reads as absent.
 
         Returns:
             dict[str, Any] | None: ``{"items", "next_cursor"}``; ``None`` without the run or the topic.
         """
         run = self._active_topic_run(physical)
-        if run is None:
+        if run is None or (run_id is not None and run.run_id != run_id):
             return None
         self._ensure_topic_indexes_once(physical)
         return topic_views.chunks(

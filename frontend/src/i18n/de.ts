@@ -139,7 +139,7 @@ export const de: Strings = {
   'chat.topic_focus': 'Themenfilter',
   'chat.topic_focus_applied': 'Auf Antworten und Suchen angewendet.',
   'chat.topic_focus_stale': 'Aus einer früheren Erstellung; nicht angewendet.',
-  'chat.topic_focus_scoped': 'Nur für Suchen, solange Abschnitte ausgewählt sind.',
+  'chat.topic_focus_scoped': 'Nur auf Suchen angewendet; Antworten nutzen die ausgewählten Abschnitte.',
   'chat.topic_focus_not_visual': 'Nicht auf Antworten aus Bildern angewendet.',
   'chat.topic_focus_remove': 'Themenfilter entfernen',
   'chat.visual_source_type': 'Art des Bildes',

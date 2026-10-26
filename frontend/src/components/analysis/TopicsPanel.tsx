@@ -133,7 +133,7 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
 
   // A job's outcome shows if it was started here or watched live on this page, never one only
   // replayed on a connect; progress shows for any running job, and a new start hides the last outcome.
-  const current = !awaiting && job.jobId !== null && (job.jobId === startedJobId || job.live)
+  const current = !awaiting && !start.isError && job.jobId !== null && (job.jobId === startedJobId || job.live)
   const failed = current && job.error !== null
   const warningKeys = current
     ? [...new Set(job.warnings.map((w) => WARNING_KEYS.get(w.code) ?? 'topics.warning_generic'))]

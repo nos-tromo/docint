@@ -423,3 +423,26 @@ def test_rag_topic_sources_never_name_the_physical_collection(tmp_path: Path, mo
     assert evidence[0]["file_hash"] == "hash-1"
     assert physical not in json.dumps([evidence, page])
     client.close()
+
+
+def test_rag_topic_reads_refuse_an_inactive_run(
+    client: QdrantClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuilt topic number cannot supply evidence under the previous run's label.
+
+    Args:
+        client: Qdrant client.
+        tmp_path: Per-test directory.
+        monkeypatch: Pytest monkeypatch.
+    """
+    root = tmp_path / "topics"
+    old = _build(client, root)
+    current = _build(client, root)
+    assert current.run_id != old.run_id
+    rag = _rag(client, root, monkeypatch, CREATED)
+    assert rag.topic_evidence(COLL, 1, limit=3, run_id=old.run_id) is None
+    assert rag.topic_documents(COLL, 1, limit=5, run_id=old.run_id) is None
+    assert rag.topic_chunks(COLL, 1, cursor=None, limit=5, run_id=old.run_id) is None
+    assert rag.topic_evidence(COLL, 1, limit=3, run_id=current.run_id)
+    assert rag.topic_documents(COLL, 1, limit=5, run_id=current.run_id)
+    assert rag.topic_chunks(COLL, 1, cursor=None, limit=5, run_id=current.run_id)

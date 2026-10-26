@@ -101,28 +101,32 @@ export function startTopics(
 /** A topic's passages nearest its centre. */
 export function getTopicEvidence(
   collection: string,
-  topicId: number
+  topicId: number,
+  runId?: string
 ): Promise<{ topic: number; sources: Source[] }> {
-  return apiGet(`${topicsPath(collection)}/${topicId}/evidence`)
+  return apiGet(`${topicsPath(collection)}/${topicId}/evidence`, { run_id: runId })
 }
 
 /** The source files a topic's chunks come from, largest first; `more` when the list was cut. */
 export function getTopicDocuments(
   collection: string,
-  topicId: number
+  topicId: number,
+  runId?: string
 ): Promise<{ documents: TopicDocument[]; more: boolean }> {
-  return apiGet(`${topicsPath(collection)}/${topicId}/documents`)
+  return apiGet(`${topicsPath(collection)}/${topicId}/documents`, { run_id: runId })
 }
 
 /** One page of a topic's chunks. */
 export function getTopicChunksPage(args: {
   collection: string
   topicId: number
+  runId?: string
   cursor: string | null
   limit?: number
 }): Promise<Page<Source>> {
   return apiGet(`${topicsPath(args.collection)}/${args.topicId}/chunks`, {
     cursor: args.cursor ?? undefined,
-    limit: args.limit ?? 50
+    limit: args.limit ?? 50,
+    run_id: args.runId
   })
 }

@@ -6367,6 +6367,7 @@ def get_topic_evidence(
     name: str,
     topic_id: int,
     limit: int = Query(default=5, ge=1, le=20),
+    run_id: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return a topic's passages nearest its centre.
@@ -6375,6 +6376,7 @@ def get_topic_evidence(
         name (str): The caller's logical collection name.
         topic_id (int): Topic id.
         limit (int): Most passages (1-20).
+        run_id (str | None): Expected active run; a mismatch returns 404.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -6387,7 +6389,7 @@ def get_topic_evidence(
     _require_topics_enabled()
     physical = _require_owned_collection(name, principal)
     try:
-        sources = rag.topic_evidence(physical, topic_id, limit=limit)
+        sources = rag.topic_evidence(physical, topic_id, limit=limit, run_id=run_id)
     except Exception as e:
         logger.exception("Reading the evidence of topic {} of '{}' failed", topic_id, name)
         raise HTTPException(status_code=500, detail="Request failed.") from e
@@ -6401,6 +6403,7 @@ def get_topic_documents(
     name: str,
     topic_id: int,
     limit: int = Query(default=50, ge=1, le=500),
+    run_id: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, Any]:
     """Count a topic's passages per source file.
@@ -6409,6 +6412,7 @@ def get_topic_documents(
         name (str): The caller's logical collection name.
         topic_id (int): Topic id.
         limit (int): Most files (1-500).
+        run_id (str | None): Expected active run; a mismatch returns 404.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -6421,7 +6425,7 @@ def get_topic_documents(
     _require_topics_enabled()
     physical = _require_owned_collection(name, principal)
     try:
-        result = rag.topic_documents(physical, topic_id, limit=limit)
+        result = rag.topic_documents(physical, topic_id, limit=limit, run_id=run_id)
     except Exception as e:
         logger.exception("Reading the documents of topic {} of '{}' failed", topic_id, name)
         raise HTTPException(status_code=500, detail="Request failed.") from e
@@ -6436,6 +6440,7 @@ def get_topic_chunks(
     topic_id: int,
     cursor: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    run_id: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, Any]:
     """Read one page of a topic's passages.
@@ -6445,6 +6450,7 @@ def get_topic_chunks(
         topic_id (int): Topic id.
         cursor (str | None): The previous page's ``next_cursor``.
         limit (int): Page size (1-200).
+        run_id (str | None): Expected active run; a mismatch returns 404.
         principal (Principal): The resolved request principal.
 
     Returns:
@@ -6458,7 +6464,7 @@ def get_topic_chunks(
     _require_topics_enabled()
     physical = _require_owned_collection(name, principal)
     try:
-        page = rag.topic_chunks(physical, topic_id, cursor=cursor, limit=limit)
+        page = rag.topic_chunks(physical, topic_id, cursor=cursor, limit=limit, run_id=run_id)
     except InvalidCursorError as e:
         raise HTTPException(status_code=400, detail="Invalid request.") from e
     except Exception as e:

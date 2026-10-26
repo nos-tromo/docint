@@ -67,7 +67,7 @@ export function useTopicEvidence(runId: string, topicId: number, enabled: boolea
   const { collection } = scope
   return useQuery({
     queryKey: ['topics', scope, runId, 'evidence', topicId],
-    queryFn: () => getTopicEvidence(collection ?? '', topicId),
+    queryFn: () => getTopicEvidence(collection ?? '', topicId, runId),
     enabled: !!collection && enabled
   })
 }
@@ -78,7 +78,7 @@ export function useTopicDocuments(runId: string, topicId: number, enabled: boole
   const { collection } = scope
   return useQuery({
     queryKey: ['topics', scope, runId, 'documents', topicId],
-    queryFn: () => getTopicDocuments(collection ?? '', topicId),
+    queryFn: () => getTopicDocuments(collection ?? '', topicId, runId),
     enabled: !!collection && enabled
   })
 }
@@ -90,7 +90,7 @@ export function useTopicChunks(runId: string, topicId: number, enabled: boolean)
   return useInfiniteQuery({
     queryKey: ['topics', scope, runId, 'chunks', topicId],
     queryFn: ({ pageParam }) =>
-      getTopicChunksPage({ collection: collection ?? '', topicId, cursor: pageParam as string | null }),
+      getTopicChunksPage({ collection: collection ?? '', topicId, runId, cursor: pageParam as string | null }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,
     enabled: !!collection && enabled

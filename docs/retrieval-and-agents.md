@@ -1219,8 +1219,10 @@ A turn's topic listings reach the validator the same way, as topic checks
 under their own heading after the keyword checks: one line per topic a listing
 showed (`- T3 "<label>": 640 of 4000 chunks (16.0%)`), ending in
 `; within the turn's filters` when the listing counted under them, whole lines
-within 800 characters. Both validator prompts accept a statement of how many
-chunks a topic holds, or of its share, when a listed check gives it. A check
+within 3000 characters, matching the listing's maximum reply budget. An empty
+listing supplies a check that no topic covers the counted chunks. Both
+validator prompts accept a statement of how many chunks a topic holds, or of
+its share, when a listed check gives that count or share. A check
 marked `within the turn's filters` counted only the chunks the filters select,
 so it grounds a share of those chunks, never of the whole collection. An answer
 that cites no passage beside topic checks is validated against the checks, as

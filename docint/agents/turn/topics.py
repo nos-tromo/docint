@@ -28,6 +28,7 @@ from typing import Any
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
+from docint.agents.turn.budget import RESULT_CHARS
 from docint.agents.turn.tools import ToolContext, ToolReply, ToolWork, error_reply, passage_reply, trail_detail
 
 TOPICS_DESCRIPTION = (
@@ -52,7 +53,7 @@ LISTED_AGAIN = "The topics are already listed above; pass topic=T<n> to read one
 #: What a listing counted under the turn's filters says in its count line, and its topic checks end in.
 FILTERED_MARK = "within the turn's filters"
 #: Characters the topic checks may take in the validator's prompt; whole lines only.
-TOPIC_CHECKS_CHARS = 800
+TOPIC_CHECKS_CHARS = RESULT_CHARS
 
 #: A topic id as a listing writes it, ``T12``, in either case, or as the bare number.
 _TOPIC_REF_RE = re.compile(r"\s*[Tt]?(\d{1,9})\s*")
@@ -275,8 +276,8 @@ def render_topic_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: int)
 
     Returns:
         str: One ``- T<id> "label": size of total chunks (share%)`` line per topic shown, ending in
-        ``; within the turn's filters`` when the listing counted under them; empty when no listing
-        showed a topic.
+        ``; within the turn's filters`` when the listing counted under them. An empty listing
+        contributes one line stating that no topic covers the counted chunks.
     """
     lines: list[str] = []
     used = 0
@@ -285,6 +286,13 @@ def render_topic_checks(actions: Sequence[Mapping[str, Any]], *, max_chars: int)
         if action.get("action") != "topics" or not isinstance(listed, list) or type(total) is not int:
             continue
         within = f"; {FILTERED_MARK}" if action.get("filtered") is True else ""
+        if not listed and action.get("empty") is True:
+            line = f"- No topics cover any of {total} chunks{within}."
+            cost = len(line) + (1 if lines else 0)
+            if used + cost > max_chars:
+                return "\n".join(lines)
+            lines.append(line)
+            used += cost
         for item in listed:
             valid = isinstance(item, (list, tuple)) and len(item) == 3
             if not valid or type(item[0]) is not int or not isinstance(item[1], str) or type(item[2]) is not int:
@@ -425,6 +433,8 @@ class TopicsTool:
             "filtered": fetched.filtered,
             "topics": [[line.topic_id, _cut_label(line.label), line.size] for line in fetched.lines[:shown]],
         }
+        if not fetched.lines:
+            trail["empty"] = True
         return ToolReply(text=text, found=0, action=self.name, detail="", informative=True, trail=trail)
 
     def _answer_topic(self, topic_id: int, fetched: TopicPassages | None, ctx: ToolContext) -> ToolReply:

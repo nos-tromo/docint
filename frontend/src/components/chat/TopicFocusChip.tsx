@@ -26,7 +26,7 @@ import { useT } from '@/i18n/LanguageContext'
 export function TopicFocusChip() {
   const scope = useActiveCollection()
   const focus = useTopicFocusStore((s) => s.focus)
-  if (!focusInScope(focus, scope)) return null
+  if (!focus || !focusInScope(focus, scope)) return null
   return <FocusChip focus={focus} scope={scope} />
 }
 

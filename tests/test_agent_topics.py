@@ -498,3 +498,28 @@ def test_without_a_listing_there_are_no_topic_checks() -> None:
 
     assert render_topic_checks(actions, max_chars=TOPIC_CHECKS_CHARS) == ""
     assert render_topic_checks([], max_chars=TOPIC_CHECKS_CHARS) == ""
+
+
+def test_an_empty_filtered_listing_still_grounds_the_validator() -> None:
+    """A listing with no matching topics supplies a zero-coverage check without inventing a topic."""
+    source = _Source(TopicsListing(lines=(), total=12, filtered=True))
+    registry = ToolRegistry([TopicsTool(source.source())])
+    reply = registry.call(tool_call("topics"), tool_context())
+    assert reply.trail is not None
+    step = {"action": "topics", **reply.trail}
+    assert render_topic_checks([step], max_chars=TOPIC_CHECKS_CHARS) == (
+        f"- No topics cover any of 12 chunks; {FILTERED_MARK}."
+    )
+    assert render_topic_checks([step], max_chars=5) == ""
+    assert render_topic_checks([_listing_step(topics=[])], max_chars=TOPIC_CHECKS_CHARS) == ""
+
+
+def test_checks_cover_every_topic_the_listing_shows() -> None:
+    """A full listing can be validated through its final topic rather than stopping at the old 800-char cap."""
+    lines = tuple(TopicLine(i, f"Synthetic topic {i}", ("port",), 1) for i in range(40))
+    source = _Source(TopicsListing(lines=lines, total=40))
+    registry = ToolRegistry([TopicsTool(source.source())])
+    reply = registry.call(tool_call("topics"), tool_context())
+    assert reply.trail is not None
+    checks = render_topic_checks([{"action": "topics", **reply.trail}], max_chars=TOPIC_CHECKS_CHARS)
+    assert len(checks.splitlines()) == len(reply.trail["topics"])

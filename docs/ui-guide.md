@@ -388,8 +388,8 @@ passages**, 50 at a time; the three are read only while the row is open. **Ask
 in chat** sets the chat's topic focus (see [Chat](#chat-srcrouteschattsx)) and
 opens Chat.
 
-The tab shows a job's outcome (its warnings, its error, that it finished) only
-for the collection's newest topics job, and only when this tab started it or
+The tab shows warnings or errors for the collection's newest topics job
+only when this tab started it or
 watched it live. A job counts as watched live once any of its frames arrives
 1000 ms or more after its started frame, and stays so for the page session
 (`liveJobs` in `src/stores/ingestJobs.ts`). A replayed history arrives within

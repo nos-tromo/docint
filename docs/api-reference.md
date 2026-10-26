@@ -846,7 +846,10 @@ off, every route here answers `404`.
 | `GET /collections/{name}/topics/{topic_id}/chunks` | `{"items", "next_cursor"}`: one page of the topic's chunks. `limit` 1–200, default 50; pass `next_cursor` back as `cursor`. `400` for a malformed cursor. |
 
 A topic the active run lacks answers `404`, and so does `-1`: unassigned chunks
-are counted, never listed. A run built before the collection was deleted and
+are counted, never listed. Each detail route accepts an optional `run_id`;
+it returns `404` if that run is no longer active. The SPA sends the overview's
+run id so a rebuild cannot put a new topic's passages under an older label.
+A run built before the collection was deleted and
 created again is no usable run. Each entry of `sources` and `items` is shaped
 like a chat source, without `preview_url`, `document_url` and
 `image_collection`, which would name the physical collection.

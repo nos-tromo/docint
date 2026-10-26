@@ -3700,20 +3700,24 @@ def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = Fa
     run = _topic_run(empty=empty)
     seen = _TopicReads()
 
-    def _overview_read(physical: str) -> dict[str, Any]:
+    def _overview_read(client: Any, captured: TopicRun, physical: str, **kwargs: Any) -> dict[str, Any]:
         """Count an overview read and describe the run.
 
         Args:
+            client (Any): The Qdrant client.
+            captured (TopicRun): The run captured when the turn was built.
             physical (str): The collection.
+            **kwargs (Any): Overview configuration.
 
         Returns:
             dict[str, Any]: The overview.
         """
         seen.overviews += 1
+        assert captured is run
         return _overview()
 
     monkeypatch.setattr(rag, "_active_topic_run", lambda physical: run)
-    monkeypatch.setattr(rag, "topics_overview", _overview_read)
+    monkeypatch.setattr("docint.core.rag.topic_views.overview", _overview_read)
     monkeypatch.setattr(
         rag, "_ensure_topic_indexes_once", lambda collection: seen.events.append(f"ensure:{collection}")
     )
@@ -3782,6 +3786,23 @@ def test_the_topics_tool_is_offered_only_with_an_active_run(
         "T1 · Regatta am Sonntag · hafenfest, stände, musik · 20 chunks (40.0%)",
     ]
     assert (seen.overviews, seen.events) == (1, [])
+
+
+def test_a_listing_uses_the_run_captured_before_a_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn cannot list a rebuilt run while its passages still refer to the captured one.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pytest monkeypatch.
+    """
+    rag = _rag(monkeypatch)
+    seen = _topics_ready(monkeypatch, rag)
+    turn = _turn(rag)
+    monkeypatch.setattr(rag, "_active_topic_run", lambda physical: pytest.fail("active run re-read"))
+    registry = turn.loop._registry
+    registry.call(tool_call("topics"), _ctx(turn))
+    registry.call(tool_call("topics", topic="T0"), _ctx(turn))
+    assert seen.overviews == 1
+    assert seen.reads[0]["run_id"] == TOPIC_RUN_ID
 
 
 def test_a_filtered_listing_counts_within_the_turns_filter(monkeypatch: pytest.MonkeyPatch) -> None:

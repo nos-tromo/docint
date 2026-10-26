@@ -140,11 +140,11 @@ describe('TopicFocusChip', () => {
 
     // A scoped answer comes from the selected chunks alone, whatever its filters say.
     const group = await screen.findByRole('group', { name: 'Topic filter' })
-    expect(group).toHaveTextContent('Searches only while chunks are selected.')
+    expect(group).toHaveTextContent('Applied to searches only; answers use the selected chunks.')
     expect(group).not.toHaveAttribute('data-applied')
     // Ahead of the target, which a scope outranks too.
     act(() => useChatFiltersStore.getState().setRetrievalTarget('visual'))
-    expect(chip()).toHaveTextContent('Searches only while chunks are selected.')
+    expect(chip()).toHaveTextContent('Applied to searches only; answers use the selected chunks.')
     // Behind an earlier build, which is applied to nothing.
     act(() =>
       useTopicFocusStore

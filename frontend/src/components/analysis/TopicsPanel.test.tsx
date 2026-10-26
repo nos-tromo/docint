@@ -603,6 +603,9 @@ describe('TopicsPanel', () => {
 
   it('says a start that could not be queued failed, in catalog words', async () => {
     stubApi({ post: async () => ({ status: 500, body: { detail: 'Backend prose that is not for display.' } }) })
+    deliver('job-old', 'topics_started', { collection: COLLECTION, action: 'discover' }, 0)
+    deliver('job-old', 'warning', { code: 'none_new', message: 'x' }, 1500)
+    deliver('job-old', 'topics_completed', { collection: COLLECTION, empty: true }, 1600)
     renderPanel()
     await screen.findByText(/3 topics/)
 
@@ -611,6 +614,7 @@ describe('TopicsPanel', () => {
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('Something went wrong (500). Please try again or contact support.')
     expect(alert).not.toHaveTextContent('Backend prose')
+    expect(screen.queryByText('No new topics were found; the unassigned chunks stay unassigned.')).not.toBeInTheDocument()
     expect(screen.queryByText('Starting the topics run…')).not.toBeInTheDocument()
     expect(header.discover()).toBeEnabled()
   })

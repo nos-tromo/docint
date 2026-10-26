@@ -180,13 +180,16 @@ class _TopicsRAG:
             raise self.overview_error
         return self.overview
 
-    def topic_evidence(self, physical: str, topic_id: int, *, limit: int) -> list[dict[str, Any]] | None:
+    def topic_evidence(
+        self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
+    ) -> list[dict[str, Any]] | None:
         """Return the scripted evidence.
 
         Args:
             physical: Physical collection name.
             topic_id: Topic id.
             limit: Most passages.
+            run_id: Expected run id.
 
         Returns:
             The evidence.
@@ -194,13 +197,16 @@ class _TopicsRAG:
         self.reads.append(("evidence", physical, topic_id))
         return self.evidence
 
-    def topic_documents(self, physical: str, topic_id: int, *, limit: int) -> dict[str, Any] | None:
+    def topic_documents(
+        self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Return the scripted documents.
 
         Args:
             physical: Physical collection name.
             topic_id: Topic id.
             limit: Most documents.
+            run_id: Expected run id.
 
         Returns:
             The documents.
@@ -208,7 +214,9 @@ class _TopicsRAG:
         self.reads.append(("documents", physical, topic_id))
         return self.documents
 
-    def topic_chunks(self, physical: str, topic_id: int, *, cursor: str | None, limit: int) -> dict[str, Any] | None:
+    def topic_chunks(
+        self, physical: str, topic_id: int, *, cursor: str | None, limit: int, run_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Return the scripted page, refusing a cursor that says ``bad``.
 
         Args:
@@ -216,6 +224,7 @@ class _TopicsRAG:
             topic_id: Topic id.
             cursor: Page cursor.
             limit: Page size.
+            run_id: Expected run id.
 
         Returns:
             The page.
@@ -384,6 +393,28 @@ def test_the_topics_routes_exist() -> None:
         ("GET", f"{PREFIX}/{{topic_id}}/evidence"),
         ("POST", PREFIX),
     ]
+
+
+def test_topics_routes_honor_admin_owner_context(client: TestClient, fake: _TopicsRAG) -> None:
+    """An admin can read and build another owner's topics; an ordinary caller remains in their own namespace.
+
+    Args:
+        client: The HTTP client.
+        fake: The RAG stand-in with real ownership checks.
+    """
+    physical = fake._com.register("analyst-b", "shared-docs")
+    fake.overview = {"run_id": "synthetic-run"}
+    fake.evidence = []
+    fake.documents = {"documents": [], "more": False}
+    fake.chunks = {"items": [], "next_cursor": None}
+    admin = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
+    for method, path in _topics_routes():
+        url = path.replace("{name}", "shared-docs").replace("{topic_id}", "0")
+        response = client.request(method, url, params={"owner": "analyst-b"}, headers=admin)
+        assert response.status_code == (202 if method == "POST" else 200)
+        denied = client.request(method, url, params={"owner": "analyst-b"}, headers={"X-Auth-User": "analyst-a"})
+        assert denied.status_code == 404
+    assert fake.reads and all(read[1] == physical for read in fake.reads)
 
 
 def test_post_queues_a_topics_job_with_its_action(client: TestClient, fake: _TopicsRAG) -> None:
@@ -776,3 +807,26 @@ def test_the_runner_forgets_the_document_cache_after_writing(real_rag: RAG, tmp_
     assert "other" in real_rag._documents_cache
     assert pushed[0] == ("topics_progress", progress_payload("starting", 0, 0))
     assert all(event in {"topics_progress", "warning"} for event, _ in pushed)
+
+
+def test_detail_routes_refuse_a_run_replaced_by_a_rebuild(
+    client: TestClient, real_rag: RAG, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP detail reads pin a real service run and refuse the same topic number after a rebuild.
+
+    Args:
+        client: The HTTP client.
+        real_rag: The RAG with synthetic Qdrant data and a scripted remote fit.
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setattr(api_module, "_require_owned_collection", lambda name, principal: "p1")
+    first = api_module._run_topics_job(_topics_state("p1"), lambda event, payload: None)
+    old_id = first["artifact"]["run_id"]
+    second = api_module._run_topics_job(_topics_state("p1"), lambda event, payload: None)
+    run_id = second["artifact"]["run_id"]
+    assert old_id != run_id
+    for read in ("evidence", "documents", "chunks"):
+        path = f"/collections/docs/topics/0/{read}"
+        assert client.get(path, params={"run_id": old_id}).status_code == 404
+        assert client.get(path, params={"run_id": run_id}).status_code == 200
+        assert client.get(path).status_code == 200

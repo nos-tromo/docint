@@ -464,7 +464,9 @@ describe('topic reads', () => {
       expect(result.current.before.isSuccess).toBe(true)
       expect(result.current.after.isSuccess).toBe(true)
     })
-    expect(reads(fetchMock).filter((r) => r.path.endsWith('/topics/3/evidence'))).toHaveLength(2)
+    expect(
+      reads(fetchMock).filter((r) => r.path.endsWith('/topics/3/evidence')).map((r) => r.query.get('run_id'))
+    ).toEqual(['20260101-000000-aaaaaa', RUN])
     expect(
       client
         .getQueryCache()

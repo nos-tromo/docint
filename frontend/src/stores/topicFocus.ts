@@ -39,7 +39,7 @@ export const useTopicFocusStore = create<TopicFocusState>()((set) => ({
  * @param scope - The active collection and its owner.
  * @returns True when the focus belongs to that collection.
  */
-export function focusInScope(focus: TopicFocus | null, scope: CollectionScope): focus is TopicFocus {
+export function focusInScope(focus: TopicFocus | null, scope: CollectionScope): boolean {
   return focus !== null && focus.collection === scope.collection && focus.owner === scope.owner
 }
 
@@ -60,6 +60,6 @@ export function topicFocusRule(
   scope: CollectionScope,
   activeRunId: string | null
 ): MetadataFilter | null {
-  if (!focusInScope(focus, scope) || focus.runId !== activeRunId) return null
+  if (!focus || !focusInScope(focus, scope) || focus.runId !== activeRunId) return null
   return { field: TOPIC_FIELD, operator: 'eq', value: topicValue(focus.runId, focus.topicId) }
 }
