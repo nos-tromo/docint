@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, SearchIcon, WarningIcon } from '@infra/ui'
+import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, SearchIcon, Spinner, WarningIcon } from '@infra/ui'
 import type { AgentAction, AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
 import type { Strings } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -447,12 +447,22 @@ export function ChatTurn({
         {turn.assistant ? (
           <MarkdownProse text={turn.assistant} />
         ) : (
-          <div className="text-muted-foreground">{turn.done ? t('chat.no_answer') : '…'}</div>
+          <div className="text-muted-foreground">
+            {turn.done ? (
+              t('chat.no_answer')
+            ) : (
+              // Hidden because the spinner is a status of its own; the live region below announces it.
+              <span aria-hidden="true" data-testid="answer-pending" className="inline-flex py-1">
+                <Spinner className="border-border" label={t('chat.answer_pending')} />
+              </span>
+            )}
+          </div>
         )}
         {!turn.done && (
           // Mounted before the first step arrives, so a screen reader announces it; `atomic` off keeps
           // each new step from re-reading the whole list.
           <div role="status" aria-live="polite" aria-atomic="false">
+            {!turn.assistant && <span className="sr-only">{t('chat.answer_pending')}</span>}
             {turn.agentSteps && turn.agentSteps.length > 0 && (
               <TrailSteps
                 steps={turn.agentSteps}
