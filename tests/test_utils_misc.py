@@ -29,7 +29,36 @@ def test_basic_clean_normalizes_whitespace() -> None:
     """Test that basic_clean normalizes whitespace and newlines."""
     text = "Line 1\r\n\r\nLine 2\n\n\nLine 3   \n"
     cleaned = basic_clean(text)
-    assert cleaned == "Line 1\nLine 2\nLine 3"
+    assert cleaned == "Line 1\n\nLine 2\n\nLine 3"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "First paragraph.\n\nSecond paragraph.",
+            "First paragraph.\n\nSecond paragraph.",
+            id="paragraph-gap-kept",
+        ),
+        pytest.param("One.\n\n\nTwo.\n\n\n\n\nThree.", "One.\n\nTwo.\n\nThree.", id="newline-runs-collapse"),
+        pytest.param("Spaces.   \nTab.\t\nEnd.", "Spaces.\nTab.\nEnd.", id="trailing-whitespace-stripped"),
+        pytest.param("Wide   gap\t\tand \t mixed.", "Wide gap and mixed.", id="space-tab-runs-collapse"),
+        pytest.param("First.\n \t\xa0\nSecond.", "First.\n\nSecond.", id="whitespace-only-line-is-a-gap"),
+    ],
+)
+def test_basic_clean_whitespace_rules(text: str, expected: str) -> None:
+    r"""basic_clean keeps a paragraph gap as exactly one blank line.
+
+    The node parsers split paragraphs on ``\n\n``, so a gap must survive
+    cleaning as exactly that separator.
+
+    Args:
+        text: Input text.
+        expected: The cleaned text.
+    """
+    assert basic_clean(text) == expected
+    # RTF text is cleaned by its reader and again by the pipeline.
+    assert basic_clean(expected) == expected
 
 
 def test_compute_file_hash(tmp_path: Path) -> None:

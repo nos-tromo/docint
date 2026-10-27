@@ -1,6 +1,6 @@
 r"""Tests for paragraph-aware chunking in :class:`HierarchicalNodeParser`.
 
-These cover two coupled defaults that combined to squash multi-paragraph
+These cover three coupled causes that combined to squash multi-paragraph
 plain-text documents into a single fine node:
 
 1. ``fine_chunk_size`` defaulted to 8192 tokens, so any document under roughly
@@ -9,13 +9,19 @@ plain-text documents into a single fine node:
    ``paragraph_separator="\n\n\n"``, so after ``basic_clean`` (which
    collapses ``\n{3,}`` → ``\n\n``) the splitter could not see paragraph
    boundaries at all and was forced to break mid-paragraph.
+3. ``basic_clean`` stripped whitespace before newlines with ``\s+\n``, which
+   matches the newlines too, so every blank line was removed and cleaned text
+   carried no ``\n\n`` for the splitter to find.
 """
 
 from __future__ import annotations
 
+import re
+
 from llama_index.core import Document
 
 from docint.core.storage.hierarchical import HierarchicalNodeParser
+from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import load_ingestion_env
 
 # Six paragraphs each large enough to exceed the new default ``fine_chunk_size``
@@ -71,3 +77,22 @@ def test_hierarchical_parser_respects_double_newline_paragraph_breaks() -> None:
         assert "\n\n" not in body, (
             f"fine node straddles a paragraph boundary (paragraph_separator override missing?): {body[:200]!r}…"
         )
+
+
+def test_cleaned_text_keeps_paragraph_boundaries() -> None:
+    """Text cleaned by ``basic_clean`` still splits into one fine node per paragraph.
+
+    The pipeline cleans every document before parsing, so the parser only
+    sees the paragraph breaks that survive cleaning.
+    """
+    parser = HierarchicalNodeParser(
+        coarse_chunk_size=8192,
+        fine_chunk_size=500,
+        fine_chunk_overlap=0,
+    )
+
+    nodes = parser.get_nodes_from_documents([Document(text=basic_clean(_SIX_PARAGRAPH_DOC))])
+    fine_nodes = [n for n in nodes if n.metadata.get("hier.level") == 2]
+
+    headings = [re.findall(r"Paragraph \d+\.", n.get_content()) for n in fine_nodes]
+    assert headings == [[f"Paragraph {i}."] for i in range(1, 7)]
