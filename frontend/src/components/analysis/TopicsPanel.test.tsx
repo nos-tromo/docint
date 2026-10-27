@@ -601,6 +601,49 @@ describe('TopicsPanel', () => {
     expect(screen.getByRole('button', { name: 'Start analysis' })).toBeEnabled()
   })
 
+  it('says how many chunks a too-small collection has and how many topics need', async () => {
+    stubApi({ overview: null })
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' }, 0)
+    // A second after its start: a run this page watched as it went.
+    deliver('job-1', 'warning', { code: 'too_few_chunks', message: 'x', found: 5, needed: 8 }, 1000)
+    deliver('job-1', 'topics_completed', { collection: COLLECTION, empty: true })
+    renderPanel()
+
+    expect(
+      await screen.findByText('Topics need at least 8 chunks with enough text; the collection has 5.')
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('The collection has too few chunks with enough text to build topics.')
+    ).not.toBeInTheDocument()
+  })
+
+  it('counts a too-small unassigned pool in German', async () => {
+    stubApi()
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'discover' }, 0)
+    deliver('job-1', 'warning', { code: 'too_few_unassigned', message: 'x', found: 3, needed: 8 }, 1000)
+    deliver('job-1', 'topics_completed', { collection: COLLECTION, empty: true })
+    renderPanel('de')
+
+    expect(
+      await screen.findByText(
+        'Die Suche nach neuen Themen braucht mindestens 8 nicht zugeordnete Chunks mit genug Text; es gibt 3.'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('falls back to the uncounted copy when a warning carries only one count', async () => {
+    stubApi({ overview: null })
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' }, 0)
+    deliver('job-1', 'warning', { code: 'too_few_chunks', message: 'x', found: 5 }, 1000)
+    deliver('job-1', 'topics_completed', { collection: COLLECTION, empty: true })
+    renderPanel()
+
+    expect(
+      await screen.findByText('The collection has too few chunks with enough text to build topics.')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/\{found\}|\{needed\}/)).not.toBeInTheDocument()
+  })
+
   it('says a start that could not be queued failed, in catalog words', async () => {
     stubApi({ post: async () => ({ status: 500, body: { detail: 'Backend prose that is not for display.' } }) })
     deliver('job-old', 'topics_started', { collection: COLLECTION, action: 'discover' }, 0)

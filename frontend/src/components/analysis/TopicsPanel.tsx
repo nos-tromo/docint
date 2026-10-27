@@ -40,6 +40,30 @@ const WARNING_KEYS = new Map<string, keyof Strings>([
   ['topics_bad_response', 'topics.warning_topics_bad_response']
 ])
 
+/** Copy for a sample too small to fit, used once its frame says what it found and needs. */
+const COUNTED_WARNING_KEYS = new Map<string, keyof Strings>([
+  ['too_few_chunks', 'topics.warning_too_few_chunks_counted'],
+  ['too_few_unassigned', 'topics.warning_too_few_unassigned_counted']
+])
+
+type Translate = ReturnType<typeof useT>
+type JobWarning = ReturnType<typeof useTopicsJob>['warnings'][number]
+
+/**
+ * The copy for one warning a topics job carried.
+ *
+ * @param t - The translator.
+ * @param warning - The warning.
+ * @returns Its counted copy when it carries both counts, otherwise its code's own copy.
+ */
+function warningText(t: Translate, warning: JobWarning): string {
+  const counted = COUNTED_WARNING_KEYS.get(warning.code)
+  if (counted && warning.found !== undefined && warning.needed !== undefined) {
+    return t(counted, { found: warning.found, needed: warning.needed })
+  }
+  return t(WARNING_KEYS.get(warning.code) ?? 'topics.warning_generic')
+}
+
 const CSV_COLUMNS = ['id', 'label', 'size', 'share', 'keywords', 'first_seen', 'last_seen', 'origin'] as const
 
 /**
@@ -135,9 +159,7 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
   // replayed on a connect; progress shows for any running job, and a new start hides the last outcome.
   const current = !awaiting && !start.isError && job.jobId !== null && (job.jobId === startedJobId || job.live)
   const failed = current && job.error !== null
-  const warningKeys = current
-    ? [...new Set(job.warnings.map((w) => WARNING_KEYS.get(w.code) ?? 'topics.warning_generic'))]
-    : []
+  const warningTexts = current ? [...new Set(job.warnings.map((w) => warningText(t, w)))] : []
 
   const progress = job.running
     ? { stage: job.stage ?? 'starting', done: job.done, total: job.total }
@@ -244,11 +266,11 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
       )}
 
       {start.isError && <Banner variant="danger">{errorText(start.error)}</Banner>}
-      {(failed || warningKeys.length > 0) && (
+      {(failed || warningTexts.length > 0) && (
         <Banner variant={failed ? 'danger' : 'info'} className="space-y-1">
           {failed && <p className="font-medium">{t('topics.failed')}</p>}
-          {warningKeys.map((key) => (
-            <p key={key}>{t(key)}</p>
+          {warningTexts.map((text) => (
+            <p key={text}>{text}</p>
           ))}
         </Banner>
       )}

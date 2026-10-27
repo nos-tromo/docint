@@ -270,6 +270,22 @@ describe('useTopicsJob', () => {
     expect(result.current.warnings).toEqual([{ code: 'no_run', message: 'Build topics first.' }])
   })
 
+  it('keeps what a too-small sample found and needed, only when both counts arrive', () => {
+    deliver('job-1', 'topics_started', { collection: 'docs', action: 'build' })
+    deliver('job-1', 'warning', { code: 'too_few_chunks', message: 'x', found: 5, needed: 8 })
+    deliver('job-1', 'warning', { code: 'too_few_chunks', message: 'x', found: 5, needed: '8' })
+    deliver('job-1', 'warning', { code: 'too_few_chunks', message: 'x', needed: 8 })
+    deliver('job-1', 'topics_completed', { collection: 'docs', empty: true, duration_ms: 3 })
+
+    const { result } = renderHook(() => useTopicsJob(), { wrapper })
+
+    expect(result.current.warnings).toEqual([
+      { code: 'too_few_chunks', message: 'x', found: 5, needed: 8 },
+      { code: 'too_few_chunks', message: 'x' },
+      { code: 'too_few_chunks', message: 'x' }
+    ])
+  })
+
   it('invalidates topics and documents when the job ends', async () => {
     const { fetchMock } = stubApi()
     deliver('job-1', 'topics_started', { collection: 'docs', action: 'build' })

@@ -103,7 +103,7 @@ def _run_action(work: RAG, op: str, physical: str, logical: str) -> int:
             warn=_warn,
         )
     except TopicsRefused as exc:
-        logger.error("{}", exc.message)
+        logger.error("{}", exc.describe())
         return 2
     except TopicsEndpointError as exc:
         logger.error("{}", str(exc))

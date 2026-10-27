@@ -704,6 +704,30 @@ def test_the_runner_reports_a_refusal_as_a_coded_warning_and_an_empty_completion
     ]
 
 
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("too_few_chunks", "The collection has too few chunks with enough text to build topics."),
+        ("too_few_unassigned", "Too few unassigned chunks to look for new topics."),
+    ],
+)
+def test_a_too_small_sample_warns_with_what_it_found_and_needs(fake: _TopicsRAG, code: str, message: str) -> None:
+    """A sample too small to fit adds its counts to the coded warning; the message stays static.
+
+    Args:
+        fake: The RAG stand-in.
+        code: The refusal code.
+        message: Its static message.
+    """
+    fake.service = _Service(TopicsRefused(code, found=5, needed=8))
+    pushed: list[tuple[str, dict[str, Any]]] = []
+
+    result = api_module._run_topics_job(_topics_state("p1"), lambda event, payload: pushed.append((event, payload)))
+
+    assert result == {"empty": True, "resolution": None}
+    assert pushed[-1] == ("warning", {"message": message, "code": code, "found": 5, "needed": 8})
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     """Run the async tests on asyncio only.

@@ -499,7 +499,11 @@ export const de: Strings = {
     'Es wurden keine neuen Themen gefunden; die nicht zugeordneten Chunks bleiben nicht zugeordnet.',
   'topics.warning_too_few_chunks':
     'Die Sammlung hat zu wenige Chunks mit genug Text, um Themen zu erstellen.',
+  'topics.warning_too_few_chunks_counted':
+    'Themen brauchen mindestens {needed} Chunks mit genug Text; die Sammlung hat {found}.',
   'topics.warning_too_few_unassigned': 'Zu wenige nicht zugeordnete Chunks, um nach neuen Themen zu suchen.',
+  'topics.warning_too_few_unassigned_counted':
+    'Die Suche nach neuen Themen braucht mindestens {needed} nicht zugeordnete Chunks mit genug Text; es gibt {found}.',
   'topics.warning_no_run': 'Erstellen Sie zuerst die Themen.',
   'topics.warning_dimension_changed':
     'Die Vektoren der Sammlung haben seit der Erstellung der Themen ihre Größe geändert; erstellen Sie die Themen neu.',

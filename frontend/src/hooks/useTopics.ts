@@ -121,8 +121,11 @@ export interface TopicsJobState {
   done: number
   /** Units in the stage; 0 when the stage cannot say. */
   total: number
-  /** Each warning's code is what to show copy for; its message is the backend's own and is not for display. */
-  warnings: { code: string; message: string }[]
+  /**
+   * Each warning's code is what to show copy for; its message is the backend's own and is not for display.
+   * A sample too small to fit also says how many chunks it held (`found`) and needs (`needed`).
+   */
+  warnings: { code: string; message: string; found?: number; needed?: number }[]
   /** The failure's code; null unless an `error` frame ended the job. */
   error: string | null
   /** Ended by completing or by being cancelled. A refusal completes too, with a coded warning. */
@@ -195,12 +198,19 @@ function readJob(jobId: string, frames: IngestEvent[], live: boolean): TopicsJob
         done = typeof data.done === 'number' ? data.done : 0
         total = typeof data.total === 'number' ? data.total : 0
         break
-      case 'warning':
-        warnings.push({
+      case 'warning': {
+        const warning: TopicsJobState['warnings'][number] = {
           code: typeof data.code === 'string' ? data.code : '',
           message: typeof data.message === 'string' ? data.message : ''
-        })
+        }
+        // Both or neither: copy that names only one count would read as a fault.
+        if (typeof data.found === 'number' && typeof data.needed === 'number') {
+          warning.found = data.found
+          warning.needed = data.needed
+        }
+        warnings.push(warning)
         break
+      }
       case 'topics_completed':
       case 'topics_cancelled':
         finished = true

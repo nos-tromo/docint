@@ -9,6 +9,7 @@ import types
 from typing import Any, ClassVar
 
 import pytest
+from loguru import logger
 
 import docint.cli.topics as cli
 from docint.core.topics.service import TopicsOutcome, TopicsRefused
@@ -184,6 +185,20 @@ def test_a_refusal_exits_2_with_its_message() -> None:
     _FakeRAG.service = _Service(error=TopicsRefused("no_run"))
 
     assert cli.run("align", "mydocs") == 2
+
+
+def test_a_too_small_collection_is_refused_with_what_it_found_and_needs() -> None:
+    """The refusal of a too-small sample names its counts on the command line."""
+    _FakeRAG.service = _Service(error=TopicsRefused("too_few_chunks", found=5, needed=8))
+    lines: list[str] = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="ERROR", format="{message}")
+    try:
+        assert cli.run("build", "mydocs") == 2
+    finally:
+        logger.remove(sink)
+    assert [line.strip() for line in lines] == [
+        "The collection has too few chunks with enough text to build topics. Found 5; a fit needs at least 8."
+    ]
 
 
 def test_an_endpoint_fault_exits_1() -> None:

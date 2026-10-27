@@ -5722,7 +5722,8 @@ def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             warn=_warn,
         )
     except TopicsRefused as exc:
-        _warn(exc.code, exc.message)
+        # A sample too small to fit says how many chunks it held and needs.
+        push("warning", {"message": exc.message, "code": exc.code, **exc.counts()})
         return {"empty": True, "resolution": None}
     except TopicsEndpointError as exc:
         _warn(exc.code, _TOPICS_ENDPOINT_MESSAGES.get(exc.code, "Topics run failed."))

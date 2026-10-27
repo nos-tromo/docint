@@ -477,7 +477,11 @@ export const en = {
   'topics.warning_none_found': 'The fit found no topics; the collection keeps its current topics.',
   'topics.warning_none_new': 'No new topics were found; the unassigned chunks stay unassigned.',
   'topics.warning_too_few_chunks': 'The collection has too few chunks with enough text to build topics.',
+  'topics.warning_too_few_chunks_counted':
+    'Topics need at least {needed} chunks with enough text; the collection has {found}.',
   'topics.warning_too_few_unassigned': 'Too few unassigned chunks to look for new topics.',
+  'topics.warning_too_few_unassigned_counted':
+    'Looking for new topics needs at least {needed} unassigned chunks with enough text; there are {found}.',
   'topics.warning_no_run': 'Build the topics first.',
   'topics.warning_dimension_changed':
     'The collection’s vectors changed size since the topics were built; rebuild them.',
