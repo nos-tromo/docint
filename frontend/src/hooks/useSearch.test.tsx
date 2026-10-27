@@ -11,7 +11,7 @@ import { useTopicFocusStore } from '@/stores/topicFocus'
 afterEach(() => vi.restoreAllMocks())
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: null })
+  useUiStore.setState({ selectedCollection: null, currentSessionId: null })
   useChatFiltersStore.getState().reset()
   useTopicFocusStore.setState({ focus: null })
 })
@@ -338,6 +338,65 @@ describe('useSearch', () => {
     expect(searches()).toHaveLength(1)
     expect(JSON.parse(String(searches()[0][1]!.body)).metadata_filters).toEqual([
       { field: 'docint_topic', operator: 'eq', value: '20260102-030405-a1b2c3:3' }
+    ])
+  })
+
+  it('waits in a started chat for the topic its session keeps', async () => {
+    const RUN = '20260102-030405-a1b2c3'
+    const respond = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      const u = String(input)
+      if (u.includes('/config')) return respond({ topics_enabled: true })
+      if (u.includes('/sessions/sess-1/topic')) {
+        await held
+        return respond({ topic_focus: { run_id: RUN, topic_id: 3, label: 'Harbour cranes' } })
+      }
+      if (u.includes('/topics')) {
+        return respond({
+          run_id: RUN,
+          created_at: '2026-01-02T03:04:05+00:00',
+          updated_at: '2026-01-02T03:04:05+00:00',
+          embed_model: 'embed-small',
+          embed_model_changed: false,
+          coverage: { total: 10, assigned: 8, unassigned: 2, pending: 0 },
+          topics: []
+        })
+      }
+      return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'docs', selectedOwner: null, currentSessionId: 'sess-1' })
+    // A pick waiting for a new chat is not this chat's topic.
+    useTopicFocusStore.setState({
+      focus: { collection: 'docs', owner: null, runId: RUN, topicId: 9, label: 'Grain silos' }
+    })
+    const searches = () => fetchMock.mock.calls.filter(([u]) => String(u).includes('/search'))
+
+    const { result } = renderHook(() => useSearch('alpha'), { wrapper })
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sessions/sess-1/topic'))).toBe(true)
+    )
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // Until the chat's own topic is known, a search sent now would go without its rule.
+    expect(searches()).toEqual([])
+
+    release()
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(searches()).toHaveLength(1)
+    expect(JSON.parse(String(searches()[0][1]!.body)).metadata_filters).toEqual([
+      { field: 'docint_topic', operator: 'eq', value: `${RUN}:3` }
     ])
   })
 })

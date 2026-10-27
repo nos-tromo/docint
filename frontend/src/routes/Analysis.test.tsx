@@ -140,7 +140,7 @@ function mockFetch({
 }
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: null, graphTopK: null })
+  useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: null, currentSessionId: null, graphTopK: null })
   useAnalysisUiStore.setState({ tab: 'ner', nerView: 'table', entity: null })
   useTopicFocusStore.setState({ focus: null })
   useIngestJobsStore.getState().clear()
@@ -308,7 +308,8 @@ describe('Analysis topics tab', () => {
   it('asks about a topic in chat with the collection and run it came from', async () => {
     useAnalysisUiStore.setState({ tab: 'topics', nerView: 'table', entity: null })
     // An admin in another owner's collection: the owner is half of which collection it is.
-    useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: 'analyst-b' })
+    // A chat is open, about something else; the topic must not land in it.
+    useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: 'analyst-b', currentSessionId: 'sess-open' })
     vi.stubGlobal('fetch', mockFetch({ topicsEnabled: true, overview: TOPICS_OVERVIEW }))
     renderAnalysis()
 
@@ -322,6 +323,8 @@ describe('Analysis topics tab', () => {
       topicId: 2,
       label: 'Orbits and comets'
     })
+    // The topic gets a chat of its own.
+    expect(useUiStore.getState().currentSessionId).toBeNull()
     expect(await screen.findByText('Chat route')).toBeInTheDocument()
   })
 

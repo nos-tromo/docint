@@ -8,6 +8,7 @@ import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useTopicFocusStore, type TopicFocus } from '@/stores/topicFocus'
 
 /**
  * Choose a collection from the sidebar picker.
@@ -74,6 +75,16 @@ beforeEach(() => {
   useIngestJobsStore.getState().clear()
   useChatUiStore.setState({ drafts: {} })
   useChatFiltersStore.getState().reset()
+  useTopicFocusStore.setState({ focus: null })
+})
+
+/** A topic "Ask in chat" picked for a chat not started yet. */
+const pickIn = (collection: string): TopicFocus => ({
+  collection,
+  owner: null,
+  runId: '20260102-030405-a1b2c3',
+  topicId: 3,
+  label: 'Harbour cranes'
 })
 
 afterEach(() => {
@@ -441,6 +452,32 @@ describe('Sidebar chat draft pruning', () => {
       expect(useChatUiStore.getState().drafts['s2']).toBeUndefined()
     })
   })
+
+  it('drops a topic picked in the deleted collection', async () => {
+    vi.stubGlobal('fetch', mockFetch({ '/collections/list': ['alpha'], '/sessions/list': { sessions: [] } }))
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: null })
+    useTopicFocusStore.setState({ focus: pickIn('alpha') })
+
+    renderSidebar()
+    await userEvent.click(await screen.findByLabelText(/delete collection alpha/i))
+
+    // A new collection of the same name must not inherit it.
+    await waitFor(() => expect(useTopicFocusStore.getState().focus).toBeNull())
+  })
+
+  it('keeps a topic picked in another collection', async () => {
+    vi.stubGlobal('fetch', mockFetch({ '/collections/list': ['alpha', 'beta'], '/sessions/list': { sessions: [] } }))
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: null })
+    useTopicFocusStore.setState({ focus: pickIn('beta') })
+
+    renderSidebar()
+    await userEvent.click(await screen.findByLabelText(/delete collection alpha/i))
+
+    await waitFor(() => expect(useUiStore.getState().selectedCollection).toBeNull())
+    expect(useTopicFocusStore.getState().focus).toEqual(pickIn('beta'))
+  })
 })
 
 describe('Sidebar keeps the current section when switching collections', () => {
@@ -506,6 +543,19 @@ describe('Sidebar new chat', () => {
     await waitFor(() => {
       expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
     })
+  })
+
+  it('starts the new chat without a topic picked for an unstarted one', async () => {
+    vi.stubGlobal('fetch', mockFetch({ '/collections/list': ['alpha'], '/sessions/list': { sessions: [] } }))
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: null })
+    useTopicFocusStore.setState({ focus: pickIn('alpha') })
+
+    renderSidebarAt('/chat')
+
+    await userEvent.click(await screen.findByRole('button', { name: /new chat/i }))
+
+    // "Ask in chat" is how a chat gets a topic; a new chat starts without one.
+    expect(useTopicFocusStore.getState().focus).toBeNull()
   })
 
   it('returns "Answer from" to everything where there is no session to drop', async () => {

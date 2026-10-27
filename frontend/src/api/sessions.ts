@@ -1,5 +1,5 @@
 import { apiDelete, apiGet } from './client'
-import type { SessionMessage, SessionSummary } from './types'
+import type { SessionMessage, SessionSummary, SessionTopicFocus } from './types'
 
 export const listSessions = (collection?: string) =>
   apiGet<{ sessions: SessionSummary[] }>('/sessions/list', { collection })
@@ -10,3 +10,16 @@ export const getSessionHistory = (id: string, collection: string) =>
 
 export const deleteSession = (id: string) =>
   apiDelete<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}`)
+
+/**
+ * The topic a session was opened with through "Ask in chat", or null for none.
+ * Served, like the history, only through the collection the session is pinned to.
+ */
+export const getSessionTopic = (id: string, collection: string) =>
+  apiGet<{ topic_focus: SessionTopicFocus | null }>(`/sessions/${encodeURIComponent(id)}/topic`, {
+    collection
+  })
+
+/** Remove a session's topic; the session and its turns stay. */
+export const clearSessionTopic = (id: string) =>
+  apiDelete<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/topic`)

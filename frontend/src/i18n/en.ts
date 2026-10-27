@@ -137,6 +137,7 @@ export const en = {
   'chat.topic_focus_scoped': 'Applied to searches only; answers use the selected chunks.',
   'chat.topic_focus_not_visual': 'Not applied to answers from images.',
   'chat.topic_focus_remove': 'Remove topic filter',
+  'chat.topic_focus_remove_error': 'The topic filter could not be removed; this chat still keeps it.',
   'chat.visual_source_type': 'Kind of image',
   'chat.visual_source.any': 'Any',
   'chat.visual_source.video': 'Video keyframes',

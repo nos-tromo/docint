@@ -281,6 +281,13 @@ export interface ScopeResult {
   missing: number
 }
 
+/** A chat session's topic as the API stores it: the run it was picked from, its id and its label. */
+export interface SessionTopicFocus {
+  run_id: string
+  topic_id: number
+  label: string
+}
+
 export interface ChatRequest {
   question: string
   session_id?: string
@@ -299,6 +306,10 @@ export interface ChatRequest {
   // turn, so a selection made before it exists has nowhere to be written —
   // pinning it afterwards left that first answer unscoped.
   scope_chunk_ids?: string[]
+  // The topic "Ask in chat" opened this chat with. Sent only by the turn that
+  // creates the session, which stores it on the session row; later turns leave
+  // it out, so none of them can bring back a topic the user removed.
+  topic_focus?: SessionTopicFocus
   // The chat's reasoning toggle. Sent as an explicit boolean: the server
   // reads an absent field as "use the env default", which a toggle the user
   // can see must never silently mean. Applies to answer synthesis only.

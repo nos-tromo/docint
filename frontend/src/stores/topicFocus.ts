@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { TOPIC_FIELD, topicValue } from '@/api/topics'
-import type { MetadataFilter } from '@/api/types'
+import type { MetadataFilter, SessionTopicFocus } from '@/api/types'
 import type { CollectionScope } from '@/hooks/useActiveCollection'
 
 /** A topic the chat and the search are narrowed to, with the collection and run it was picked from. */
@@ -20,16 +20,50 @@ interface TopicFocusState {
 }
 
 /**
- * The topic "Ask in chat" narrowed the chat to.
+ * The topic "Ask in chat" picked for a chat that has not started yet.
  *
- * Not persisted: a topic belongs to one run of one collection, and a rebuild
- * replaces the run.
+ * Only that unstarted chat reads it. Its first turn sends it, the server keeps
+ * it on the session that turn creates, and from then on the session's own copy
+ * is the chat's topic (`useChatTopicFocus`) — which is what lets every chat keep
+ * its own topic and get it back after a reload. Not persisted: before that
+ * first turn there is no chat to keep it with.
  */
 export const useTopicFocusStore = create<TopicFocusState>()((set) => ({
   focus: null,
   setFocus: (focus) => set({ focus }),
   clear: () => set({ focus: null })
 }))
+
+/**
+ * A focus in the shape the API keeps on a session.
+ *
+ * @param focus - The focus.
+ * @returns Its run, topic id and label.
+ */
+export function toSessionTopic(focus: TopicFocus): SessionTopicFocus {
+  return { run_id: focus.runId, topic_id: focus.topicId, label: focus.label }
+}
+
+/**
+ * A session's stored topic as a focus of the active collection.
+ *
+ * The API serves a session's topic only through the collection the session is
+ * pinned to, so the active collection and its owner are the topic's own.
+ *
+ * @param stored - The session's topic as the API returns it.
+ * @param scope - The active collection and its owner.
+ * @returns The focus, or null with no collection active.
+ */
+export function fromSessionTopic(stored: SessionTopicFocus, scope: CollectionScope): TopicFocus | null {
+  if (!scope.collection) return null
+  return {
+    collection: scope.collection,
+    owner: scope.owner,
+    runId: stored.run_id,
+    topicId: stored.topic_id,
+    label: stored.label
+  }
+}
 
 /**
  * Whether a focus was picked in the active collection: the same name under the

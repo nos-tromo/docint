@@ -5,16 +5,19 @@ import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
 import { clearScope, setScope } from '@/api/scope'
+import { clearSessionTopic } from '@/api/sessions'
 import type { AgentStep, ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
 import { useStickToBottom } from '@/hooks/useStickToBottom'
 import { useReportDedupeKeys } from '@/hooks/useReports'
-import { useTopicFocusRule } from '@/hooks/useTopics'
+import { sessionTopicKey, useChatTopicFocus, useTopicFocusRule } from '@/hooks/useTopics'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { draftKey, useChatUiStore } from '@/stores/chatUi'
 import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/stores/searchUi'
+import { focusInScope, toSessionTopic, useTopicFocusStore } from '@/stores/topicFocus'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
 import { ChatControls } from '@/components/chat/ChatControls'
@@ -146,6 +149,9 @@ export function Chat() {
   const filters = useChatFiltersStore()
   const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
   const { rule: topicRule } = useTopicFocusRule()
+  const { focus: topicFocus } = useChatTopicFocus()
+  const activeCollection = useActiveCollection()
+  const clearTopicPick = useTopicFocusStore((s) => s.clear)
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
   const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
@@ -189,6 +195,33 @@ export function Chat() {
     }
   }
 
+  // Kept with the session it is about, so it is never shown over another chat.
+  const [topicError, setTopicError] = useState<{ sessionId: string; message: string } | null>(null)
+
+  const unfocus = async () => {
+    setTopicError(null)
+    const sessionId = currentSessionId
+    // A chat not started yet holds only the "Ask in chat" pick.
+    if (!sessionId) {
+      clearTopicPick()
+      return
+    }
+    // Dropped here first, so the chip goes at once. A read already in flight is
+    // cancelled, or its answer would put the topic straight back.
+    const key = sessionTopicKey(sessionId, activeCollection)
+    await qc.cancelQueries({ queryKey: key })
+    qc.setQueryData(key, { topic_focus: null })
+    try {
+      await clearSessionTopic(sessionId)
+      qc.setQueryData(key, { topic_focus: null })
+    } catch {
+      // Still stored with the chat: read it back, so the chip shows what the
+      // chat keeps, and say why it is still there.
+      void qc.invalidateQueries({ queryKey: key })
+      setTopicError({ sessionId, message: t('chat.topic_focus_remove_error') })
+    }
+  }
+
   useEffect(() => {
     setCurrentSessionId(sessionIdParam)
   }, [sessionIdParam, setCurrentSessionId])
@@ -224,6 +257,8 @@ export function Chat() {
 
   const onNewChat = () => {
     setCurrentSessionId(null)
+    // A new chat starts without a topic; "Ask in chat" is how one gets one.
+    clearTopicPick()
     // The effect above only sees a session going away; a chat with no turns, or
     // a stateless one, never had one to lose.
     setRetrievalTarget('all')
@@ -273,6 +308,12 @@ export function Chat() {
     const pinned = scopedChunkIds
     // Imagery carries no topic, so on a visual turn the rule would empty the answer; the chip says so.
     const rule = filters.retrievalTarget === 'visual' ? null : topicRule
+    // Only the turn that creates the session carries the topic: the session row
+    // does not exist before it, and keeps the topic itself after, so no later
+    // turn can bring back one the user removed. Gated on the pick rather than
+    // the rule, which is null on a visual turn or for a stale run.
+    const sentTopic =
+      !currentSessionId && topicFocus && focusInScope(topicFocus, activeCollection) ? topicFocus : null
     dispatch({
       type: 'start',
       user: message,
@@ -308,7 +349,8 @@ export function Chat() {
           // chat has no session row to pin it to yet, and even on an open one
           // a checkbox ticked a moment ago may still be in flight — either way
           // the request is the only place this turn's scope is certain.
-          scope_chunk_ids: pinned.length > 0 ? pinned : undefined
+          scope_chunk_ids: pinned.length > 0 ? pinned : undefined,
+          topic_focus: sentTopic ? toSessionTopic(sentTopic) : undefined
         },
         ac.signal
       )) {
@@ -372,7 +414,16 @@ export function Chat() {
         settled = true
         dispatch({ type: 'finalize', meta: final })
         if (!currentSessionId && final.session_id) {
+          // The server stored the topic with the session this turn created.
+          // Seeded before the chat switches to it, so the chip never blinks
+          // out while that copy is read.
+          qc.setQueryData(sessionTopicKey(final.session_id, activeCollection), {
+            topic_focus: sentTopic ? toSessionTopic(sentTopic) : null
+          })
           setCurrentSessionId(final.session_id)
+          // The pick is spent. A stream that ends after another "Ask in chat"
+          // leaves that newer pick for the chat it was made for.
+          if (sentTopic && useTopicFocusStore.getState().focus === sentTopic) clearTopicPick()
           // The backend minted the session id on this turn, so the selection
           // that rode along with the request now has a row to live on. It has
           // already scoped this answer; this round trip moves the local copy
@@ -452,7 +503,7 @@ export function Chat() {
         {/* The topic filter sits innermost, so its coming and going moves no control; on a row too
             narrow for it, it alone wraps, below the controls (`flex-wrap-reverse`). */}
         <div className="flex min-w-0 flex-wrap-reverse items-center justify-end gap-x-3 gap-y-2">
-          <TopicFocusChip />
+          <TopicFocusChip onRemove={() => void unfocus()} />
           {/* The metadata filters and the retrieval mode belong here, to the
               chat, not to the search panel: they narrow what any answer
               retrieves against, whether or not the panel is even open. In the
@@ -533,6 +584,11 @@ export function Chat() {
           {scopeError && (
             <p className="mb-3 text-xs text-red-500" role="alert">
               {scopeError}
+            </p>
+          )}
+          {topicError && topicError.sessionId === currentSessionId && (
+            <p className="mb-3 text-xs text-red-500" role="alert">
+              {topicError.message}
             </p>
           )}
           <div

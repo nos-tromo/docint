@@ -167,8 +167,11 @@ export function Analysis() {
   // read when asked rather than closed over.
   const askInChat = useCallback(
     (topic: TopicSummary, runId: string) => {
-      const { selectedCollection, selectedOwner } = useUiStore.getState()
+      const { selectedCollection, selectedOwner, setCurrentSessionId } = useUiStore.getState()
       if (!selectedCollection) return
+      // A topic gets a chat of its own: dropped here rather than by the chat
+      // route, so the chat never shows the open session's topic first.
+      setCurrentSessionId(null)
       setTopicFocus({
         collection: selectedCollection,
         owner: selectedOwner,

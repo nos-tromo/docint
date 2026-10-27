@@ -8,10 +8,18 @@ import {
   startTopics,
   type TopicsAction
 } from '@/api/topics'
+import { getSessionTopic } from '@/api/sessions'
 import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
 import { useConfig } from '@/hooks/useConfig'
 import { selectJobEvents, useIngestJobsStore } from '@/stores/ingestJobs'
-import { focusInScope, topicFocusRule, useTopicFocusStore } from '@/stores/topicFocus'
+import {
+  focusInScope,
+  fromSessionTopic,
+  topicFocusRule,
+  useTopicFocusStore,
+  type TopicFocus
+} from '@/stores/topicFocus'
+import { useUiStore } from '@/stores/ui'
 import type { IngestEvent, MetadataFilter } from '@/api/types'
 
 /**
@@ -31,30 +39,86 @@ export function useTopicsOverview(enabled = true) {
   })
 }
 
-/** The rule the topic focus adds to a turn or a search, and whether it is decided yet. */
-export interface TopicFocusRuleState {
-  /** Null unless the focus names a topic of the active collection's active run (see {@link topicFocusRule}). */
-  rule: MetadataFilter | null
-  /** True while the focus belongs to the active collection and its run is still being read. */
+/**
+ * The key a session's stored topic is cached under.
+ *
+ * Deliberately outside `['sessions']`: every finished turn invalidates that
+ * prefix, and a refetch landing while the topic is being removed would put it
+ * back. The collection and its owner are part of it, as for the history.
+ *
+ * @param sessionId - The session.
+ * @param scope - The active collection and its owner.
+ * @returns The query key.
+ */
+export const sessionTopicKey = (sessionId: string, scope: CollectionScope) =>
+  ['session-topic', sessionId, scope] as const
+
+/** The open chat's topic, and whether it is still being read. */
+export interface ChatTopicFocus {
+  focus: TopicFocus | null
+  /** True while a started chat's topic is not known yet. */
   pending: boolean
 }
 
 /**
- * The rule the topic focus adds to a turn or a search.
+ * The open chat's topic.
+ *
+ * Before its first turn a chat has no session, and its topic is the "Ask in
+ * chat" pick. Once started, its topic is the one stored with its session, read
+ * through the session's own collection — so each chat keeps its own topic and
+ * gets it back after a reload, wherever it is reopened.
+ */
+export function useChatTopicFocus(): ChatTopicFocus {
+  const sessionId = useUiStore((s) => s.currentSessionId)
+  const scope = useActiveCollection()
+  const picked = useTopicFocusStore((s) => s.focus)
+  const config = useConfig()
+  const enabled = !!sessionId && !!scope.collection && config.data?.topics_enabled === true
+  const stored = useQuery({
+    queryKey: sessionId ? sessionTopicKey(sessionId, scope) : ['session-topic', 'none'],
+    queryFn: () => getSessionTopic(sessionId!, scope.collection!),
+    enabled
+  })
+  const storedTopic = stored.data?.topic_focus
+  const focus = useMemo(
+    () => (enabled && storedTopic ? fromSessionTopic(storedTopic, scope) : null),
+    [enabled, storedTopic, scope]
+  )
+  if (!sessionId) return { focus: picked, pending: false }
+  return {
+    focus,
+    // A disabled query reads as pending too, so only an enabled read in flight counts; until the
+    // flag is known, the read may still be due.
+    pending: !!scope.collection && (config.isPending || (enabled && stored.isPending))
+  }
+}
+
+/** The rule the topic focus adds to a turn or a search, and whether it is decided yet. */
+export interface TopicFocusRuleState {
+  /** Null unless the focus names a topic of the active collection's active run (see {@link topicFocusRule}). */
+  rule: MetadataFilter | null
+  /** True while the open chat's topic, or its run, is still being read. */
+  pending: boolean
+}
+
+/**
+ * The rule the open chat's topic adds to a turn or a search.
  *
  * The run is read only while a focus belongs to the active collection, so a
  * chat without one asks nothing of the topics routes.
  */
 export function useTopicFocusRule(): TopicFocusRuleState {
   const scope = useActiveCollection()
-  const focus = useTopicFocusStore((s) => s.focus)
+  const { focus, pending: focusPending } = useChatTopicFocus()
   const inScope = focusInScope(focus, scope)
   const config = useConfig()
   const overview = useTopicsOverview(inScope)
   return {
     rule: topicFocusRule(focus, scope, overview.data?.run_id ?? null),
     // While the flag is unknown the run may still be read; once it is known, only a read in flight is.
-    pending: inScope && (config.isPending || (config.data?.topics_enabled === true && overview.isPending))
+    pending:
+      focusPending ||
+      (inScope && (config.isPending || (config.data?.topics_enabled === true && overview.isPending)))
   }
 }
 

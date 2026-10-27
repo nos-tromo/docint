@@ -1,9 +1,9 @@
 import { RemoveButton } from '@infra/ui'
 import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
-import { useTopicsOverview, useTopicsRefreshOnJobEnd } from '@/hooks/useTopics'
+import { useChatTopicFocus, useTopicsOverview, useTopicsRefreshOnJobEnd } from '@/hooks/useTopics'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/stores/searchUi'
-import { focusInScope, topicFocusRule, useTopicFocusStore, type TopicFocus } from '@/stores/topicFocus'
+import { focusInScope, topicFocusRule, type TopicFocus } from '@/stores/topicFocus'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -20,19 +20,30 @@ import { useT } from '@/i18n/LanguageContext'
  * this is where that is said. With chunks selected, an answer comes from them
  * alone whatever its filters say, so only the searches keep to the topic.
  *
- * A focus picked in another collection, or under another owner, is kept out of
- * sight until that collection is active again, as an entity selection is in Analysis.
+ * The topic is the open chat's own: the one stored with its session, or for a
+ * chat not started yet the one "Ask in chat" picked. A pick made in another
+ * collection, or under another owner, is kept out of sight until that
+ * collection is active again, as an entity selection is in Analysis.
+ *
+ * @param onRemove - Drops the topic from the open chat.
  */
-export function TopicFocusChip() {
+export function TopicFocusChip({ onRemove }: { onRemove: () => void }) {
   const scope = useActiveCollection()
-  const focus = useTopicFocusStore((s) => s.focus)
+  const { focus } = useChatTopicFocus()
   if (!focus || !focusInScope(focus, scope)) return null
-  return <FocusChip focus={focus} scope={scope} />
+  return <FocusChip focus={focus} scope={scope} onRemove={onRemove} />
 }
 
-function FocusChip({ focus, scope }: { focus: TopicFocus; scope: CollectionScope }) {
+function FocusChip({
+  focus,
+  scope,
+  onRemove
+}: {
+  focus: TopicFocus
+  scope: CollectionScope
+  onRemove: () => void
+}) {
   const t = useT()
-  const clear = useTopicFocusStore((s) => s.clear)
   const target = useChatFiltersStore((s) => s.retrievalTarget)
   const sessionId = useUiStore((s) => s.currentSessionId)
   const scoped = useSearchUiStore((s) => scopeChunkIds(scopeFor(s, searchKeyFor(sessionId))).length > 0)
@@ -83,7 +94,7 @@ function FocusChip({ focus, scope }: { focus: TopicFocus; scope: CollectionScope
           {hint}
         </div>
       </div>
-      <RemoveButton label={t('chat.topic_focus_remove')} onClick={clear} className="h-6" />
+      <RemoveButton label={t('chat.topic_focus_remove')} onClick={onRemove} className="h-6" />
     </div>
   )
 }

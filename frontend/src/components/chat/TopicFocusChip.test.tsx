@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TopicFocusChip } from './TopicFocusChip'
 import type { TopicsOverview } from '@/api/topics'
-import type { IngestEvent } from '@/api/types'
+import type { IngestEvent, SessionTopicFocus } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useSearchUiStore } from '@/stores/searchUi'
@@ -40,13 +40,21 @@ const OVERVIEW: TopicsOverview = {
   ]
 }
 
+/** A started chat's topic as the API stores it. */
+const STORED: SessionTopicFocus = { run_id: RUN, topic_id: 3, label: 'Harbour cranes' }
+
 /**
- * Stub the reads the chip makes: the topics flag and the collection's active run.
+ * Stub the reads the chip makes: the topics flag, the collection's active run
+ * and, for a started chat, the topic stored with its session.
  *
  * @param overview - Answers the run read; null serves a collection without a run (204).
+ * @param sessionTopics - Each session's stored topic; a session left out has none.
  * @returns The fetch mock.
  */
-function stubApi(overview: () => Promise<TopicsOverview | null> = async () => OVERVIEW) {
+function stubApi(
+  overview: () => Promise<TopicsOverview | null> = async () => OVERVIEW,
+  sessionTopics: Record<string, SessionTopicFocus | null> = {}
+) {
   const respond = (body: unknown, status = 200) => ({
     ok: status < 400,
     status,
@@ -56,6 +64,8 @@ function stubApi(overview: () => Promise<TopicsOverview | null> = async () => OV
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost')
     if (url.pathname.endsWith('/config')) return respond({ topics_enabled: true })
+    const session = url.pathname.match(/\/sessions\/([^/]+)\/topic$/)
+    if (session) return respond({ topic_focus: sessionTopics[decodeURIComponent(session[1]!)] ?? null })
     if (url.pathname.endsWith('/topics')) {
       const body = await overview()
       return body ? respond(body) : respond(null, 204)
@@ -66,12 +76,12 @@ function stubApi(overview: () => Promise<TopicsOverview | null> = async () => OV
   return fetchMock
 }
 
-function renderChip(lang: 'en' | 'de' = 'en') {
+function renderChip(lang: 'en' | 'de' = 'en', onRemove: () => void = () => {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
       <LanguageContext value={lang}>
-        <TopicFocusChip />
+        <TopicFocusChip onRemove={onRemove} />
       </LanguageContext>
     </QueryClientProvider>
   )
@@ -103,7 +113,9 @@ describe('TopicFocusChip', () => {
   it('shows the applied, stale and visual states and removes the focus', async () => {
     stubApi()
     useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
-    renderChip()
+    // What Chat does for a chat not started yet: drop the pick.
+    const onRemove = vi.fn(() => useTopicFocusStore.getState().clear())
+    renderChip('en', onRemove)
 
     expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
     expect(chip()).toHaveTextContent('Applied to answers and searches.')
@@ -125,17 +137,20 @@ describe('TopicFocusChip', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Remove topic filter' }))
 
+    expect(onRemove).toHaveBeenCalledTimes(1)
     expect(useTopicFocusStore.getState().focus).toBeNull()
     expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
   })
 
   it('says the topic narrows only searches while chunks are selected', async () => {
-    stubApi()
-    useUiStore.setState({ currentSessionId: 'sess-1' })
-    useSearchUiStore.setState({ scopes: { 'sess-1': { tokens: { p1: 120 }, usableTokens: 0, missing: 0 } } })
-    useTopicFocusStore.setState({
-      focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' }
+    stubApi(async () => OVERVIEW, {
+      'sess-1': STORED,
+      'sess-old': { ...STORED, run_id: EARLIER_RUN },
+      'sess-2': STORED
     })
+    useUiStore.setState({ currentSessionId: 'sess-1' })
+    const selected = { tokens: { p1: 120 }, usableTokens: 0, missing: 0 }
+    useSearchUiStore.setState({ scopes: { 'sess-1': selected, 'sess-old': selected } })
     renderChip()
 
     // A scoped answer comes from the selected chunks alone, whatever its filters say.
@@ -145,23 +160,41 @@ describe('TopicFocusChip', () => {
     // Ahead of the target, which a scope outranks too.
     act(() => useChatFiltersStore.getState().setRetrievalTarget('visual'))
     expect(chip()).toHaveTextContent('Applied to searches only; answers use the selected chunks.')
+
     // Behind an earlier build, which is applied to nothing.
-    act(() =>
-      useTopicFocusStore
-        .getState()
-        .setFocus({ collection: COLLECTION, owner: null, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' })
-    )
-    expect(chip()).toHaveTextContent('From an earlier build; not applied.')
+    act(() => useUiStore.setState({ currentSessionId: 'sess-old' }))
+    await waitFor(() => expect(chip()).toHaveTextContent('From an earlier build; not applied.'))
 
     // The scope is the open chat's own: another chat's selection says nothing about this one.
     act(() => {
-      useTopicFocusStore
-        .getState()
-        .setFocus({ collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' })
       useChatFiltersStore.getState().setRetrievalTarget('all')
       useUiStore.setState({ currentSessionId: 'sess-2' })
     })
-    expect(chip()).toHaveTextContent('Applied to answers and searches.')
+    await waitFor(() => expect(chip()).toHaveTextContent('Applied to answers and searches.'))
+  })
+
+  it('shows each chat its own topic, and none for a chat without one', async () => {
+    stubApi(async () => OVERVIEW, {
+      'sess-1': STORED,
+      'sess-2': { run_id: RUN, topic_id: 7, label: 'Grain silos' }
+    })
+    // A pick waiting for a new chat belongs to no started one.
+    useTopicFocusStore.setState({
+      focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 5, label: 'Ferry routes' }
+    })
+    useUiStore.setState({ currentSessionId: 'sess-1' })
+    renderChip()
+
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
+
+    act(() => useUiStore.setState({ currentSessionId: 'sess-2' }))
+    await waitFor(() => expect(chip()).toHaveTextContent('T7 · Grain silos'))
+
+    act(() => useUiStore.setState({ currentSessionId: 'sess-3' }))
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument())
+
+    act(() => useUiStore.setState({ currentSessionId: null }))
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T5 · Ferry routes')
   })
 
   it('keeps the focus to the owner it was picked under', async () => {
