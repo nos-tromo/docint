@@ -31,6 +31,10 @@ class Conversation(Base):
     # way the pinned collection does.
     scope_chunk_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope_set_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # JSON ``{run_id, topic_id, label}`` of the topic "Ask in chat" opened the
+    # session with; NULL for none. Stored on the conversation so the topic
+    # belongs to this chat alone and survives a reload, the way the scope does.
+    topic_focus: Mapped[str | None] = mapped_column(Text, nullable=True)
     turns: Mapped[list["Turn"]] = relationship(
         argument="Turn",
         back_populates="conversation",

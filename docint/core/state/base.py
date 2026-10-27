@@ -169,6 +169,32 @@ def _ensure_conversation_scope_columns(engine: Engine) -> None:
         raise _migration_failure("conversations scope-columns", engine, exc) from exc
 
 
+def _ensure_conversation_topic_column(engine: Engine) -> None:
+    """Backfill the topic-focus column onto a pre-existing ``conversations`` table.
+
+    Same reason as :func:`_ensure_conversation_scope_columns`: ``create_all``
+    never adds a column to a table that already exists, so a sessions DB
+    created before a chat could keep its topic would fail on every insert.
+
+    Args:
+        engine (Engine): The session-store engine.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
+    """
+    try:
+        inspector = inspect(engine)
+        if "conversations" not in inspector.get_table_names():
+            return
+        existing = {col["name"] for col in inspector.get_columns("conversations")}
+        if "topic_focus" in existing:
+            return
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE conversations ADD COLUMN topic_focus TEXT"))
+    except Exception as exc:
+        raise _migration_failure("conversations topic-column", engine, exc) from exc
+
+
 def _ensure_report_columns(engine: Engine) -> None:
     """Backfill ``operator`` / ``reference_number`` onto a pre-existing reports table.
 
@@ -251,6 +277,7 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     _ensure_turn_validation_columns(engine)
     _ensure_conversation_owner_column(engine)
     _ensure_conversation_scope_columns(engine)
+    _ensure_conversation_topic_column(engine)
     # ``create_all`` above creates any missing table (incl. reports/report_items,
     # registered via ``docint.core.state.__init__``). Only added *columns* on a
     # pre-existing table need a manual backfill:

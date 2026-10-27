@@ -32,7 +32,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
@@ -94,6 +94,7 @@ from docint.core.state.report_pdf_store import ReportPdfStore
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
+from docint.core.topics.store import RUN_ID_PATTERN
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
@@ -702,6 +703,24 @@ def _apply_turn_scope(session_id: str, owner: str | None, requested: Sequence[st
     if ids != list(sessions.get_scope(session_id, owner)):
         sessions.set_scope(session_id, owner, ids)
     return ids
+
+
+def _apply_turn_topic(session_id: str, owner: str | None, requested: "TopicFocusIn | None") -> None:
+    """Pin the topic a turn carries to its session.
+
+    Only the turn that creates a session carries one, since the session row
+    does not exist before it, so the topic is stored by the same request that
+    first answers under it. A turn without one leaves the stored topic alone
+    and does not read the store.
+
+    Args:
+        session_id (str): The resolved session for this turn.
+        owner (str | None): The principal that owns it.
+        requested (TopicFocusIn | None): The topic carried on the request, if any.
+    """
+    if requested is None:
+        return
+    rag.ensure_session_manager().set_topic_focus(session_id, owner, requested.model_dump())
 
 
 def _require_collection_name(raw: str, *, context: str) -> str:
@@ -1452,6 +1471,51 @@ class MetadataFilterIn(BaseModel):
         return self
 
 
+class TopicFocusIn(BaseModel):
+    """The topic "Ask in chat" opened a session with, as the client sends it."""
+
+    run_id: str
+    topic_id: int = Field(ge=0)
+    # Generated labels are capped at 80 characters. The bound only stops an
+    # oversize value: a 422 here refuses the question that carries it.
+    label: str = Field(default="", max_length=500)
+
+    @field_validator("run_id")
+    @classmethod
+    def _require_a_run_id(cls, value: str) -> str:
+        """Accept a well-formed topic run id and nothing else.
+
+        ``Field(pattern=...)`` searches rather than matches, so it would let
+        through any value that merely contains a run id.
+
+        Args:
+            value (str): The submitted run id.
+
+        Returns:
+            str: The run id.
+
+        Raises:
+            ValueError: When the value is not a run id.
+        """
+        if not RUN_ID_PATTERN.fullmatch(value):
+            raise ValueError("not a topic run id")
+        return value
+
+
+class TopicFocusOut(BaseModel):
+    """A session's stored topic."""
+
+    run_id: str
+    topic_id: int
+    label: str = ""
+
+
+class SessionTopicOut(BaseModel):
+    """The topic a session belongs to; ``None`` when it has none."""
+
+    topic_focus: TopicFocusOut | None = None
+
+
 class QueryIn(BaseModel):
     """Request payload for a single RAG query."""
 
@@ -1472,6 +1536,13 @@ class QueryIn(BaseModel):
     # beforehand — installing it afterwards left that first answer unscoped
     # while the UI already claimed it was scoped.
     scope_chunk_ids: list[str] | None = None
+    # The topic "Ask in chat" opened this chat with, pinned to the session the
+    # way the scope is. Only the turn that creates the session carries it — the
+    # row does not exist before that turn — so no later turn can bring back a
+    # topic the user removed (``DELETE /sessions/{id}/topic``). Absent ⇒ the
+    # stored topic is left as it is. It is never applied to retrieval here:
+    # the client sends the topic's ``docint_topic`` rule in ``metadata_filters``.
+    topic_focus: TopicFocusIn | None = None
     # Per-turn reasoning override from the chat UI's toggle. ``true``/``false``
     # force the model's thinking mode on or off for this answer; absent (the
     # default) defers to ``OPENAI_ENABLE_THINKING``. Applies to answer
@@ -2334,6 +2405,70 @@ def clear_session_scope(
     return ScopeOut()
 
 
+@app.get("/sessions/{session_id}/topic", response_model=SessionTopicOut, tags=["Sessions"])
+def get_session_topic(
+    session_id: str,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> SessionTopicOut:
+    """Return the topic a session was opened with, read through its own collection.
+
+    Gated exactly like ``GET /sessions/{id}/history``: a session that does not
+    exist, belongs to another principal, or is pinned to a collection other
+    than the caller's active one is a 404, so the browser's Back button cannot
+    carry one collection's topic into another.
+
+    Args:
+        session_id (str): The session to read.
+        collection (str): The caller's active logical collection.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        SessionTopicOut: The stored topic, or ``None`` when the session has none.
+
+    Raises:
+        HTTPException: 404 when the session is not found for this principal in
+            this collection; 500 on unexpected errors.
+    """
+    try:
+        sm = rag.ensure_session_manager()
+        owner = principal.effective_owner
+        physical = rag.ensure_collection_owner_manager().resolve(owner, collection)
+        if physical is None or sm.get_session_collection(session_id, owner) != physical:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        stored = sm.get_topic_focus(session_id, owner)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("Error reading session topic")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    return SessionTopicOut(topic_focus=TopicFocusOut(**stored) if stored else None)
+
+
+@app.delete("/sessions/{session_id}/topic", tags=["Sessions"])
+def clear_session_topic(
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
+    """Remove the topic a session was opened with.
+
+    Answers are then no longer narrowed to it; the session and its turns stay.
+
+    Args:
+        session_id (str): The session to update.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}``.
+
+    Raises:
+        HTTPException: 404 when the session is missing or not owned.
+    """
+    if not rag.ensure_session_manager().clear_topic_focus(session_id, principal.effective_owner):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return {"ok": True}
+
+
 class ChunkOut(BaseModel):
     """One chunk's full text, for expanding a search hit."""
 
@@ -2751,6 +2886,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     principal.effective_owner,
                     payload.scope_chunk_ids,
                 )
+                _apply_turn_topic(session_id, principal.effective_owner, payload.topic_focus)
                 # An agent turn reads its own history, and its fallback binds none on this endpoint.
                 agent = _agent_turn_allowed(payload.retrieval_target)
                 if agent and rag.sessions is not None:
@@ -3050,6 +3186,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             )
                             or None
                         )
+                        _apply_turn_topic(resolved_id, session_owner, payload.topic_focus)
                         stream_state["agent"] = _agent_turn_allowed(payload.retrieval_target)
                     # The retry re-answers a rejected lookup, so any second pass is a plain lookup.
                     agent: bool = stream_state["agent"] if retrieval_query is None else False

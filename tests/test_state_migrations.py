@@ -25,6 +25,7 @@ from docint.core.state.base import (
     _ensure_collection_owner_activity_column,
     _ensure_conversation_owner_column,
     _ensure_conversation_scope_columns,
+    _ensure_conversation_topic_column,
     _ensure_report_columns,
     _ensure_turn_validation_columns,
     _make_session_maker,
@@ -73,6 +74,11 @@ def _readonly_engine(tmp_path: Path, ddl: str) -> Engine:
             _ensure_conversation_scope_columns,
             "CREATE TABLE conversations (id TEXT PRIMARY KEY, owner TEXT)",
             id="scope-columns",
+        ),
+        pytest.param(
+            _ensure_conversation_topic_column,
+            "CREATE TABLE conversations (id TEXT PRIMARY KEY, owner TEXT)",
+            id="topic-column",
         ),
         pytest.param(
             _ensure_conversation_owner_column,
