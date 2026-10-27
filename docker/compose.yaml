@@ -120,6 +120,7 @@ services:
       PIPELINE_ARTIFACTS_DIR: /var/lib/docint/pipeline/artifacts
       RESULTS_PATH: /var/lib/docint/pipeline/results
       EXTRACT_DIR: /var/lib/docint/pipeline/extracts
+      TOPICS_DIR: /var/lib/docint/pipeline/topics
       # Same value nginx enforces (frontend service, below). The backend only
       # advertises it via GET /config so the SPA sizes upload batches to stay
       # under nginx's client_max_body_size; it does not enforce it here.

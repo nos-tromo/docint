@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import logging
+import sys
 from collections.abc import Iterator
 
 import pytest
@@ -14,6 +16,7 @@ from docint.utils.logger_cfg import (
     _BRIDGED_LOGGERS,
     _HealthcheckAccessFilter,
     _install_stdlib_bridge,
+    init_logger,
 )
 
 
@@ -253,6 +256,32 @@ def test_bridge_does_not_touch_the_root_logger(restored_stdlib_loggers: None) ->
 # ---------------------------------------------------------------------------
 # init ordering
 # ---------------------------------------------------------------------------
+
+
+def test_logger_follows_stderr_after_a_redirect_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    restored_stdlib_loggers: None,
+) -> None:
+    """Later log records reach stderr after the stream used at setup has closed."""
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    redirected = io.StringIO()
+    try:
+        with monkeypatch.context() as redirect:
+            redirect.setattr(sys, "stderr", redirected)
+            init_logger()
+            logger.info("during redirection")
+            assert "during redirection" in redirected.getvalue()
+        redirected.close()
+
+        logger.info("after redirection")
+
+        captured = capsys.readouterr()
+        assert "Logging error" not in captured.err
+        assert "after redirection" in captured.err
+    finally:
+        redirected.close()
+        logger.remove()
 
 
 def test_importing_env_cfg_emits_no_log_record() -> None:

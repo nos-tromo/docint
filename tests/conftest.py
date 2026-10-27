@@ -198,6 +198,43 @@ def _hermetic_preprocess() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_topics_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Keep a developer ``.env`` out of the topics settings, and give each test a store root.
+
+    ``TOPICS_DIR`` points at a fresh directory so nothing writes under the home directory, and
+    every other ``TOPICS_*`` knob is cleared so the defaults apply. A private ``MonkeyPatch``
+    for the reason :func:`_hermetic_hybrid_env` gives.
+
+    Args:
+        tmp_path_factory: Pytest's session temp-directory factory.
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    for name in (
+        "TOPICS_ENABLED",
+        "TOPICS_ALIGN_ON_INGEST",
+        "TOPICS_LABELS",
+        "TOPICS_FIT_MAX_POINTS",
+        "TOPICS_MIN_TEXT_CHARS",
+        "TOPICS_SEED",
+        "TOPICS_MIN_TOPIC_SIZE",
+        "TOPICS_MAX_TOPICS",
+        "TOPICS_ADMIT_PERCENTILE",
+        "TOPICS_MERGE_MIN_SIMILARITY",
+        "TOPICS_API_BASE",
+        "TOPICS_API_KEY",
+        "TOPICS_TIMEOUT",
+        "DOCINT_TOPICS_CONCURRENCY",
+    ):
+        mp.delenv(name, raising=False)
+    mp.setenv("TOPICS_DIR", str(tmp_path_factory.mktemp("topics")))
+    yield
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_collection_writes() -> Iterator[None]:
     """Give each test a registry of collection writes of its own.
 

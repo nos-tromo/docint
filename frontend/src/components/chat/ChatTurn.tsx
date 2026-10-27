@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, SearchIcon, Spinner, WarningIcon } from '@infra/ui'
+import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, LayersIcon, SearchIcon, Spinner, WarningIcon } from '@infra/ui'
 import type { AgentAction, AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
 import type { Strings } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -219,6 +219,13 @@ function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
       return t('chat.agent_trail_read', { n: /\d+/.exec(step.detail)?.[0] ?? step.detail })
     case 'keyword':
       return keywordLabel(step, t)
+    case 'topics':
+      // A listing names no topic; a read names the one it opened.
+      if (!step.detail) return t('chat.agent_trail_topics_list')
+      return t(single ? 'chat.agent_trail_topic_one' : 'chat.agent_trail_topic_other', {
+        topic: step.detail,
+        count: step.found
+      })
     case 'search_images':
       return t(single ? 'chat.agent_trail_search_images_one' : 'chat.agent_trail_search_images_other', {
         query: step.detail,
@@ -255,6 +262,8 @@ function StepMarker({ action }: { action: AgentAction }) {
       return <DocumentsIcon className={className} />
     case 'keyword':
       return <SearchIcon className={className} />
+    case 'topics':
+      return <LayersIcon className={className} />
     default:
       return <SearchIcon className={className} />
   }

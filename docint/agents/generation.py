@@ -47,8 +47,13 @@ KEYWORD_CHECKS_HEADING = (
     "Keyword checks (exact counts of indexed chunks that contain all the words; facts about the collection, "
     "not sources):"
 )
-#: The sources of an answer that rests on keyword checks alone.
-NO_SOURCES_BESIDE_CHECKS = "(none: the answer rests on the keyword checks above, so judge sources_relevant by them)"
+#: Heads an agent turn's topic checks, which the validator reads as facts, never as sources.
+TOPIC_CHECKS_HEADING = (
+    "Topic checks (counts of chunks per topic and their share of the collection; facts about the collection, "
+    "not sources):"
+)
+#: The sources of an answer that rests on keyword or topic checks alone.
+NO_SOURCES_BESIDE_CHECKS = "(none: the answer rests on the checks above, so judge sources_relevant by them)"
 
 DEFAULT_RESPONSE_VALIDATOR_PROMPT = (
     "You are a strict response validator for a RAG system.\n"
@@ -117,8 +122,8 @@ class ResultValidationResponseAgent(ResponseAgent):
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
         """Validate the answer against retrieved sources and set alert metadata.
 
-        An answer with no source is checked against the turn's keyword checks when it has
-        any; with neither, it is mismatched without asking the model.
+        An answer with no source is checked against the turn's keyword and topic checks when it
+        has any; with no source and no check, it is mismatched without asking the model.
 
         Args:
             result (RetrievalResult): The retrieval result to validate.
@@ -141,8 +146,8 @@ class ResultValidationResponseAgent(ResponseAgent):
                 reason="No answer to validate.",
             )
             return result
-        if not result.sources and not result.keyword_checks:
-            # An answer with neither sources nor keyword checks is mismatched by
+        if not result.sources and not result.keyword_checks and not result.topic_checks:
+            # An answer with neither sources nor checks is mismatched by
             # construction: there is nothing to be grounded against.
             result.validation_checked = True
             result.validation_mismatch = True
@@ -161,6 +166,7 @@ class ResultValidationResponseAgent(ResponseAgent):
                 tool_used=result.tool_used,
                 previous_query=turn.previous_user_input,
                 keyword_checks=result.keyword_checks,
+                topic_checks=result.topic_checks,
             )
             response = self.llm.complete(prompt)
             response_text = str(getattr(response, "text", "") or "").strip()
@@ -240,6 +246,7 @@ class ResultValidationResponseAgent(ResponseAgent):
         tool_used: str | None = None,
         previous_query: str | None = None,
         keyword_checks: str | None = None,
+        topic_checks: str | None = None,
     ) -> str:
         """Build validation prompt for the secondary LLM check.
 
@@ -255,19 +262,24 @@ class ResultValidationResponseAgent(ResponseAgent):
             previous_query (str | None): The user's message before this one, shown ahead of the query.
             keyword_checks (str | None): An agent turn's keyword checks, one line each, shown after any
                 summary diagnostics under :data:`KEYWORD_CHECKS_HEADING`; ``None`` or empty adds nothing.
+            topic_checks (str | None): An agent turn's topic checks, one line each, shown after the
+                keyword checks under :data:`TOPIC_CHECKS_HEADING`; ``None`` or empty adds nothing.
 
         Returns:
             str: Prompt asking for groundedness/relevance validation.
         """
         checks = (keyword_checks or "").strip()
+        topics = (topic_checks or "").strip()
         sources_text, truncated = self._sources_to_text(sources)
         if truncated:
             sources_text = f"{self._truncation_note}\n\n{sources_text}"
-        if checks and not sources:
+        if (checks or topics) and not sources:
             sources_text = NO_SOURCES_BESIDE_CHECKS
         diagnostics_text = self._summary_diagnostics_to_text(summary_diagnostics)
         if checks:
             diagnostics_text += f"{KEYWORD_CHECKS_HEADING}\n{checks}\n\n"
+        if topics:
+            diagnostics_text += f"{TOPIC_CHECKS_HEADING}\n{topics}\n\n"
         retrieval_context = self._retrieval_context_to_text(
             user_query=query,
             retrieval_query=retrieval_query,

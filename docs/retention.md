@@ -43,8 +43,8 @@ moves on:
 
 - every request that works on a collection — each such route passes the
   ownership gate (`_require_owned_collection`), which records the activity:
-  chat, search, analysis, the inspector, previews, summaries, extracts and
-  exports;
+  chat, search, analysis, the inspector, previews, summaries, topics, extracts
+  and exports;
 - ingesting into a collection — upload, finalize and `POST /ingest`;
 - opening, extending or exporting a report built from the collection.
 
@@ -54,8 +54,9 @@ the Dashboard, for one, reads the selected collection's document count on load.
 
 Looking does not count. Listing collections or chat sessions, reading deadlines
 (`GET /collections/retention`) and the maintenance commands — `search-index`,
-`search-index-all`, `resolve`, `extract` and `retention-report` — never move a
-clock, so a one-off backport can never keep every collection alive.
+`search-index-all`, `resolve`, `extract`, `topics` and `retention-report` —
+never move a clock, so a one-off backport can never keep every collection
+alive.
 
 The clock is written at most once an hour per collection, and whether or not
 retention is on — switching it on later finds real history. A failed write never
@@ -67,8 +68,9 @@ While retention is on, the backend sweeps once a day, starting five minutes
 after startup. For each collection past its due date it:
 
 1. **skips it if any job is still working on it** — an ingest, a summary, an
-   extract, or upload-time preprocessing. Deleting under a running job would
-   let the job re-create the collection; the next sweep tries again;
+   extract, a topics job, or upload-time preprocessing. Deleting under a
+   running job would let the job re-create the collection; the next sweep
+   tries again;
 2. **re-reads its clock** and spares it if anyone used it since the sweep
    started;
 3. **deletes it** with everything connected (below).
@@ -96,12 +98,14 @@ in this order:
 2. the source files, and with them the collection's docstore, summary cache,
    ingest manifest and cached transcripts;
 3. stored extracts;
-4. its PDFs' pipeline artifacts (page text, chunks, tables, figures under
+4. stored topic runs, under `TOPICS_DIR` — see
+   [topics.md](topics.md#the-store-and-its-lock);
+5. its PDFs' pipeline artifacts (page text, chunks, tables, figures under
    `PIPELINE_ARTIFACTS_DIR`) that nothing else uses — see below;
-5. the collection's chat sessions;
-6. the reports built from it — manual deletion removes them too, see
+6. the collection's chat sessions;
+7. the reports built from it — manual deletion removes them too, see
    [reports.md](reports.md#when-the-collection-is-deleted);
-7. last, the ownership row.
+8. last, the ownership row.
 
 A failure stops the cascade with the collection still listed, and the next
 attempt finishes it: every step is a no-op on what is already gone. While a
@@ -115,8 +119,9 @@ now. The collection's own folders are found by its manifest *and* by the source
 path each folder records, which is how an upload that was preprocessed but never
 ingested is found. Removing too much costs only a re-read of that PDF. With
 `INGEST_MANIFEST_ENABLED=false` nothing says what other collections use, so no
-artifact is removed. Unlike the steps above, this one is best-effort: a failure
-is logged and does not stop the delete.
+artifact is removed. Like removing the hidden companions, the stored extracts
+and the topic runs, this step is best-effort: a failure is logged and does not
+stop the delete.
 
 ## Upgrading
 

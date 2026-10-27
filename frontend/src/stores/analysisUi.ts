@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type AnalysisTab = 'ner' | 'hate' | 'summary'
+export type AnalysisTab = 'ner' | 'hate' | 'summary' | 'topics'
 export type NerView = 'table' | 'graph'
 
 /**

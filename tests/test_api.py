@@ -39,7 +39,7 @@ import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
 from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger
-from docint.agents.generation import NO_SOURCES_BESIDE_CHECKS
+from docint.agents.generation import NO_SOURCES_BESIDE_CHECKS, TOPIC_CHECKS_HEADING
 from docint.agents.turn.keyword import KeywordMatcher
 from docint.agents.turn.loop import _OVERFLOW_MESSAGE
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
@@ -58,10 +58,14 @@ class DummySessionManager:
     """Dummy session manager for testing purposes."""
 
     scope_owned = True
+    topic_owned = True
 
     def __init__(self) -> None:
-        """Start with no scope pinned, per instance."""
+        """Start with no scope or topic pinned, per instance."""
         self.scope: list[str] = []
+        self.topic_focus: dict[str, Any] | None = None
+        #: Every topic read or write, so a test can tell the store was left alone.
+        self.topic_calls: list[str] = []
         self.validation_updates: list[dict[str, Any]] = []
         self.prior_turn: PriorTurn | None = None
 
@@ -145,6 +149,48 @@ class DummySessionManager:
             return False
         self.scope = []
         return True
+
+    def get_topic_focus(self, session_id: str, owner: str | None) -> dict[str, Any] | None:
+        """Return the recorded topic.
+
+        Args:
+            session_id (str): The session to read.
+            owner (str | None): The requesting principal.
+
+        Returns:
+            dict[str, Any] | None: The recorded topic, or ``None``.
+        """
+        self.topic_calls.append("get")
+        return dict(self.topic_focus) if self.topic_focus else None
+
+    def set_topic_focus(self, session_id: str, owner: str | None, focus: Any) -> bool:
+        """Record a topic, honouring the owner gate the real manager applies.
+
+        Args:
+            session_id (str): The session to update.
+            owner (str | None): The requesting principal.
+            focus (Any): The topic, or ``None`` to clear it.
+
+        Returns:
+            bool: Whether the topic was stored.
+        """
+        self.topic_calls.append("set")
+        if not self.topic_owned:
+            return False
+        self.topic_focus = dict(focus) if focus is not None else None
+        return True
+
+    def clear_topic_focus(self, session_id: str, owner: str | None) -> bool:
+        """Clear the recorded topic.
+
+        Args:
+            session_id (str): The session to update.
+            owner (str | None): The requesting principal.
+
+        Returns:
+            bool: Whether the session was found.
+        """
+        return self.set_topic_focus(session_id, owner, None)
 
     def list_sessions(self, owner: str | None = None) -> list[dict[str, Any]]:
         """List the caller's sessions.
@@ -2482,6 +2528,116 @@ def test_query_without_a_scope_field_still_uses_the_stored_scope(client: TestCli
 
     assert response.status_code == 200
     assert rag.scoped_ids[-1] == ["stored-1"]
+
+
+#: The topic "Ask in chat" sends with a chat's first turn.
+TOPIC_FOCUS = {"run_id": "20260102-030405-a1b2c3", "topic_id": 3, "label": "Harbour cranes"}
+
+
+def test_stream_query_pins_a_request_carried_topic_on_the_session(client: TestClient) -> None:
+    """The turn that creates a chat stores the topic the chat was opened with.
+
+    The session row is minted by that very turn, so the request is the only
+    place the topic can come from; stored there, the chat keeps it across a
+    reload instead of losing it with the page.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    with client.stream(
+        "POST",
+        "/stream_query",
+        json={"question": "What?", "collection": "alpha", "topic_focus": TOPIC_FOCUS},
+    ) as resp:
+        assert resp.status_code == 200
+        resp.read()
+
+    assert rag.sessions.topic_focus == TOPIC_FOCUS
+
+
+def test_query_pins_a_request_carried_topic_on_the_session(client: TestClient) -> None:
+    """`/query` stores a request-carried topic like `/stream_query` does.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.post(
+        "/query",
+        json={"question": "What?", "collection": "alpha", "topic_focus": TOPIC_FOCUS},
+    )
+
+    assert response.status_code == 200
+    assert rag.sessions.topic_focus == TOPIC_FOCUS
+
+
+@pytest.mark.parametrize("path", ["/query", "/stream_query"])
+def test_a_turn_without_a_topic_leaves_the_stored_one_alone(client: TestClient, path: str) -> None:
+    """Later turns carry no topic, and must neither drop nor read the stored one.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        path (str): The query endpoint under test.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.sessions.topic_focus = dict(TOPIC_FOCUS)
+
+    with client.stream("POST", path, json={"question": "What?", "collection": "alpha", "session_id": "s1"}) as resp:
+        assert resp.status_code == 200
+        resp.read()
+
+    assert rag.sessions.topic_focus == TOPIC_FOCUS
+    assert rag.sessions.topic_calls == []
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        {**TOPIC_FOCUS, "run_id": "junk 20260102-030405-a1b2c3 junk"},
+        {**TOPIC_FOCUS, "run_id": ""},
+        {**TOPIC_FOCUS, "topic_id": -1},
+        {**TOPIC_FOCUS, "label": "x" * 501},
+    ],
+    ids=["run-id-inside-other-text", "empty-run-id", "negative-topic", "oversize-label"],
+)
+def test_a_malformed_topic_is_refused_before_streaming(client: TestClient, topic: dict[str, Any]) -> None:
+    """A topic that names no run of this app is a 422, and nothing is stored.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        topic (dict[str, Any]): The malformed topic.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.post(
+        "/stream_query",
+        json={"question": "What?", "collection": "alpha", "topic_focus": topic},
+    )
+
+    assert response.status_code == 422
+    assert rag.sessions.topic_calls == []
+
+
+def test_a_stateless_turn_pins_no_topic(client: TestClient) -> None:
+    """A stateless turn has no session to keep a topic on.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.post(
+        "/query",
+        json={
+            "question": "What?",
+            "collection": "alpha",
+            "retrieval_mode": "stateless",
+            "topic_focus": TOPIC_FOCUS,
+        },
+    )
+
+    assert response.status_code == 200
+    assert rag.sessions.topic_focus is None
+    assert rag.sessions.topic_calls == []
 
 
 def test_stream_query_refuses_an_oversize_request_scope_before_streaming(client: TestClient) -> None:
@@ -5620,6 +5776,76 @@ def test_scope_on_an_unowned_session_is_not_found(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_session_topic_is_read_only_through_its_own_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A chat's topic is served only while the collection it is pinned to is active.
+
+    Gated like the history, so Back after a collection switch cannot carry one
+    collection's topic into a chat shown in another.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    sessions = cast(DummyRAG, api_module.rag).sessions
+    sessions.topic_focus = dict(TOPIC_FOCUS)
+    pins = {"123": "docs", "legacy": None}
+    monkeypatch.setattr(sessions, "get_session_collection", lambda session_id, owner=None: pins.get(session_id))
+
+    response = client.get("/sessions/123/topic", params={"collection": "docs"})
+    assert response.status_code == 200
+    assert response.json() == {"topic_focus": TOPIC_FOCUS}
+
+    assert client.get("/sessions/123/topic", params={"collection": "other"}).status_code == 404
+    assert client.get("/sessions/legacy/topic", params={"collection": "docs"}).status_code == 404
+    assert client.get("/sessions/123/topic").status_code == 422
+
+    unowned = types.SimpleNamespace(resolve=lambda owner, logical: None)
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: unowned)
+    assert client.get("/sessions/123/topic", params={"collection": "docs"}).status_code == 404
+
+
+def test_a_session_without_a_topic_reads_none(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A chat that was not opened from a topic says so rather than 404ing.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    sessions = cast(DummyRAG, api_module.rag).sessions
+    monkeypatch.setattr(sessions, "get_session_collection", lambda session_id, owner=None: "docs")
+
+    response = client.get("/sessions/123/topic", params={"collection": "docs"})
+
+    assert response.status_code == 200
+    assert response.json() == {"topic_focus": None}
+
+
+def test_session_topic_can_be_cleared(client: TestClient) -> None:
+    """Removing the topic stops narrowing the chat, which itself stays."""
+    sessions = cast(DummyRAG, api_module.rag).sessions
+    sessions.topic_focus = dict(TOPIC_FOCUS)
+
+    response = client.delete("/sessions/s1/topic")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert sessions.topic_focus is None
+
+
+def test_clearing_the_topic_of_an_unowned_session_is_not_found(client: TestClient) -> None:
+    """A session that is missing or another owner's must look identical."""
+    sessions = cast(DummyRAG, api_module.rag).sessions
+    sessions.topic_owned = False
+    try:
+        response = client.delete("/sessions/other/topic")
+    finally:
+        sessions.topic_owned = True
+
+    assert response.status_code == 404
+
+
 def test_chunk_endpoint_returns_the_full_text(client: TestClient) -> None:
     """Expanding a hit needs the whole chunk, which search does not carry.
 
@@ -7243,6 +7469,103 @@ def test_an_assessment_shows_its_validator_a_check_made_while_written(monkeypatc
     [prompt] = validator.prompts
     assert '\n- "Feuerwerk" (text): 0; collection being written\n' in prompt
     assert "intent=assessment" in prompt
+
+
+#: A topics listing as an agent turn's trail stores it, and the check line its validator reads.
+LISTING_STEP: dict[str, Any] = {
+    "action": "topics",
+    "detail": "",
+    "found": 0,
+    "total": 12000,
+    "filtered": False,
+    "topics": [[3, "Hafenfest und Stände", 410]],
+}
+LISTING_CHECK_LINE = '- T3 "Hafenfest und Stände": 410 of 12000 chunks (3.4%)'
+
+
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_an_agent_lookup_resting_on_a_topic_listing_is_validated_against_its_topic_checks(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """A topic's share cites no passage: the validator is asked about it with the topic checks, not refused unasked.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    answer = "Rund 3 % der Abschnitte handeln vom Hafenfest."
+    final = _agent_final(response=answer, sources=[], agent={**LOOKUP_TRAIL, "actions": [LISTING_STEP]})
+    monkeypatch.setattr(rag, "stream_chat", _scripted_stream([], [answer, final]))
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    if path == "/query":
+        body = client.post(path, json={"question": "Wie viel der Sammlung handelt vom Hafenfest?"}).json()
+    else:
+        body = _stream_frames(client, question="Wie viel der Sammlung handelt vom Hafenfest?")[-1]
+
+    [prompt] = validator.prompts
+    assert f"{TOPIC_CHECKS_HEADING}\n{LISTING_CHECK_LINE}\n" in prompt
+    assert NO_SOURCES_BESIDE_CHECKS in prompt
+    assert (body["validation_checked"], body["validation_mismatch"]) == (True, False)
+
+
+def test_an_agent_lookup_citing_nothing_rests_on_its_topic_checks(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A search found passages, the answer cites none and states a topic's share: it rests on the topic check alone.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    sources = [{"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."}]
+    trail = {**LOOKUP_TRAIL, "actions": [{"action": "search", "detail": "Hafenfest", "found": 1}, LISTING_STEP]}
+    final = _agent_final(response="Rund 3 % der Abschnitte handeln vom Hafenfest.", sources=sources, agent=trail)
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    client.post("/query", json={"question": "Wie viel der Sammlung handelt vom Hafenfest?"})
+
+    [prompt] = validator.prompts
+    assert f"\n{LISTING_CHECK_LINE}\n" in prompt
+    assert NO_SOURCES_BESIDE_CHECKS in prompt
+    assert "plant das Fest" not in prompt
+
+
+def test_an_assessment_hands_its_topic_checks_to_the_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An assessment's source-backed part may state a topic's share too, so its validator reads the topic checks.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+
+    result = api_module._assessment_validation(
+        question="Wie stark prägt das Hafenfest die Sammlung?",
+        answer="Rund 3 % der Abschnitte handeln vom Hafenfest.",
+        sources=[{"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."}],
+        agent={"answer": "split", "evidence_chars": None, "actions": [LISTING_STEP]},
+    )
+
+    [prompt] = validator.prompts
+    assert f"{TOPIC_CHECKS_HEADING}\n{LISTING_CHECK_LINE}\n" in prompt
+    assert NO_SOURCES_BESIDE_CHECKS in prompt
+    assert "plant das Fest" not in prompt
+    assert "intent=assessment" in prompt
+    assert (result["validation_checked"], result["validation_mismatch"]) == (True, False)
 
 
 def _assessment_stream(

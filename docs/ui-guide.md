@@ -126,6 +126,51 @@ chip is drawn from the target stored with the turn, so it survives a reload.
 Everything shows no chip, nor does a turn answered from a hand-picked scope
 (the scope outranks the target) or one saved before the target was recorded.
 
+**Ask in chat** on an Analysis topic opens a new chat with that topic as its
+**topic focus**, shown as a chip at the inner end of the header's controls
+(`src/components/chat/TopicFocusChip.tsx`): the topic's number and
+label (`T3 · <label>`) over a line saying what the next turn does with it, and
+a control that removes it. The focus adds one metadata rule, `docint_topic`
+equal to `<run id>:<topic id>` ([topics.md](topics.md#payload-keys-and-indexes)), to
+every search of the search panel, its CSV export included, and to chat turns
+answered from Everything or Documents, which then answer from the topic's
+chunks alone, without their wider sections. The chip has four states; when
+several apply, the first wins:
+
+- **stale**: the focused run is no longer the collection's active run, for
+  example after a rebuild. Nothing is sent, since the old value matches no
+  chunk;
+- **scoped**: chunks are pinned, so an answer comes from them alone and ignores
+  every filter, and the rule applies to searches only;
+- **visual**: the Images target. Its turns get no topic rule, while searches
+  keep it;
+- **applied**: the chip is tinted, and the rule rides on searches and turns
+  alike.
+
+The focus belongs to the chat it was asked in. Until that chat's first turn it
+is only a pick (`src/stores/topicFocus.ts`); the first turn sends it as
+`topic_focus`, and the server keeps it on the session that turn creates. From
+then on the chat's topic is the session's (`useChatTopicFocus`, read from
+`GET /sessions/{id}/topic`), so reopening the chat after a reload, or in
+another browser, brings it back, and every other chat keeps its own topic or
+none. The chip's remove control takes it off the chat for good
+(`DELETE /sessions/{id}/topic`); deleting the chat, or its collection, removes
+it too. **New chat** starts without a topic.
+
+Topic focus is text-only: image points carry no topic keys, so a focused search
+returns no image hits and a focused answer has no image lane. A pick is keyed
+by collection and owner, so it shows and applies only in the collection it was
+picked in; an admin who switches to another owner's collection of the same name
+does not carry it over. Until the chat's topic and the active run have been
+read the chip is hidden, and searches and turns both wait for those reads:
+**Send** stays disabled, Enter sends nothing, and once something is typed a
+note under the composer says the chat's topic is being read. A read that fails
+holds nothing: the search or turn goes out without the rule, and the chip stays
+hidden. A topics job that ends
+while the chat is open refetches the run, so a rebuild finished from the app
+marks the focus stale at once; one run through the CLI sends no such signal
+(see [topics.md](topics.md#limitations)).
+
 Most turns are **agent turns**: the model searches the collection itself before
 it answers (see [retrieval-and-agents.md](retrieval-and-agents.md#agent-turns)).
 While it works, the turn lists each step as it happens:
@@ -142,6 +187,8 @@ While it works, the turn lists each step as it happens:
   show that a check ran while the collection was being written: the answer says
   so, and the validation banner flags an answer that leaves it out;
 - a passage read again ("Read passage [2]");
+- a listing of the collection's topics ("Listed the topics"), or one topic's
+  passages, with how many were new ("Read topic T3: 5 passages");
 - a note ("Note: …"): text the model wrote before it decided to search
   again. Whatever of that text had already streamed into the answer moves into
   the trail, and the answer starts afresh;
@@ -257,8 +304,10 @@ dismissed and selected in the namespace it was queued in.
 
 ### Analysis (`src/routes/Analysis.tsx`)
 
-Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**
-(`SummaryPanel`). Pre-warms the NER aggregate when opened.
+Four tabs: **NER**, **Hate Speech** (`HateSpeechTable`), **Summary**
+(`SummaryPanel`) and **Topics** (`TopicsPanel`), the last only while
+`GET /config` reports `topics_enabled`. Pre-warms the NER aggregate when
+opened.
 
 The NER and Hate Speech tabs list what was found in images as well as in
 text: the words printed in a PDF figure, an image attached to a posting or a
@@ -332,6 +381,43 @@ acts on every finding the section's filter matches — the tables page 50 rows a
 a time, so all three walk the remaining cursor pages themselves rather than act
 on what happens to be on screen.
 
+The **Topics** tab (`src/components/analysis/TopicsPanel.tsx`) shows the active
+collection's topic run ([topics.md](topics.md)). A caption counts its topics
+and its coverage (chunks assigned of the total, unassigned, pending) beside
+four icon actions: **Restart analysis**, which asks first, since chat filters on
+the current topics stop matching; **Find new topics**, while some chunks are
+unassigned; **Align pending chunks**, while some are pending; and **Download
+CSV**. A collection without a run shows a **Start analysis** button instead.
+While a job runs, a line names its stage, with a bar where the stage has a
+total. A banner suggests a rebuild when the collection is now embedded with
+another model than the run was built with.
+
+Each topic is a row (`TopicRow.tsx`), largest first: its number (`T3`), its
+label, its size and share of the collection's chunks, a **New** badge for a
+topic a later discover added, its first five keywords and the dates its chunks
+span. Opening a row, one at a time, shows the topic's description, its
+**Evidence** (the five chunks nearest its centre), its **Documents** (the
+source files it draws on, at most 50, each with its chunk count) and **All
+passages**, 50 at a time; the three are read only while the row is open. **Ask
+in chat** opens a new chat focused on the topic (see
+[Chat](#chat-srcrouteschattsx)); the chat keeps it once its first question is
+sent.
+
+The tab shows warnings or errors for the collection's newest topics job
+only when this tab started it or
+watched it live. A job counts as watched live once any of its frames arrives
+1000 ms or more after its started frame, and stays so for the page session
+(`liveJobs` in `src/stores/ingestJobs.ts`). A replayed history arrives within
+milliseconds, so after a reload a run that finished elsewhere does not show its
+old outcome again; the overview reflects that run all the same. Warnings render
+from their codes, never from the backend's message; a collection too small to
+fit is told how many chunks with enough text it has and how many topics need,
+when the warning carries both counts. The CSV holds one row per
+topic (`id,label,size,share,keywords,first_seen,last_seen,origin`, `share` as a
+fraction, keywords joined by `; `), and a text cell starting with `=`, `+`, `-`,
+`@`, a tab or a carriage return is written with a leading apostrophe, so a
+spreadsheet reads it as text (`src/lib/csv.ts`).
+
 ### Inspector (`src/routes/Inspector.tsx`)
 
 A paginated document table (`src/components/inspector/DocumentTable.tsx`)
@@ -352,6 +438,18 @@ run. Each document row also carries a download action for that source alone
 (`SourceExtractAction`); it fetches rather than links, because a postings
 table's hash expands to every post in it and the server answers 413 — the same
 click then queues a targeted build. See [extracts.md](extracts.md).
+
+While the collection has an active topic run, the document table gains a
+**Topics** column between Entities and Hash: up to three badges, largest first,
+each naming a topic (`T3` and its label, cut to 24 characters and whole in the
+tooltip) with the document's chunk count in it, then `+N` for the rest. Values
+of another run, and the run's unassigned chunks, name no topic of the active
+run and are left out; a document with none shows `—`. The tallies come from the
+documents listing's `topics` field
+([api-reference.md](api-reference.md#get-collectionsdocuments)), and the column
+refetches when a topics job on the collection ends: any job the page's job
+stream reports, which a CLI run is not
+([topics.md](topics.md#limitations)).
 
 ### Report (`src/routes/Report.tsx`)
 
@@ -467,6 +565,9 @@ locale) is not yet supported.
   `buildPayload()` serialises the filters for requests. Persisted to
   `localStorage`, except the retrieval target, which belongs to one chat and
   starts each new one at `all`.
+- **`src/stores/topicFocus.ts`** (`useTopicFocusStore`) — the topic **Ask in
+  chat** picked for a chat not started yet. Not persisted: once the chat's
+  first turn has run, its topic is the one the server keeps with the session.
 - Server state (collections, documents, NER, sessions) is owned by
   TanStack Query hooks under `src/hooks/` (`useCollections`, `useNer`,
   `useSessions`, `useDocuments`). A collection-scoped key carries the owner

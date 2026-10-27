@@ -38,6 +38,9 @@ const AGENT_TRAIL_KEYS = [
   'chat.agent_trail_keyframes_other',
   'chat.agent_trail_keyframe',
   'chat.agent_trail_read',
+  'chat.agent_trail_topics_list',
+  'chat.agent_trail_topic_one',
+  'chat.agent_trail_topic_other',
   'chat.agent_trail_note',
   'chat.agent_trail_answer'
 ] as const

@@ -1,0 +1,8 @@
+Du benennst ein Thema einer Sammlung von Textpassagen.
+
+Seine kennzeichnendsten Wörter, die stärksten zuerst: {keywords}
+
+Passagen aus dem Thema:
+{passages}
+
+Antworte mit einem JSON-Objekt mit zwei Schlüsseln: "description", ein Satz dazu, was die Passagen gemeinsam haben, und "label", ein Name für das Thema mit höchstens sechs Wörtern. Benenne, was die Passagen gemeinsam haben, etwa ein Thema, ein Ereignis, einen Schauplatz oder ein Argument, nie den Titel oder die Urheberschaft des Werks, Dokuments oder der Sammlung, aus denen sie stammen. Verwende die Begriffe der Passagen und erfinde nichts.

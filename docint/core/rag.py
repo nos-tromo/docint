@@ -72,6 +72,8 @@ from docint.utils.env_cfg import (
     load_session_env,
     load_sparse_client_env,
     load_summary_env,
+    load_topics_client_env,
+    load_topics_env,
     resolve_enable_hybrid,
 )
 from docint.utils.translate_client import translate as translate_text
@@ -147,6 +149,7 @@ from docint.agents.turn.loop import AgentLoop
 from docint.agents.turn.passages import passage_label
 from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
+from docint.agents.turn.topics import KEYWORDS_SHOWN, TopicLine, TopicPassages, TopicsListing, TopicsSource
 from docint.core import collection_writes
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -198,7 +201,12 @@ from docint.core.retrieval.visual import (
     reciprocal_rank_fusion,
     visual_min_match,
 )
-from docint.core.retrieval_filters import build_qdrant_filter, matches_metadata_filters, merge_qdrant_filters
+from docint.core.retrieval_filters import (
+    build_qdrant_filter,
+    matches_metadata_filters,
+    merge_qdrant_filters,
+    rule_fields,
+)
 from docint.core.search.fields import (
     DEFAULT_SEARCH_FIELD,
     IMAGE_LANE_FIELDS,
@@ -248,6 +256,22 @@ from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import build_quantization_config, qdrant_collection_exists
 from docint.core.summary.tree import MapCache, TreeSummarizer, UnitChunk
 from docint.core.summary.units import MapUnit, partition_units, payload_text, source_file_hash, source_file_name
+from docint.core.topics import views as topic_views
+from docint.core.topics.gather import (
+    RUN_FIELD,
+    TOPIC_FIELD,
+    and_filters,
+    central_points,
+    dense_vector,
+    eligible_filter,
+    ensure_topic_indexes,
+    topic_counts,
+)
+from docint.core.topics.gather import count as count_points
+from docint.core.topics.labels import TopicLabeller
+from docint.core.topics.service import TopicsDeps, TopicsService
+from docint.core.topics.stopwords import load_stop_words, stop_words_digest
+from docint.core.topics.store import TopicRun, TopicStore
 from docint.utils import image_description
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
@@ -273,6 +297,7 @@ from docint.utils.retry import (
 )
 from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
 from docint.utils.timefmt import format_short
+from docint.utils.topics_client import TopicsClient
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -282,6 +307,8 @@ SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 # single final synthesized payload.
 SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+#: Source keys that name the physical collection; the topic reads drop them.
+_PHYSICAL_SOURCE_KEYS: tuple[str, ...] = ("preview_url", "document_url", "image_collection")
 
 # The reranker records what it did on the nodes it returns. That is the one
 # place the outcome can ride safely: the postprocessor instance is shared by
@@ -2196,6 +2223,22 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
         return cast(list[NodeWithScore], reranker._postprocess_nodes(nodes, query_bundle))
 
 
+def _names_topic(rules: Sequence[Any] | None) -> bool:
+    """Tell whether a request's filter rules name a topic key, whatever their operator.
+
+    Topic keys are stored on each fine chunk's point alone: no docstore node or
+    coarse parent carries them, so such a rule can only be checked against the
+    retrieved chunks themselves.
+
+    Args:
+        rules (Sequence[Any] | None): The request's raw filter rules.
+
+    Returns:
+        bool: True when a rule names ``docint_topic`` or ``docint_topic_run``.
+    """
+    return any(name.startswith(TOPIC_FIELD) for name in rule_fields(rules))
+
+
 def _as_qdrant_point_id(node_id: str) -> str | int:
     """Restore a point id's native type for a Qdrant lookup.
 
@@ -3019,6 +3062,8 @@ _RETRIEVAL_HANDLE_CACHE_MAX = 32
 AGENT_LEDGER_CAP = 64
 #: Longest LLM-visible metadata string an agent turn's passage header shows; a longer one is cut with an ellipsis.
 AGENT_METADATA_VALUE_CHARS = 200
+#: Most central passages one call of an agent turn's topics tool reads.
+AGENT_TOPIC_PASSAGES = 5
 #: What a reference row's header leads with after its citation line: a frame's label, then its file and reference block.
 _AGENT_LEADING_KEYS = ("keyframe", "filename", "reference_metadata")
 #: Who wrote a reference row and when, in the order its reference block leads with them: the row's own
@@ -3043,6 +3088,8 @@ _AGENT_IDENTITY_KEYS = (
 #: Why a collection cannot offer an agent turn a keyword match: the request's filters do not compile for Qdrant, a
 #: lane in scope was not counted, or the text, which a call matches by default, has no index to match.
 KeywordUnavailable = Literal["filters", "coverage", "text_not_ready"]
+#: Why an agent turn is offered no topics tool, as its DEBUG line names it.
+TopicsUnavailable = Literal["visual", "scoped", "disabled", "filters", "no_run", "no_topics"]
 
 #: How long a read of a collection's keyword readiness is reused, unless this process writes the collection meanwhile.
 KEYWORD_READINESS_TTL_S = 30.0
@@ -3417,6 +3464,7 @@ class RAG:
     )
     _field_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _visual_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
+    _topic_indexes_ensured: set[str] = field(default_factory=set, init=False, repr=False)
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _keyword_readiness_cache: dict[tuple[str, bool], tuple[float, int, _KeywordReadiness]] = field(
         default_factory=dict, init=False, repr=False
@@ -6812,7 +6860,9 @@ class RAG:
                 ),
             )
 
-        node_postprocessors = self._text_postprocessors(profile=profile, retrieval_options=retrieval_options)
+        node_postprocessors = self._text_postprocessors(
+            profile=profile, retrieval_options=retrieval_options, metadata_filter_rules=metadata_filter_rules
+        )
         return RetrieverQueryEngine.from_args(
             retriever=self._build_retriever(
                 metadata_filters=metadata_filters,
@@ -6836,11 +6886,20 @@ class RAG:
         profile: dict[str, Any],
         retrieval_options: dict[str, Any] | None = None,
         social_links: bool = True,
+        metadata_filter_rules: Sequence[Any] | None = None,
     ) -> list[BaseNodePostprocessor]:
         """Build the postprocessor chain of the ``all`` and ``documents`` targets.
 
         A lookup's engine runs it, and so does an agent turn's keyword match, which
         leaves the social steps out.
+
+        Under a rule naming a topic key, parent context and link-following are
+        left out, as on a scoped turn: a topic belongs to each fine chunk alone,
+        while a coarse parent spans chunks of several topics and a posting's
+        siblings carry their own, so either step would hand the model passages
+        the rule never matched. This is not the ``parent_context_enabled`` switch,
+        which also keeps coarse parents out of retrieval: turned off, a ``neq``
+        topic rule would retrieve them, since they carry no topic keys.
 
         Args:
             profile (dict[str, Any]): The collection profile; ``is_social_table`` sizes
@@ -6850,15 +6909,18 @@ class RAG:
             social_links (bool): Whether a social collection's diversity cap and
                 link-following join the chain. A keyword match leaves them out: its
                 passages must be matches, and the cap would thin an author's postings.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
 
         Returns:
             list[BaseNodePostprocessor]: Rerank, the image floor with its description
             re-score, parent context when enabled, the social steps when asked, then
-            citation numbering.
+            citation numbering; without parent context and link-following under a
+            topic rule.
         """
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
+        within_topic = _names_topic(metadata_filter_rules)
         node_postprocessors: list[BaseNodePostprocessor] = [
             # The reranker scores without cutting; the floor below owns the
             # cut, so a sub-floor image can never hold a slot a text hit
@@ -6873,7 +6935,7 @@ class RAG:
                 rescore_min_score=self._image_rescore_floor(),
             ),
         ]
-        if retrieval_settings["parent_context_enabled"] and self.index is not None:
+        if retrieval_settings["parent_context_enabled"] and self.index is not None and not within_topic:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(
                 social_table=bool(profile.get("is_social_table")),
             )
@@ -6898,7 +6960,8 @@ class RAG:
             # summarizer's social config, but this call site is on the
             # chat/retrieval path, not the summarizer.
             node_postprocessors.append(SocialSourceDiversityPostprocessor(diversity_limit=self.social_diversity_limit))
-            node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
+            if not within_topic:
+                node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
         node_postprocessors.append(CitationNumberingPostprocessor())
@@ -7474,6 +7537,12 @@ class RAG:
             ExtractStore(self.path_config.extracts).delete_collection(target)
         except Exception as e:
             logger.warning("Failed to delete stored extracts for collection '{}': {}", target, e)
+
+        try:
+            TopicStore(self.path_config.topics).delete_collection(target)
+        except Exception as e:
+            logger.warning("Failed to delete stored topics for collection '{}': {}", target, e)
+        self._topic_indexes_ensured.discard(target)
 
         # 4. PDF pipeline artifacts nothing else uses.
         if artifacts is not None:
@@ -8695,6 +8764,7 @@ class RAG:
         retrieval_target: str,
         window: ConversationWindow,
         keyword_fields: Sequence[str] | None = None,
+        topics: bool = False,
     ) -> str:
         """Render an agent turn's system prompt.
 
@@ -8704,13 +8774,15 @@ class RAG:
                 ends the prompt.
             keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers, the
                 text first; ``None`` (or empty) when the turn offers no keyword tool.
+            topics (bool): Whether the turn offers the topics tool.
 
         Returns:
             str: ``agent_system`` with the target's tools guide, the assessment rule while
             ``ASSESSMENT_ENABLED`` is on, and the window's summary block. When ``keyword_fields``
             is given, the guide is followed by the keyword line (``agent_tools_keyword``) and,
             when more than the text is offered, by a line naming the fields
-            (``agent_tools_keyword_fields``); without it the prompt is the target's alone.
+            (``agent_tools_keyword_fields``). With ``topics``, the topics line
+            (``agent_tools_topics``) comes last. Without either the prompt is the target's alone.
         """
         rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
         guide = self._agent_prompt(f"agent_tools_{retrieval_target}")
@@ -8719,6 +8791,8 @@ class RAG:
             if len(keyword_fields) > 1:
                 fields_line = self._agent_prompt("agent_tools_keyword_fields").format(fields=", ".join(keyword_fields))
                 guide = f"{guide}\n{fields_line}"
+        if topics:
+            guide = f"{guide}\n{self._agent_prompt('agent_tools_topics')}"
         return self._agent_prompt("agent_system").format(
             tools_guide=guide,
             assessment_rule=rule,
@@ -8769,6 +8843,184 @@ class RAG:
             reason = built
         logger.debug("The keyword tool was withheld from an agent turn: {}", reason)
         return None
+
+    def _agent_topics(
+        self,
+        retrieval_target: RetrievalTarget,
+        *,
+        scoped: bool,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+    ) -> TopicsSource | None:
+        """Offer an agent turn its collection's topics, where an active run has some.
+
+        A visual or scoped turn is never offered them, and neither is a turn whose filters
+        cannot be compiled for Qdrant: a topic's passages would be read outside them. The run is
+        read once, here. Without filters the listing reads the overview; under them it counts
+        each topic's chunks and the total within the request's filter, as a keyword check counts
+        under it. A topic's passages are its members nearest its centre under the request's
+        filter, named by the run's own label. A withheld offer is logged once at DEBUG by its
+        reason (:data:`TopicsUnavailable`), or as ``fault`` with the exception's type alone.
+
+        Args:
+            retrieval_target (RetrievalTarget): Which evidence the turn may answer from.
+            scoped (bool): Whether the turn answers a pinned scope.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+
+        Returns:
+            TopicsSource | None: The topics, bound to this collection, its run and the request's
+            filter; ``None`` when withheld.
+        """
+        reason: TopicsUnavailable
+        if retrieval_target == "visual":
+            reason = "visual"
+        elif scoped:
+            reason = "scoped"
+        else:
+            try:
+                built = self._topics_source(
+                    metadata_filter_rules=metadata_filter_rules, metadata_filters_active=metadata_filters_active
+                )
+            except Exception as exc:
+                logger.debug("The topics tool was withheld from an agent turn: fault ({})", type(exc).__name__)
+                return None
+            if not isinstance(built, str):
+                return built
+            reason = built
+        logger.debug("The topics tool was withheld from an agent turn: {}", reason)
+        return None
+
+    def _topics_source(
+        self, *, metadata_filter_rules: Sequence[Any] | None, metadata_filters_active: bool
+    ) -> TopicsSource | TopicsUnavailable:
+        """Bind a text turn's topics to its collection, its active run and its filter.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
+            metadata_filters_active (bool): Whether the request carries filters at all.
+
+        Returns:
+            TopicsSource | TopicsUnavailable: The topics; otherwise why there are none.
+
+        Raises:
+            Exception: Whatever reading the topic store raises.
+        """
+        if not load_topics_env().enabled:
+            return "disabled"
+        request_filter = build_qdrant_filter(metadata_filter_rules)
+        if metadata_filters_active and request_filter is None:
+            return "filters"
+        collection = self.qdrant_collection
+        run = self._active_topic_run(collection)
+        if run is None:
+            return "no_run"
+        if not run.table.topics:
+            return "no_topics"
+
+        def _listing() -> TopicsListing:
+            """Read the collection's topics and their sizes, under the request's filter when it has one.
+
+            Returns:
+                TopicsListing: The topics, largest first; none when the run is gone. Under a filter,
+                the run's topics that hold a chunk it selects, sized and totalled within it.
+            """
+            if request_filter is not None:
+                return _filtered_listing(request_filter)
+            overview = topic_views.overview(
+                self.qdrant_client,
+                run,
+                collection,
+                embed_model=self.embed_model_id or "",
+                ensure_indexes=self._ensure_topic_indexes_once,
+            )
+            if overview is None:
+                return TopicsListing(lines=(), total=0)
+            lines = tuple(
+                TopicLine(
+                    topic_id=int(topic["id"]),
+                    label=str(topic.get("label") or ""),
+                    keywords=tuple(str(pair[0]) for pair in (topic.get("keywords") or [])[:KEYWORDS_SHOWN]),
+                    size=int(topic.get("size") or 0),
+                )
+                for topic in overview.get("topics") or []
+            )
+            return TopicsListing(lines=lines, total=int((overview.get("coverage") or {}).get("total") or 0))
+
+        def _filtered_listing(within: qdrant_models.Filter) -> TopicsListing:
+            """Count each topic's chunks and the eligible total within the request's filter.
+
+            The topic keys get their indexes first, as the overview's facet does.
+
+            Args:
+                within (qdrant_models.Filter): The request's compiled filter.
+
+            Returns:
+                TopicsListing: The run's topics holding a chunk the filter selects, with their labels
+                and keywords from the run, largest first.
+            """
+            self._ensure_topic_indexes_once(collection)
+            client = self.qdrant_client
+            topics = run.table.topics
+            sizes = topic_counts(client, collection, run.run_id, limit=len(topics) + 2, extra=within)
+            total = count_points(client, collection, and_filters(eligible_filter(), within))
+            lines = sorted(
+                (
+                    TopicLine(
+                        topic_id=topic.id,
+                        label=topic.label,
+                        keywords=tuple(word for word, _ in topic.keywords[:KEYWORDS_SHOWN]),
+                        size=sizes[topic.id],
+                    )
+                    for topic in topics
+                    if sizes.get(topic.id, 0) > 0
+                ),
+                key=lambda line: (-line.size, line.topic_id),
+            )
+            return TopicsListing(lines=tuple(lines), total=total, filtered=True)
+
+        def _passages(topic_id: int) -> TopicPassages | None:
+            """Read one topic's members nearest its centre, under the request's filter.
+
+            Runs on a search thread, inside the request's collection scope.
+
+            Args:
+                topic_id (int): The topic.
+
+            Returns:
+                TopicPassages | None: The passages, closest first, at most ``AGENT_TOPIC_PASSAGES``,
+                none when the vectors no longer match the run's size, with the topic's label in the
+                run. ``None`` for a topic the run lacks, the unassigned ``-1`` included.
+
+            Raises:
+                RuntimeError: When the active collection is not the one the topics were built for,
+                    before anything is read; the call is answered as failed.
+            """
+            if self.qdrant_collection != collection:
+                raise RuntimeError("A topics read ran outside the collection it was built for.")
+            centre = run.table.centre(topic_id)
+            if centre is None:
+                return None
+            info = run.table.topic(topic_id)
+            label = info.label if info is not None else ""
+            self._ensure_topic_indexes_once(collection)
+            dense = dense_vector(self.qdrant_client, collection)
+            if dense.dim != run.table.dim:
+                return TopicPassages(label=label, nodes=[])
+            points = central_points(
+                self.qdrant_client,
+                collection,
+                centre=centre,
+                dense=dense,
+                run_id=run.run_id,
+                topic_id=topic_id,
+                limit=AGENT_TOPIC_PASSAGES,
+                extra=request_filter,
+            )
+            nodes = (_point_node(str(point.id), dict(point.payload or {})) for point in points)
+            return TopicPassages(label=label, nodes=[scored for scored in nodes if scored is not None])
+
+        return TopicsSource(listing=_listing, passages=_passages)
 
     def _keyword_readiness(self, collection: str, *, with_images: bool) -> _KeywordReadiness | Literal["coverage"]:
         """Read what a collection's keyword match is decided on, or reuse a read still inside its TTL.
@@ -9038,7 +9290,10 @@ class RAG:
                 )
                 nodes = list(retriever.retrieve(bundle))
                 # No profile: without the social steps it would only size parent context's prompt allowance.
-                for postprocessor in self._text_postprocessors(profile={}, social_links=False):
+                chain = self._text_postprocessors(
+                    profile={}, social_links=False, metadata_filter_rules=metadata_filter_rules
+                )
+                for postprocessor in chain:
                     nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
             return KeywordResult(
                 nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords, writing=written()
@@ -9084,10 +9339,14 @@ class RAG:
         is the same passage; a ``visual`` turn reads nothing else. A lane the target leaves out
         is never read, so an id only that lane holds counts as not found. With raw filter rules,
         a passage they do not match is left out; filters active without them carry nothing,
-        logged once at DEBUG as ``filters``. A passage without text is not carried. A failure of
-        the store or the index carries nothing and is logged by the exception's type alone; a
-        docstore miss of one id only sends that id on to the store. One INFO line counts the
-        outcome. Runs under the caller's collection scope (:meth:`collection_scope`).
+        logged once at DEBUG as ``filters``. A rule on a topic key is checked against the main
+        collection's stored topic keys, read in one batch, since a docstore node holds none; the
+        node itself is never changed. A passage with no topic keys, such as a picture, is checked
+        as one without a topic: a rule asking for a topic drops it, a ``neq`` rule keeps it. A
+        passage without text is not carried. A failure of the store or the index carries nothing
+        and is logged by the exception's type alone; a docstore miss of one id only sends that id
+        on to the store. One INFO line counts the outcome. Runs under the caller's collection
+        scope (:meth:`collection_scope`).
 
         Args:
             node_ids (Sequence[str]): The cited node ids, in the order to carry them.
@@ -9108,15 +9367,26 @@ class RAG:
         collection = self.qdrant_collection
         try:
             found: dict[str, NodeWithScore] = {}
+            main: dict[str, NodeWithScore] = {}
             if retrieval_target in ("documents", "all"):
-                found.update(self._carried_main(collection, asked))
+                main = self._carried_main(collection, asked)
+                found.update(main)
             if retrieval_target in ("all", "visual"):
                 found.update(self._carried_images(collection, [node_id for node_id in asked if node_id not in found]))
-            loaded = [found[node_id] for node_id in asked if node_id in found]
+            loaded = [(node_id, found[node_id]) for node_id in asked if node_id in found]
+            # A docstore node carries no topic keys: a topic rule is checked on the stored ones.
+            topic_keys: dict[str, dict[str, Any]] = {}
+            if _names_topic(metadata_filter_rules):
+                topic_keys = self._payloads_by_id(
+                    collection, [node_id for node_id in asked if node_id in main], with_payload=[TOPIC_FIELD, RUN_FIELD]
+                )
             carried = [
                 scored
-                for scored in loaded
-                if not metadata_filter_rules or matches_metadata_filters(scored.node.metadata, metadata_filter_rules)
+                for node_id, scored in loaded
+                if not metadata_filter_rules
+                or matches_metadata_filters(
+                    {**scored.node.metadata, **topic_keys.get(node_id, {})}, metadata_filter_rules
+                )
             ]
         except Exception as exc:
             logger.warning("Carried passages could not be loaded ({}); the turn carries none", type(exc).__name__)
@@ -9261,12 +9531,13 @@ class RAG:
         The image tools search the image companion under the request's filter, compiled as the
         visual retriever compiles it. An unscoped ``all`` or ``documents`` turn is also offered
         ``keyword`` where the collection's indexes allow it (:meth:`_agent_keyword_matcher`),
-        with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
+        and ``topics`` where its collection has an active topic run (:meth:`_agent_topics`),
+        each with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
         the request's context, so :meth:`collection_scope` holds there. The budget is measured
         on the rendered system prompt, the offered schemas (none on a pinned scope, whose round
         offers no tools), the window's messages, each with its envelope, and the message. When
-        keyword with every field it can offer leaves the turn less room for tool replies than it
-        needs, the turn is built again with keyword on the text alone, and when even that does
+        the tools leave the turn less room for tool replies than it needs, the turn is built
+        again without topics, then with keyword on the text alone, and when even that does
         not fit, without keyword; each rebuild changes the tools, prompt and budget alike, and
         its INFO line gives the numbers. Only a visual turn shows the model the pictures it
         finds, and only an unscoped turn asks a first round that looked nothing up again, with
@@ -9312,14 +9583,21 @@ class RAG:
                 retrieval_target=retrieval_target,
             )
         )
+        topics_source = self._agent_topics(
+            retrieval_target,
+            scoped=scoped,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+        )
         history_tokens = sum(message_cost(sent.content or "", ratio) for sent in window.messages())
         message_tokens = estimate_tokens(message, ratio)
 
-        def _offer(keyword: KeywordMatcher | None) -> tuple[ToolRegistry, str, TurnBudget]:
+        def _offer(keyword: KeywordMatcher | None, topics: TopicsSource | None) -> tuple[ToolRegistry, str, TurnBudget]:
             """Build the turn's tools, its system prompt and the budget measured on both.
 
             Args:
                 keyword (KeywordMatcher | None): The keyword match to offer; ``None`` for none.
+                topics (TopicsSource | None): The topics to offer; ``None`` for none.
 
             Returns:
                 tuple[ToolRegistry, str, TurnBudget]: The tools, the rendered system prompt and
@@ -9331,10 +9609,13 @@ class RAG:
                 search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
                 list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
                 keyword=keyword,
+                topics=topics,
             )
-            # The keyword lines only where the tools really offer keyword.
+            # The keyword and topics lines only where the tools really offer them.
             fields = keyword.fields if keyword is not None and "keyword" in registry.names else None
-            system_prompt = self._agent_system_prompt(retrieval_target, window, keyword_fields=fields)
+            system_prompt = self._agent_system_prompt(
+                retrieval_target, window, keyword_fields=fields, topics="topics" in registry.names
+            )
             budget = TurnBudget(
                 ctx_window=int(self.openai_ctx_window),
                 reasoning=reasoning,
@@ -9347,7 +9628,15 @@ class RAG:
             )
             return registry, system_prompt, budget
 
-        registry, system_prompt, budget = _offer(matcher)
+        registry, system_prompt, budget = _offer(matcher, topics_source)
+        if "topics" in registry.names and not budget.available:
+            logger.info(
+                "The topics tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            topics_source = None
+            registry, system_prompt, budget = _offer(matcher, topics_source)
         if matcher is not None and len(matcher.fields) > 1 and "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was offered on the text alone in an agent turn: {} tokens of room with its {} "
@@ -9357,14 +9646,14 @@ class RAG:
                 MIN_ROUND_ROOM,
             )
             matcher = KeywordMatcher(fields=(DEFAULT_KEYWORD_FIELD,), check=matcher.check, run=matcher.run)
-            registry, system_prompt, budget = _offer(matcher)
+            registry, system_prompt, budget = _offer(matcher, topics_source)
         if "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
                 budget.round_room,
                 MIN_ROUND_ROOM,
             )
-            registry, system_prompt, budget = _offer(None)
+            registry, system_prompt, budget = _offer(None, topics_source)
         if not budget.available:
             logger.warning(
                 "An agent turn would have {} tokens of room for tool replies, under the {} one needs; none is built",
@@ -10445,10 +10734,14 @@ class RAG:
                         "max_rows": 0,
                         "max_duration": 0.0,
                         "entity_types": set(),
+                        "topics": defaultdict(int),
                     }
 
                 entry = docs_map[filename]
                 entry["node_count"] += 1
+                topic = payload.get("docint_topic")
+                if isinstance(topic, str) and topic:
+                    entry["topics"][topic] += 1
 
                 # Extract entities from payload
                 ents = payload.get("entities") or []
@@ -10501,6 +10794,11 @@ class RAG:
         for _, data in docs_map.items():
             data["page_count"] = len(data.pop("pages"))
             data["entity_types"] = sorted(list(data.get("entity_types", set())))
+            tally = data.pop("topics")
+            if tally:
+                data["topics"] = [
+                    {"topic": t, "count": n} for t, n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+                ]
             if "entity_types" in data and isinstance(data["entity_types"], set):
                 # Fallback if get didn't return set but pop of set or something (redundant with line above but safer)
                 pass
@@ -10857,6 +11155,259 @@ class RAG:
         self.forget_keyword_readiness(collection)
         if ok:
             self._field_indexes_ensured.add(collection)
+
+    def _ensure_topic_indexes_once(self, collection: str) -> None:
+        """Ensure the topic payload indexes once per process per collection.
+
+        A server facet needs its index. Nothing is recorded when the ensure
+        raises, so the next read tries again.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        if collection in self._topic_indexes_ensured:
+            return
+        ensure_topic_indexes(self.qdrant_client, collection)
+        self._topic_indexes_ensured.add(collection)
+
+    def topic_store(self) -> TopicStore:
+        """Return the store holding every collection's topic runs.
+
+        Returns:
+            TopicStore: The store under ``TOPICS_DIR``.
+        """
+        return TopicStore(self.path_config.topics)
+
+    def collection_created_at(self, physical: str) -> str | None:
+        """Return when a collection's ownership row was created.
+
+        A topic run records this value, so a run of an earlier collection of
+        the same name reads as stale.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            str | None: ISO-8601 UTC, ``None`` when no such collection is owned.
+        """
+        created = self.ensure_collection_owner_manager().created_at(physical)
+        return created.isoformat() if created is not None else None
+
+    def forget_documents(self, collection: str) -> None:
+        """Drop a collection's cached document rows.
+
+        Args:
+            collection (str): Physical collection name.
+        """
+        self._documents_cache.pop(collection, None)
+
+    def topics_service(self) -> TopicsService:
+        """Build the topics service from the current configuration.
+
+        Returns:
+            TopicsService: A service writing to this RAG's Qdrant client and topic store.
+        """
+        cfg = load_topics_env()
+        stop_words = load_stop_words()
+        return TopicsService(
+            TopicsDeps(
+                client=self.qdrant_client,
+                fit=TopicsClient(load_topics_client_env()).fit,
+                store=self.topic_store(),
+                labeller=TopicLabeller(self._topic_label_complete) if cfg.labels else None,
+                config=cfg,
+                embed_model=self.embed_model_id or "",
+                stop_words=stop_words,
+                stop_words_sha256=stop_words_digest(stop_words),
+                on_written=self.forget_documents,
+            )
+        )
+
+    def _topic_label_complete(self, prompt: str, response_format: dict[str, Any] | None) -> str:
+        """Ask the chat model for one topic label.
+
+        Args:
+            prompt (str): The label prompt.
+            response_format (dict[str, Any] | None): The reply schema, ``None`` for an unconstrained reply.
+
+        Returns:
+            str: The reply text.
+        """
+        if response_format is not None:
+            response = self.text_model.complete(prompt, response_format=response_format)
+        else:
+            response = self.text_model.complete(prompt)
+        return str(response.text or "")
+
+    def _active_topic_run(self, physical: str) -> TopicRun | None:
+        """Return a collection's active topic run unless it is stale.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            TopicRun | None: The run; ``None`` when absent or built for an earlier collection.
+        """
+        store = self.topic_store()
+        # No pointer, no run: the ownership row is read only when there is a run to check.
+        if store.active_id(physical) is None:
+            return None
+        return store.active(physical, owner_created_at=self.collection_created_at(physical))
+
+    def _topic_source_of(self, physical: str) -> Callable[[Any], dict[str, Any]]:
+        """Build the function that shapes a topic member as a source.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            Callable[[Any], dict[str, Any]]: Point to source, without the keys naming the collection.
+        """
+
+        def source_of(point: Any) -> dict[str, Any]:
+            """Shape one point.
+
+            Args:
+                point (Any): A Qdrant record or scored point.
+
+            Returns:
+                dict[str, Any]: The source.
+            """
+            payload = dict(point.payload or {})
+            source = self._source_from_payload(
+                collection=physical,
+                payload=payload,
+                score=getattr(point, "score", None),
+                node_id=str(point.id),
+                text_value=payload.get("search_text") or None,
+            )
+            for key in _PHYSICAL_SOURCE_KEYS:
+                source.pop(key, None)
+            return source
+
+        return source_of
+
+    def _document_names(self, physical: str) -> dict[str, str]:
+        """Map a collection's file hashes to filenames, through the documents cache.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            dict[str, str]: File hash to filename; the first name listed wins.
+        """
+        cached = self._documents_cache.get(physical)
+        if cached is None:
+            with self.collection_scope(physical):
+                cached = self.list_documents()
+            self._documents_cache[physical] = cached
+        names: dict[str, str] = {}
+        for row in cached:
+            file_hash, filename = row.get("file_hash"), row.get("filename")
+            if file_hash and filename:
+                names.setdefault(str(file_hash), str(filename))
+        return names
+
+    def topics_overview(self, physical: str) -> dict[str, Any] | None:
+        """Describe a collection's active topic run.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            dict[str, Any] | None: The overview; ``None`` without a usable run.
+        """
+        return topic_views.overview(
+            self.qdrant_client,
+            self._active_topic_run(physical),
+            physical,
+            embed_model=self.embed_model_id or "",
+            ensure_indexes=self._ensure_topic_indexes_once,
+        )
+
+    def topic_evidence(
+        self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
+    ) -> list[dict[str, Any]] | None:
+        """Return one topic's members nearest its centre, as sources.
+
+        Args:
+            physical (str): Physical collection name.
+            topic_id (int): Topic id.
+            limit (int): Most passages.
+            run_id (str | None): Expected active run; a different run reads as absent.
+
+        Returns:
+            list[dict[str, Any]] | None: Sources, closest first; ``None`` without the run or the topic.
+        """
+        run = self._active_topic_run(physical)
+        if run is None or (run_id is not None and run.run_id != run_id):
+            return None
+        self._ensure_topic_indexes_once(physical)
+        return topic_views.evidence(
+            self.qdrant_client,
+            run,
+            physical,
+            topic_id,
+            dense=dense_vector(self.qdrant_client, physical),
+            limit=limit,
+            source_of=self._topic_source_of(physical),
+        )
+
+    def topic_documents(
+        self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Count one topic's members per source file.
+
+        Args:
+            physical (str): Physical collection name.
+            topic_id (int): Topic id.
+            limit (int): Most files.
+            run_id (str | None): Expected active run; a different run reads as absent.
+
+        Returns:
+            dict[str, Any] | None: ``{"documents", "more"}``; ``None`` without the run or the topic.
+        """
+        run = self._active_topic_run(physical)
+        if run is None or (run_id is not None and run.run_id != run_id):
+            return None
+        self._ensure_topic_indexes_once(physical)
+        return topic_views.documents(
+            self.qdrant_client,
+            run,
+            physical,
+            topic_id,
+            limit=limit,
+            names=lambda: self._document_names(physical),
+        )
+
+    def topic_chunks(
+        self, physical: str, topic_id: int, *, cursor: str | None, limit: int, run_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Read one page of a topic's members, as sources.
+
+        Args:
+            physical (str): Physical collection name.
+            topic_id (int): Topic id.
+            cursor (str | None): The previous page's cursor.
+            limit (int): Page size.
+            run_id (str | None): Expected active run; a different run reads as absent.
+
+        Returns:
+            dict[str, Any] | None: ``{"items", "next_cursor"}``; ``None`` without the run or the topic.
+        """
+        run = self._active_topic_run(physical)
+        if run is None or (run_id is not None and run.run_id != run_id):
+            return None
+        self._ensure_topic_indexes_once(physical)
+        return topic_views.chunks(
+            self.qdrant_client,
+            run,
+            physical,
+            topic_id,
+            cursor=cursor,
+            limit=limit,
+            source_of=self._topic_source_of(physical),
+        )
 
     def iter_search_matches(
         self,

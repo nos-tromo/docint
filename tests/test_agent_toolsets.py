@@ -13,6 +13,7 @@ from docint.agents.turn.budget import MIN_ROUND_ROOM, TurnBudget, history_allowa
 from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.tools import SearchFn, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
+from docint.agents.turn.topics import TopicPassages, TopicsListing, TopicsSource
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
@@ -30,6 +31,8 @@ REMEDY = "shorten a tool description or raise the context window"
 KEYWORD_FIELDS = ("text", "author", "network", "uuid")
 #: Most keyword may cost a turn at the tightest budget: its schema with all four fields plus its longest guide.
 KEYWORD_TOKENS = 330
+#: Most topics may cost a turn: its schema plus its guide line in the locale where it costs most.
+TOPICS_TOKENS = 200
 
 
 def _no_frames(key: str) -> list[NodeWithScore]:
@@ -81,12 +84,42 @@ def _keyword_matcher(*fields: str) -> KeywordMatcher:
     return KeywordMatcher(fields=fields or ("text",), check=_check, run=_run)
 
 
+def _topics() -> TopicsSource:
+    """Build a topics source that fails the test if it is read.
+
+    Returns:
+        TopicsSource: The source.
+    """
+
+    def _listing() -> TopicsListing:
+        """Fail: no test here expects the topics to be listed.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("The topics were listed, which the test did not expect.")
+
+    def _passages(topic_id: int) -> TopicPassages | None:
+        """Fail: no test here expects a topic to be read.
+
+        Args:
+            topic_id (int): The topic.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("A topic was read, which the test did not expect.")
+
+    return TopicsSource(listing=_listing, passages=_passages)
+
+
 def _toolset(
     target: str,
     *,
     search: SearchFn | None = None,
     search_images: SearchFn | None = None,
     keyword: KeywordMatcher | None = None,
+    topics: TopicsSource | None = None,
 ) -> ToolRegistry:
     """Build the tools of a turn whose searches fail the test if they run, unless given.
 
@@ -95,6 +128,7 @@ def _toolset(
         search (SearchFn | None): The text search; one that raises if it runs when not given.
         search_images (SearchFn | None): The image search; one that raises if it runs when not given.
         keyword (KeywordMatcher | None): The keyword match the turn offers; none when not given.
+        topics (TopicsSource | None): The topics the turn offers; none when not given.
 
     Returns:
         ToolRegistry: The tools the target offers.
@@ -105,6 +139,7 @@ def _toolset(
         search_images=ScriptedSearch() if search_images is None else search_images,
         list_keyframes=_no_frames,
         keyword=keyword,
+        topics=topics,
     )
 
 
@@ -178,6 +213,31 @@ def test_a_visual_turn_is_never_offered_keyword_even_when_given_one() -> None:
 
     assert _offered(registry) == ["search_images", "keyframes", "read"]
     refused = registry.call(tool_call("keyword", words="Hafenfest"), tool_context())
+    assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
+
+
+def test_topics_is_offered_to_the_turns_that_search_text_after_keyword() -> None:
+    """Topics sits after keyword and before read on a documents or an all turn, and stands alone without keyword."""
+    matcher, topics = _keyword_matcher(), _topics()
+
+    assert _offered(_toolset("documents", keyword=matcher, topics=topics)) == ["search", "keyword", "topics", "read"]
+    assert _offered(_toolset("all", keyword=matcher, topics=topics)) == [
+        "search",
+        "search_images",
+        "keyframes",
+        "keyword",
+        "topics",
+        "read",
+    ]
+    assert _offered(_toolset("documents", topics=topics)) == ["search", "topics", "read"]
+
+
+def test_a_visual_turn_is_never_offered_topics_even_when_given_them() -> None:
+    """Topics group text chunks, so a visual turn keeps its tools and refuses a call to it as unknown."""
+    registry = _toolset("visual", keyword=_keyword_matcher(), topics=_topics())
+
+    assert _offered(registry) == ["search_images", "keyframes", "read"]
+    refused = registry.call(tool_call("topics"), tool_context())
     assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
 
 
@@ -297,7 +357,7 @@ def _descriptions() -> dict[str, str]:
     Returns:
         dict[str, str]: Each description, by the tool's name.
     """
-    registry = _toolset("all", keyword=_keyword_matcher())
+    registry = _toolset("all", keyword=_keyword_matcher(), topics=_topics())
     return {schema["function"]["name"]: schema["function"]["description"] for schema in registry.schemas()}
 
 
@@ -452,6 +512,32 @@ def test_keyword_costs_a_turn_no_more_than_its_planned_tokens() -> None:
     )
 
 
+def _topics_cost() -> tuple[int, int]:
+    """Estimate what the topics tool costs a turn: its schema, and its guide line where it costs most.
+
+    Returns:
+        tuple[int, int]: The schema tokens and the guide tokens.
+    """
+    registry = _toolset("all", topics=_topics())
+    schema = schema_tokens([item for item in registry.schemas() if item["function"]["name"] == "topics"], RATIO)
+    guide = max(
+        estimate_tokens("\n" + load_localized_prompt("agent_tools_topics", default="", required=True, lang=code), RATIO)
+        for code in ("en", "de")
+    )
+    return schema, guide
+
+
+def test_topics_costs_a_turn_no_more_than_its_planned_tokens() -> None:
+    """The topics tool's schema and its guide line stay within the tokens planned, which stay under 300."""
+    schema, guide = _topics_cost()
+
+    assert TOPICS_TOKENS <= 300
+    assert schema + guide <= TOPICS_TOKENS, (
+        f"topics costs {schema} schema tokens and {guide} prompt tokens, over the {TOPICS_TOKENS} planned; "
+        f"shorten its line or its schema, or plan for more."
+    )
+
+
 def test_a_thinking_model_keeps_room_for_a_text_only_keyword_in_the_smallest_window() -> None:
     """Keyword on the text alone (its line, no fields line) leaves a thinking model room to run a turn at 8k."""
     budget = _budget_with_keyword(reasoning=True, fields=("text",))
@@ -501,9 +587,10 @@ def test_a_thinking_model_has_no_room_left_for_keyword_with_all_four_fields_in_t
         ("search_images", ("who appears", "clothing", "weather", "places", "[n]")),
         ("keyframes", ("specific clip", "[n]")),
         ("keyword", ("count", "exact", "[n]")),
+        ("topics", ("topics", "share", "[n]")),
         ("read", ("rest of a passage",)),
     ],
-    ids=["search", "search_images", "keyframes", "keyword", "read"],
+    ids=["search", "search_images", "keyframes", "keyword", "topics", "read"],
 )
 def test_a_description_says_what_the_tool_is_for(tool: str, anchors: tuple[str, ...]) -> None:
     """The model routes by what a description names: text by documents, pictures by what is seen, a clip, a passage.

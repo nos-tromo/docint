@@ -142,3 +142,32 @@ def test_list_documents_terminates_when_cursor_exhausted() -> None:
 
     assert calls["n"] == 2  # page 1 (cursor) -> page 2 (offset=None) -> stop
     assert sorted(d["filename"] for d in docs) == ["a.pdf", "b.pdf"]
+
+
+def test_list_documents_tallies_topic_values_per_document() -> None:
+    """Each document counts its points per topic value, most frequent first, across runs."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+    tagged = [
+        ("a.pdf", "r1:2"),
+        ("a.pdf", "r1:1"),
+        ("a.pdf", "r1:2"),
+        ("a.pdf", "r0:7"),
+        ("a.pdf", "r1:1"),
+        ("b.pdf", None),
+    ]
+    points = []
+    for name, topic in tagged:
+        point = MagicMock()
+        point.payload = {"file_name": name, **({"docint_topic": topic} if topic else {})}
+        points.append(point)
+    rag._qdrant_client.scroll = MagicMock(return_value=(points, None))
+
+    docs = rag.list_documents()
+
+    assert docs[0]["topics"] == [
+        {"topic": "r1:1", "count": 2},
+        {"topic": "r1:2", "count": 2},
+        {"topic": "r0:7", "count": 1},
+    ]
+    assert "topics" not in docs[1]

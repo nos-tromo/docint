@@ -32,6 +32,7 @@ from docint.agents.turn.passages import _trailer, search_hint
 from docint.agents.turn.scope import scope_message
 from docint.agents.turn.tools import PassageReply, ReadTool, SearchTool, ToolRegistry, cleared_text
 from docint.agents.turn.toolsets import toolset_for
+from docint.agents.turn.topics import FILTERED_MARK, TopicsListing, TopicsSource
 from docint.core.rag import RAG
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
@@ -44,6 +45,7 @@ AGENT_PROMPTS: dict[str, frozenset[str]] = {
     "agent_tools_visual": frozenset(),
     "agent_tools_keyword": frozenset(),
     "agent_tools_keyword_fields": frozenset({"fields"}),
+    "agent_tools_topics": frozenset(),
     "agent_assessment_rule": frozenset(),
     "agent_final": frozenset(),
     "agent_scope": frozenset(),
@@ -302,7 +304,22 @@ def _placeholders(text: str) -> set[str]:
     return set(re.findall(r"\{(\w+)\}", text))
 
 
-def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None = None) -> str:
+def test_the_topic_label_prompt_exists_in_both_locales_with_its_two_placeholders() -> None:
+    """The topic label prompt ships in en and de, each with the keywords and passages slots."""
+    for code in ("en", "de"):
+        assert _placeholders(_prompt("topic_label", code)) == {"keywords", "passages"}
+
+
+def test_the_topic_label_prompt_forbids_naming_the_source_in_both_locales() -> None:
+    """A label names what the passages share, never the title of the work they come from.
+
+    A topic covering most of one book was otherwise labelled with the book's own title.
+    """
+    assert "never the title or author of the work, document or collection" in _prompt("topic_label", "en")
+    assert "nie den Titel oder die Urheberschaft des Werks, Dokuments oder der Sammlung" in _prompt("topic_label", "de")
+
+
+def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None = None, *, topics: bool = False) -> str:
     """Render the system prompt of a turn with no history: the target's guide and the assessment rule filled in.
 
     Args:
@@ -311,6 +328,7 @@ def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None 
         keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers; none when it
             offers no keyword. The guide then gains the keyword line, and a line listing the fields
             when there is more than the text.
+        topics (bool): Whether the turn offers topics, whose line then ends the guide.
 
     Returns:
         str: The rendered prompt.
@@ -320,6 +338,8 @@ def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None 
         guide += "\n" + _prompt("agent_tools_keyword", code)
         if len(keyword_fields) > 1:
             guide += "\n" + _prompt("agent_tools_keyword_fields", code).format(fields=", ".join(keyword_fields))
+    if topics:
+        guide += "\n" + _prompt("agent_tools_topics", code)
     return _prompt("agent_system", code).format(
         tools_guide=guide,
         assessment_rule=_prompt("agent_assessment_rule", code),
@@ -364,17 +384,29 @@ def _matcher(*fields: str) -> KeywordMatcher:
     return KeywordMatcher(fields=fields or ("text",), check=lambda words, field: None, run=_run)
 
 
-def _offered(target: str, keyword: KeywordMatcher | None = None) -> frozenset[str]:
+def _topics() -> TopicsSource:
+    """Build topics for a tool set built only to read its names: none are listed or read.
+
+    Returns:
+        TopicsSource: Topics that list none and hold no topic.
+    """
+    return TopicsSource(listing=lambda: TopicsListing(lines=(), total=0), passages=lambda topic_id: None)
+
+
+def _offered(target: str, keyword: KeywordMatcher | None = None, topics: TopicsSource | None = None) -> frozenset[str]:
     """Return the names of the tools a target offers.
 
     Args:
         target (str): The retrieval target.
         keyword (KeywordMatcher | None): The keyword match the turn offers; none when not given.
+        topics (TopicsSource | None): The topics the turn offers; none when not given.
 
     Returns:
         frozenset[str]: The names.
     """
-    return toolset_for(target, search=_nothing, search_images=_nothing, list_keyframes=_nothing, keyword=keyword).names
+    return toolset_for(
+        target, search=_nothing, search_images=_nothing, list_keyframes=_nothing, keyword=keyword, topics=topics
+    ).names
 
 
 def _named_tools(text: str) -> set[str]:
@@ -384,9 +416,10 @@ def _named_tools(text: str) -> set[str]:
         text (str): A prompt.
 
     Returns:
-        set[str]: The names of the tools of any target that it names, keyword included.
+        set[str]: The names of the tools of any target that it names, keyword and topics included.
     """
-    return {name for name in _offered("all", _matcher()) if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
+    offered = _offered("all", _matcher(), _topics())
+    return {name for name in offered if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text)}
 
 
 def _written() -> dict[str, str]:
@@ -489,6 +522,21 @@ def test_a_keyword_line_is_one_line_naming_only_keyword_and_quoting_nothing(code
 
 
 @pytest.mark.parametrize("code", ["en", "de"])
+def test_a_topics_line_is_one_line_naming_only_topics(code: str) -> None:
+    """The topics line is a single line that names the tool alone, quotes nothing, and keeps a share out of [n].
+
+    Args:
+        code (str): The locale.
+    """
+    text = _prompt("agent_tools_topics", code)
+
+    assert "\n" not in text, f"{code}/agent_tools_topics.txt is more than one line"
+    assert "`" not in text, f"{code}/agent_tools_topics.txt quotes in backticks"
+    assert _named_tools(text) == {"topics"}, f"{code}/agent_tools_topics.txt names {sorted(_named_tools(text))}"
+    assert "[n]" in text and "topic=T<n>" in text, f"{code}/agent_tools_topics.txt does not tie citations to a topic"
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
 def test_the_keyword_guide_makes_a_count_a_fact_not_a_source(code: str) -> None:
     """The guide keeps a count out of the citations and a zero out of any claim of absence, in the locale's words.
 
@@ -518,6 +566,30 @@ def test_agent_system_prompt_with_keyword_keeps_the_protocol_tokens_and_names_ex
     for token in (SENTINEL, "citation_index", "[n]"):
         assert token in rendered, f"{code}/{target}: {token!r} missing"
     assert "keyword" in offered
+    assert _named_tools(rendered) == offered, f"{code}/{target}: names {sorted(_named_tools(rendered))}"
+    assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
+
+
+@pytest.mark.parametrize("with_keyword", [False, True], ids=["topics", "keyword-and-topics"])
+@pytest.mark.parametrize("target", KEYWORD_TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_agent_system_prompt_with_topics_keeps_the_protocol_tokens_and_names_exactly_the_offered_tools(
+    code: str, target: str, with_keyword: bool
+) -> None:
+    """With the topics line, alone or after the keyword lines, the prompt names exactly the tools offered.
+
+    Args:
+        code (str): The locale.
+        target (str): The retrieval target, one that offers topics.
+        with_keyword (bool): Whether keyword, with every field, is offered too.
+    """
+    fields = KEYWORD_FIELDS if with_keyword else None
+    rendered = _system_prompt(code, target, fields, topics=True)
+    offered = _offered(target, _matcher(*KEYWORD_FIELDS) if with_keyword else None, _topics())
+
+    for token in (SENTINEL, "citation_index", "[n]"):
+        assert token in rendered, f"{code}/{target}: {token!r} missing"
+    assert "topics" in offered
     assert _named_tools(rendered) == offered, f"{code}/{target}: names {sorted(_named_tools(rendered))}"
     assert rendered.endswith(f"\n{NO_HISTORY}"), f"{code}: the conversation summary is not the prompt's last part"
 
@@ -601,6 +673,30 @@ def test_with_keyword_the_engine_follows_the_targets_guide_with_the_keyword_line
 
     assert "\n".join(lines) + "\n\n" in rendered
     assert rendered == _system_prompt(code, target, fields)
+
+
+@pytest.mark.parametrize("fields", [None, ("text",), KEYWORD_FIELDS], ids=["none", "text", "four"])
+@pytest.mark.parametrize("target", KEYWORD_TARGETS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_with_topics_the_engine_ends_the_guide_with_the_topics_line(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str, fields: tuple[str, ...] | None
+) -> None:
+    """The topics line follows the target's guide and any keyword lines, and nothing else changes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pins the locale and the assessment rule.
+        code (str): The locale.
+        target (str): The retrieval target, one that offers topics.
+        fields (tuple[str, ...] | None): The fields the keyword tool offers; none without keyword.
+    """
+    rag = _engine(monkeypatch, code)
+    without = rag._agent_system_prompt(target, ConversationWindow(), keyword_fields=fields)
+
+    rendered = rag._agent_system_prompt(target, ConversationWindow(), keyword_fields=fields, topics=True)
+
+    assert rendered == _system_prompt(code, target, fields, topics=True)
+    assert f"\n{_prompt('agent_tools_topics', code)}\n\n" in rendered
+    assert rendered.replace(f"\n{_prompt('agent_tools_topics', code)}", "", 1) == without
 
 
 @pytest.mark.parametrize(("code", "evaluation"), [("en", "evaluation"), ("de", "Bewertung")])
@@ -721,6 +817,25 @@ def test_the_validators_take_a_check_made_while_written_only_as_a_count_so_far(c
     ]
 
     assert len(marked) == 1, f"{code}/{name}.txt does not name {WRITING_MARK!r} on its keyword check line"
+
+
+@pytest.mark.parametrize("name", VALIDATOR_PROMPTS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_validators_take_a_share_from_a_listed_topic_check_as_grounded(code: str, name: str) -> None:
+    """A topic's share cites no passage, so each validator has one line accepting it on a topic check.
+
+    The same line names the mark a check counted within the turn's filters ends in, and names no keyword check,
+    so the keyword line stays the only one that does.
+
+    Args:
+        code (str): The locale.
+        name (str): The validator prompt.
+    """
+    lines = [line for line in _prompt(name, code).splitlines() if "topic check" in line.casefold()]
+
+    assert len(lines) == 1, f"{code}/{name}.txt names the topic checks on {len(lines)} lines"
+    assert FILTERED_MARK in lines[0], f"{code}/{name}.txt does not name {FILTERED_MARK!r} on its topic check line"
+    assert "keyword check" not in lines[0].casefold()
 
 
 @pytest.mark.parametrize("target", TARGETS)

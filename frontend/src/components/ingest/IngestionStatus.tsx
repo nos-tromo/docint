@@ -37,7 +37,8 @@ const TASK_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
   'Transcribing media': 'ingest.task_transcribing_media',
   'Linking images': 'ingest.task_linking_images',
   Embedding: 'ingest.task_embedding',
-  'Summarizing collection': 'ingest.task_summary'
+  'Summarizing collection': 'ingest.task_summary',
+  'Aligning topics': 'ingest.task_topics'
 }
 
 function stageLabel(raw: string, t: (key: keyof Strings) => string): string {

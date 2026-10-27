@@ -4,12 +4,14 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Chat, chatReducer } from './Chat'
-import type { ChatFinalEvent } from '@/api/types'
+import type { ChatFinalEvent, SessionTopicFocus } from '@/api/types'
 import { chatTranscriptToText } from '@/lib/exports'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useSearchUiStore } from '@/stores/searchUi'
+import { useTopicFocusStore } from '@/stores/topicFocus'
+import type { TopicsOverview } from '@/api/topics'
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
   const enc = new TextEncoder()
@@ -1622,5 +1624,337 @@ describe('Chat session switching', () => {
       expect(call).toBeDefined()
       expect(JSON.parse(String(call![1]!.body)).retrieval_target).toBe('visual')
     })
+  })
+})
+
+describe('Chat topic focus', () => {
+  const RUN = '20260102-030405-a1b2c3'
+  const EARLIER_RUN = '20251201-101010-0f0f0f'
+  const OVERVIEW: TopicsOverview = {
+    run_id: RUN,
+    created_at: '2026-01-02T03:04:05+00:00',
+    updated_at: '2026-01-02T03:04:05+00:00',
+    embed_model: 'embed-small',
+    embed_model_changed: false,
+    coverage: { total: 120, assigned: 100, unassigned: 20, pending: 0 },
+    topics: [
+      {
+        id: 3,
+        label: 'Harbour cranes',
+        description: '',
+        keywords: [['crane', 0.4]],
+        size: 60,
+        share: 0.5,
+        origin: 'build',
+        added_at: '2026-01-02T03:04:05+00:00',
+        first_seen: null,
+        last_seen: null
+      }
+    ]
+  }
+
+  /** The topic the API keeps with a session, as `STORED` is picked in the tests below. */
+  const STORED: SessionTopicFocus = { run_id: RUN, topic_id: 3, label: 'Harbour cranes' }
+
+  /**
+   * Serve the topics flag and the active run beside the chat stream, and keep
+   * session topics as the API does: the turn that creates a session stores the
+   * topic it carries, and a session's topic is read and removed by its id.
+   *
+   * @param stored - The topics sessions hold, by session id; updated in place.
+   * @param failDelete - Refuse every removal with a 500.
+   * @param hold - Requests whose URL matches `pattern` are answered only once `until` settles.
+   * @returns The fetch mock.
+   */
+  function stubTopicsApi(
+    stored: Record<string, SessionTopicFocus> = {},
+    failDelete = false,
+    hold?: { pattern: RegExp; until: Promise<void> }
+  ) {
+    const json = (body: unknown, status = 200) => ({
+      ok: status < 400,
+      status,
+      json: async () => body,
+      text: async () => JSON.stringify(body)
+    })
+    const answer = (req: RequestInfo | URL, init?: RequestInit): Promise<unknown> => {
+      const u = String(req)
+      if (u.includes('/stream_query')) {
+        const sent = JSON.parse(String(init?.body ?? '{}')) as { session_id?: string; topic_focus?: SessionTopicFocus }
+        const sessionId = sent.session_id ?? 'sess-topic'
+        if (!sent.session_id && sent.topic_focus) stored[sessionId] = sent.topic_focus
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: bodyFromString(`data: {"response":"ok","sources":[],"session_id":"${sessionId}"}\n\n`)
+        })
+      }
+      const topic = u.match(/\/sessions\/([^/?]+)\/topic/)
+      if (topic) {
+        const id = decodeURIComponent(topic[1]!)
+        if (init?.method === 'DELETE') {
+          if (failDelete) return Promise.resolve(json({ detail: 'Request failed.' }, 500))
+          delete stored[id]
+          return Promise.resolve(json({ ok: true }))
+        }
+        return Promise.resolve(json({ topic_focus: stored[id] ?? null }))
+      }
+      if (u.includes('/history')) return Promise.resolve(json({ messages: [] }))
+      if (u.includes('/config')) return Promise.resolve(json({ topics_enabled: true }))
+      if (u.includes('/topics')) return Promise.resolve(json(OVERVIEW))
+      return Promise.resolve(json({}))
+    }
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) =>
+      hold && hold.pattern.test(String(req)) ? hold.until.then(() => answer(req, init)) : answer(req, init)
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  /** Every `/stream_query` request body sent so far, in order. */
+  function sentTurns(fetchMock: ReturnType<typeof stubTopicsApi>) {
+    return fetchMock.mock.calls
+      .filter(([u]) => String(u).includes('/stream_query'))
+      .map(([, init]) => JSON.parse(String(init!.body)))
+  }
+
+  /** The body of the turn's `/stream_query` request, once it was sent. */
+  function sentTurn(fetchMock: ReturnType<typeof stubTopicsApi>) {
+    return sentTurns(fetchMock)[0]
+  }
+
+  /** Whether the session's topic was asked to be removed. */
+  function removalSent(fetchMock: ReturnType<typeof stubTopicsApi>, sessionId: string) {
+    return fetchMock.mock.calls.some(
+      ([u, init]) => String(u).includes(`/sessions/${sessionId}/topic`) && init?.method === 'DELETE'
+    )
+  }
+
+  async function ask() {
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    const send = screen.getByRole('button', { name: /send/i })
+    // Held while the chat's topic is read; a click on a disabled button would silently do nothing.
+    await waitFor(() => expect(send).toBeEnabled())
+    await userEvent.click(send)
+  }
+
+  beforeEach(() => {
+    useUiStore.setState({ selectedCollection: 'docs' })
+    useChatFiltersStore.getState().reset()
+    useTopicFocusStore.setState({ focus: null })
+  })
+
+  afterEach(() => {
+    useTopicFocusStore.setState({ focus: null })
+  })
+
+  it('appends the topic rule to a turn', async () => {
+    const fetchMock = stubTopicsApi()
+    useChatFiltersStore.setState({ filterEnabled: true, mimePattern: 'application/pdf' })
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChat()
+
+    expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
+    await ask()
+
+    await waitFor(() =>
+      expect(sentTurn(fetchMock)?.metadata_filters).toEqual([
+        { field: 'mimetype', operator: 'mime_match', value: 'application/pdf' },
+        { field: 'docint_topic', operator: 'eq', value: '20260102-030405-a1b2c3:3' }
+      ])
+    )
+  })
+
+  it('skips a topic rule from an earlier build and says so', async () => {
+    const fetchMock = stubTopicsApi()
+    useTopicFocusStore.setState({
+      focus: { collection: 'docs', owner: null, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' }
+    })
+    renderChat()
+
+    expect(await screen.findByText('From an earlier build; not applied.')).toBeInTheDocument()
+    await ask()
+
+    // The old run's value matches no chunk, so sending it would empty the answer.
+    await waitFor(() => expect(sentTurn(fetchMock)?.metadata_filters).toEqual([]))
+  })
+
+  it('skips the topic rule on a visual turn and flags it', async () => {
+    const fetchMock = stubTopicsApi()
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChat()
+    expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
+
+    // Picked inside the open chat: a chat opened fresh starts from everything.
+    act(() => {
+      useChatFiltersStore.getState().setRetrievalTarget('visual')
+    })
+    expect(screen.getByText('Not applied to answers from images.')).toBeInTheDocument()
+    await ask()
+
+    await waitFor(() => expect(sentTurn(fetchMock)).toBeDefined())
+    expect(sentTurn(fetchMock).retrieval_target).toBe('visual')
+    expect(sentTurn(fetchMock).metadata_filters).toEqual([])
+  })
+
+  it('reads no topics run without a focus', async () => {
+    const fetchMock = stubTopicsApi()
+    renderChat()
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/config'))).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/topics'))).toEqual([])
+  })
+
+  it('keeps the topic with the chat its first turn starts', async () => {
+    const stored: Record<string, SessionTopicFocus> = {}
+    const fetchMock = stubTopicsApi(stored)
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChat()
+
+    expect(await screen.findByText('Applied to answers and searches.')).toBeInTheDocument()
+    await ask()
+
+    // The turn that creates the session carries the topic, and the session keeps it.
+    await waitFor(() => expect(useUiStore.getState().currentSessionId).toBe('sess-topic'))
+    expect(sentTurns(fetchMock)[0].topic_focus).toEqual(STORED)
+    expect(stored['sess-topic']).toEqual(STORED)
+    // The pick is spent: the chat now shows the topic its session keeps.
+    expect(useTopicFocusStore.getState().focus).toBeNull()
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
+
+    await ask()
+
+    await waitFor(() => expect(sentTurns(fetchMock)).toHaveLength(2))
+    const second = sentTurns(fetchMock)[1]
+    expect(second.session_id).toBe('sess-topic')
+    // Later turns leave the topic out, so none of them can bring back a removed one...
+    expect(second.topic_focus).toBeUndefined()
+    // ...while the session's own topic still narrows them.
+    expect(second.metadata_filters).toEqual([{ field: 'docint_topic', operator: 'eq', value: `${RUN}:3` }])
+  })
+
+  it('restores a chat’s topic when the chat is reopened', async () => {
+    const fetchMock = stubTopicsApi({ 'sess-restored': STORED })
+    renderChatWithSession('sess-restored')
+
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
+    // Read through the collection the session is pinned to, as its history is.
+    expect(
+      fetchMock.mock.calls.some(([u]) => String(u).includes('/sessions/sess-restored/topic?collection=docs'))
+    ).toBe(true)
+    await ask()
+
+    await waitFor(() => expect(sentTurns(fetchMock)).toHaveLength(1))
+    expect(sentTurn(fetchMock)).toMatchObject({
+      session_id: 'sess-restored',
+      metadata_filters: [{ field: 'docint_topic', operator: 'eq', value: `${RUN}:3` }]
+    })
+    expect(sentTurn(fetchMock).topic_focus).toBeUndefined()
+  })
+
+  it('keeps a topic picked for a new chat out of a chat already open', async () => {
+    const fetchMock = stubTopicsApi()
+    // "Ask in chat" picked a topic for a new chat; the chat on screen is another one, without a topic.
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChatWithSession('sess-plain')
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sessions/sess-plain/topic'))).toBe(true)
+    )
+    await ask()
+
+    await waitFor(() => expect(sentTurns(fetchMock)).toHaveLength(1))
+    expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
+    expect(sentTurn(fetchMock).metadata_filters).toEqual([])
+    expect(sentTurn(fetchMock).topic_focus).toBeUndefined()
+  })
+
+  it('removes the topic from a started chat for good', async () => {
+    const stored = { 'sess-restored': { ...STORED } }
+    const fetchMock = stubTopicsApi(stored)
+    renderChatWithSession('sess-restored')
+
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Remove topic filter' }))
+
+    await waitFor(() => expect(removalSent(fetchMock, 'sess-restored')).toBe(true))
+    expect(stored).toEqual({})
+    expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
+
+    await ask()
+
+    await waitFor(() => expect(sentTurns(fetchMock)).toHaveLength(1))
+    expect(sentTurn(fetchMock).metadata_filters).toEqual([])
+    // A finished turn refreshes the session list; that brings no topic back.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
+  })
+
+  it('says so when the topic cannot be removed, and shows it still kept', async () => {
+    const fetchMock = stubTopicsApi({ 'sess-restored': STORED }, true)
+    renderChatWithSession('sess-restored')
+
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Remove topic filter' }))
+
+    await waitFor(() => expect(removalSent(fetchMock, 'sess-restored')).toBe(true))
+    expect(
+      await screen.findByText('The topic filter could not be removed; this chat still keeps it.')
+    ).toBeInTheDocument()
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
+  })
+
+  it.each([
+    { read: 'a reopened chat’s stored topic', pattern: /\/sessions\/sess-restored\/topic/, reopened: true },
+    { read: 'a reopened chat’s active run', pattern: /\/collections\/docs\/topics/, reopened: true },
+    { read: 'a new chat’s active run', pattern: /\/collections\/docs\/topics/, reopened: false }
+  ])('holds a turn until $read is read', async ({ pattern, reopened }) => {
+    let release: () => void = () => {}
+    const until = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchMock = stubTopicsApi({ 'sess-restored': STORED }, false, { pattern, until })
+    if (reopened) {
+      renderChatWithSession('sess-restored')
+    } else {
+      useTopicFocusStore.setState({
+        focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' }
+      })
+      renderChat()
+    }
+    const box = await screen.findByPlaceholderText(/ask something/i)
+    await userEvent.type(box, 'hi')
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => pattern.test(String(u)))).toBe(true))
+
+    // Sent now, the turn would go out without the topic's rule and answer from the whole collection.
+    const send = screen.getByRole('button', { name: /send/i })
+    expect(send).toBeDisabled()
+    expect(screen.getByText('Reading this chat’s topic…')).toBeInTheDocument()
+    await userEvent.type(box, '{Enter}')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(sentTurns(fetchMock)).toEqual([])
+    expect(box).toHaveValue('hi')
+
+    release()
+
+    await waitFor(() => expect(send).toBeEnabled())
+    expect(screen.queryByText('Reading this chat’s topic…')).not.toBeInTheDocument()
+    await userEvent.click(send)
+    await waitFor(() => expect(sentTurns(fetchMock)).toHaveLength(1))
+    expect(sentTurn(fetchMock).metadata_filters).toEqual([{ field: 'docint_topic', operator: 'eq', value: `${RUN}:3` }])
+    if (!reopened) expect(sentTurn(fetchMock).topic_focus).toEqual(STORED)
+  })
+
+  it('starts a new chat without the topic', async () => {
+    stubTopicsApi()
+    useTopicFocusStore.setState({ focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' } })
+    renderChat()
+    expect(await screen.findByRole('group', { name: 'Topic filter' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'New chat' }))
+
+    expect(useTopicFocusStore.getState().focus).toBeNull()
+    expect(screen.queryByRole('group', { name: 'Topic filter' })).not.toBeInTheDocument()
   })
 })

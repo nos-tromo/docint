@@ -1,6 +1,6 @@
 # CLI reference
 
-Docint ships nine console scripts, all registered in
+Docint ships twelve console scripts, all registered in
 `pyproject.toml` `[project.scripts]` and installed automatically when
 you run `uv sync`.
 
@@ -9,6 +9,8 @@ you run `uv sync`.
 | `docint` | `docint.cli.serve:main` | Run the FastAPI backend (uvicorn). |
 | `ingest` | `docint.cli.ingest:main` | Batch ingest documents into a collection. |
 | `resolve` | `docint.cli.resolve:main` | Merge duplicate / semantically-similar entities into durable canonicals. |
+| `extract` | `docint.cli.extract:main` | Write a collection's data extract (transcripts, keyframe descriptions, captions, document text) as a ZIP. |
+| `topics` | `docint.cli.topics:main` | Build, extend, align or inspect a collection's topics. |
 | `search-index` | `docint.cli.search_index:main` | Build the full-text `search_text` payload index for one collection. |
 | `search-index-all` | `docint.cli.search_index:main_all` | Backport that index across every collection on the host. |
 | `retention-report` | `docint.cli.retention_report:main` | Show what collection retention deletes, and when. Read-only. |
@@ -97,6 +99,44 @@ inference, so it is safe on an airgapped host. In Docker the `make extract`
 target runs it in a one-off `backend` container so it reaches the `qdrant`
 alias. The bundle layout and the caps are documented in
 [extracts.md](extracts.md).
+
+## `topics` — topic runs
+
+```bash
+uv run topics status                     # prompts for the collection
+uv run topics build mydocs
+uv run topics discover mydocs
+uv run topics align mydocs
+make topics OP=build COLLECTION=mydocs   # in Docker; OP defaults to status
+```
+
+Source: `docint/cli/topics.py`. The offline twin of
+`POST /collections/{name}/topics`: the same service, run in this process (see
+[topics.md](topics.md)). The first argument is `build`, `discover`, `align` or
+`status`; the second is the collection, prompted for when omitted. Like
+`search-index`, it takes the logical name the app shows or the physical one,
+and refuses a logical name several users own, listing each physical name.
+
+- `status` prints the active run's id, topic count and coverage
+  (`run=… topics=… assigned=…/… unassigned=… pending=…`), then one line per
+  topic, largest first: `T<id>`, its size, its label and its first three
+  keywords. It prints `No topics yet.` when the collection has no usable run.
+- `build`, `discover` and `align` log their progress at INFO, throttled by
+  `LOG_PROGRESS_INTERVAL_S`, log each warning as `<message> (<code>)`, and end
+  by printing `<action>: run=… topics=… added=… assigned=…`. A run waits for
+  the collection's lock like an API job, so the two never write one collection
+  at once.
+
+| Exit code | When |
+|---|---|
+| `0` | Success, a `status` with no run included. |
+| `1` | An endpoint fault. The logged error names the fit URL (without credentials) and, for a configuration fault, the setting to change. |
+| `2` | A refusal, an unknown or ambiguous collection, no collection name, or `TOPICS_ENABLED` off. |
+
+In Docker the `make topics` target runs it in a one-off `backend` container so
+it reaches the `qdrant` and `vllm-router` aliases. A run here sends no frames
+to the SPA, and it cannot drop the API's cached document rows (see
+[topics.md](topics.md#limitations)).
 
 ## `search-index` — full-text search backfill
 

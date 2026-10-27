@@ -1,7 +1,12 @@
+/** Leading characters a spreadsheet reads as the start of a formula. */
+const FORMULA_START = /^[=+\-@\t\r]/
+
 function escape(value: unknown): string {
   if (value === null || value === undefined) return ''
-  const s = String(value)
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  let s = String(value)
+  // A leading quote makes a spreadsheet show the cell as text instead of running it; numbers stay as they are.
+  if (typeof value === 'string' && FORMULA_START.test(s)) s = `'${s}`
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
 }
 

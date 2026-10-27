@@ -32,7 +32,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
@@ -57,6 +57,7 @@ from docint.agents.assessment.split import cited_sources
 from docint.agents.history import build_prior_turn
 from docint.agents.turn.keyword import KEYWORD_CHECKS_CHARS, render_keyword_checks
 from docint.agents.turn.probe import probe_tools
+from docint.agents.turn.topics import TOPIC_CHECKS_CHARS, render_topic_checks
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
@@ -67,7 +68,7 @@ from docint.core.extract.store import ExtractStore
 from docint.core.extract.units import Unit, partition, resolve_target
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preprocess_pool, submit_file
-from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
+from docint.core.jobs import IngestJobManager, IngestJobState, JobCancelled, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retention import (
     RetentionClock,
@@ -92,6 +93,8 @@ from docint.core.state.pdf_progress import ProgressCallback
 from docint.core.state.report_pdf_store import ReportPdfStore
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
+from docint.core.topics.service import Action, TopicsRefused, progress_payload
+from docint.core.topics.store import RUN_ID_PATTERN
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
@@ -110,6 +113,7 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
     load_retention_env,
     load_summary_env,
+    load_topics_env,
     resolve_enable_hybrid,
     set_offline_env,
 )
@@ -117,6 +121,7 @@ from docint.utils.hashing import compute_file_hash
 from docint.utils.logfmt import PARTIAL_UPLOAD_SUFFIX, describe_inputs, format_bytes
 from docint.utils.logger_cfg import init_logger
 from docint.utils.openai_cfg import EmbeddingEndpointError
+from docint.utils.topics_client import TopicsEndpointError
 from docint.utils.translate_client import translate
 
 # Names re-exported for test monkey-patching. pyrefly treats these as
@@ -700,6 +705,24 @@ def _apply_turn_scope(session_id: str, owner: str | None, requested: Sequence[st
     return ids
 
 
+def _apply_turn_topic(session_id: str, owner: str | None, requested: "TopicFocusIn | None") -> None:
+    """Pin the topic a turn carries to its session.
+
+    Only the turn that creates a session carries one, since the session row
+    does not exist before it, so the topic is stored by the same request that
+    first answers under it. A turn without one leaves the stored topic alone
+    and does not read the store.
+
+    Args:
+        session_id (str): The resolved session for this turn.
+        owner (str | None): The principal that owns it.
+        requested (TopicFocusIn | None): The topic carried on the request, if any.
+    """
+    if requested is None:
+        return
+    rag.ensure_session_manager().set_topic_focus(session_id, owner, requested.model_dump())
+
+
 def _require_collection_name(raw: str, *, context: str) -> str:
     """Return the trimmed logical collection name a request may ingest into.
 
@@ -928,6 +951,7 @@ def _validation_payload(
     tool_used: str | None = None,
     previous_user_input: str | None = None,
     keyword_checks: str | None = None,
+    topic_checks: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -944,6 +968,9 @@ def _validation_payload(
             validator ahead of the question; ``None`` shows none.
         keyword_checks (str | None): An agent turn's keyword checks with a known count, one line
             each (see :func:`_trail_keyword_checks`), which the validator reads as facts; ``None``
+            or empty for none.
+        topic_checks (str | None): An agent turn's topic checks, one line per topic its listing
+            showed (see :func:`_trail_topic_checks`), which the validator reads as facts; ``None``
             or empty for none.
 
     Returns:
@@ -970,6 +997,7 @@ def _validation_payload(
         intent=intent,
         tool_used=tool_used,
         keyword_checks=keyword_checks,
+        topic_checks=topic_checks,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question, previous_user_input=previous_user_input))
     return {
@@ -1079,6 +1107,21 @@ def _confirm_tools_rejection() -> None:
     confirm_tools_rejection(lambda: probe_tools(rag.agent_text_model), reasoning=reasoning)
 
 
+def _trail_steps(agent: Any) -> list[Mapping[str, Any]]:
+    """Read the steps an agent turn's trail holds, whatever shape it was stored in.
+
+    Args:
+        agent (Any): The turn's ``agent`` trail.
+
+    Returns:
+        list[Mapping[str, Any]]: Its ``actions`` that are mappings, in order; none without them.
+    """
+    actions = agent.get("actions") if isinstance(agent, dict) else None
+    if not isinstance(actions, list):
+        return []
+    return [step for step in actions if isinstance(step, Mapping)]
+
+
 def _trail_keyword_checks(agent: Any) -> str:
     """Render the keyword checks an agent turn's trail holds, for its validator.
 
@@ -1089,17 +1132,26 @@ def _trail_keyword_checks(agent: Any) -> str:
         str: One line per keyword step with a known count, within ``KEYWORD_CHECKS_CHARS``
         (see :func:`~docint.agents.turn.keyword.render_keyword_checks`); empty when there is none.
     """
-    actions = agent.get("actions") if isinstance(agent, dict) else None
-    if not isinstance(actions, list):
-        return ""
-    steps = [step for step in actions if isinstance(step, Mapping)]
-    return render_keyword_checks(steps, max_chars=KEYWORD_CHECKS_CHARS)
+    return render_keyword_checks(_trail_steps(agent), max_chars=KEYWORD_CHECKS_CHARS)
+
+
+def _trail_topic_checks(agent: Any) -> str:
+    """Render the topic checks an agent turn's trail holds, for its validator.
+
+    Args:
+        agent (Any): The turn's ``agent`` trail.
+
+    Returns:
+        str: One line per topic a listing step showed, within ``TOPIC_CHECKS_CHARS``
+        (see :func:`~docint.agents.turn.topics.render_topic_checks`); empty when there is none.
+    """
+    return render_topic_checks(_trail_steps(agent), max_chars=TOPIC_CHECKS_CHARS)
 
 
 def _assessment_validation(
     *, question: str, answer: str, sources: list[dict[str, Any]], agent: Any
 ) -> dict[str, bool | str | None]:
-    """Validate only the source-backed part of an assessment turn, beside the turn's keyword checks.
+    """Validate only the source-backed part of an assessment turn, beside the turn's keyword and topic checks.
 
     Args:
         question (str): The user's question.
@@ -1121,12 +1173,14 @@ def _assessment_validation(
             "validation_reason": ASSESSMENT_NOT_VALIDATED_REASON,
         }
     checks = _trail_keyword_checks(trail)
+    topic_checks = _trail_topic_checks(trail)
     return _validation_payload(
         question=question,
         answer=evidence,
-        sources=cited_sources(evidence, sources, fallback=not checks),
+        sources=cited_sources(evidence, sources, fallback=not (checks or topic_checks)),
         intent="assessment",
         keyword_checks=checks,
+        topic_checks=topic_checks,
     )
 
 
@@ -1146,10 +1200,10 @@ def _turn_validation(
     An agent lookup is checked against the sources it cites, since its evidence holds every
     passage its tools showed, with the previous user message ahead of the question: the agent
     read the conversation, so a follow-up is only judged right against what it follows. Either
-    agent mode also hands the validator the turn's keyword checks with a known count, as facts
-    an answer may state without citing a passage; an answer that cites none beside such checks
-    is judged against the checks alone, never against passages it does not rely on. A plain
-    lookup is checked as it always was.
+    agent mode also hands the validator the turn's keyword checks with a known count and its
+    topic checks, as facts an answer may state without citing a passage; an answer that cites
+    none beside such checks is judged against the checks alone, never against passages it does
+    not rely on. A plain lookup is checked as it always was.
 
     Args:
         data (dict[str, Any]): The turn's payload; ``answer_mode`` names an agent turn's mode.
@@ -1168,12 +1222,14 @@ def _turn_validation(
         return _assessment_validation(question=question, answer=answer, sources=sources, agent=data.get("agent"))
     if mode == "lookup":
         checks = _trail_keyword_checks(data.get("agent"))
+        topic_checks = _trail_topic_checks(data.get("agent"))
         return _validation_payload(
             question=question,
             answer=answer,
-            sources=cited_sources(answer, sources, fallback=not checks),
+            sources=cited_sources(answer, sources, fallback=not (checks or topic_checks)),
             previous_user_input=previous_user_input,
             keyword_checks=checks,
+            topic_checks=topic_checks,
         )
     return _validation_payload(
         question=question,
@@ -1415,6 +1471,51 @@ class MetadataFilterIn(BaseModel):
         return self
 
 
+class TopicFocusIn(BaseModel):
+    """The topic "Ask in chat" opened a session with, as the client sends it."""
+
+    run_id: str
+    topic_id: int = Field(ge=0)
+    # Generated labels are capped at 80 characters. The bound only stops an
+    # oversize value: a 422 here refuses the question that carries it.
+    label: str = Field(default="", max_length=500)
+
+    @field_validator("run_id")
+    @classmethod
+    def _require_a_run_id(cls, value: str) -> str:
+        """Accept a well-formed topic run id and nothing else.
+
+        ``Field(pattern=...)`` searches rather than matches, so it would let
+        through any value that merely contains a run id.
+
+        Args:
+            value (str): The submitted run id.
+
+        Returns:
+            str: The run id.
+
+        Raises:
+            ValueError: When the value is not a run id.
+        """
+        if not RUN_ID_PATTERN.fullmatch(value):
+            raise ValueError("not a topic run id")
+        return value
+
+
+class TopicFocusOut(BaseModel):
+    """A session's stored topic."""
+
+    run_id: str
+    topic_id: int
+    label: str = ""
+
+
+class SessionTopicOut(BaseModel):
+    """The topic a session belongs to; ``None`` when it has none."""
+
+    topic_focus: TopicFocusOut | None = None
+
+
 class QueryIn(BaseModel):
     """Request payload for a single RAG query."""
 
@@ -1435,6 +1536,13 @@ class QueryIn(BaseModel):
     # beforehand — installing it afterwards left that first answer unscoped
     # while the UI already claimed it was scoped.
     scope_chunk_ids: list[str] | None = None
+    # The topic "Ask in chat" opened this chat with, pinned to the session the
+    # way the scope is. Only the turn that creates the session carries it — the
+    # row does not exist before that turn — so no later turn can bring back a
+    # topic the user removed (``DELETE /sessions/{id}/topic``). Absent ⇒ the
+    # stored topic is left as it is. It is never applied to retrieval here:
+    # the client sends the topic's ``docint_topic`` rule in ``metadata_filters``.
+    topic_focus: TopicFocusIn | None = None
     # Per-turn reasoning override from the chat UI's toggle. ``true``/``false``
     # force the model's thinking mode on or off for this answer; absent (the
     # default) defers to ``OPENAI_ENABLE_THINKING``. Applies to answer
@@ -1599,6 +1707,18 @@ class ExtractIn(BaseModel):
     operator: str | None = None
 
 
+class TopicsIn(BaseModel):
+    """Request payload for queuing a topics run.
+
+    Attributes:
+        action (Literal["build", "discover", "align"]): ``build`` fits a new run,
+            ``discover`` looks for new topics among the unassigned chunks, and
+            ``align`` places chunks the run has not placed yet.
+    """
+
+    action: Literal["build", "discover", "align"] = "build"
+
+
 class IngestDefaultsOut(BaseModel):
     """Deployment-default enrichment toggles for the ingest UI."""
 
@@ -1758,6 +1878,7 @@ class FrontendConfigOut(BaseModel):
     report_batch_max_items: int
     language: str
     collection_retention: str
+    topics_enabled: bool
 
 
 class FileTypeCount(BaseModel):
@@ -1907,7 +2028,7 @@ class ReportListOut(BaseModel):
 
 
 @app.get("/config", response_model=FrontendConfigOut, tags=["Meta"])
-def get_frontend_config() -> dict[str, int | str]:
+def get_frontend_config() -> dict[str, int | str | bool]:
     """Return deploy-time frontend configuration for the SPA.
 
     Served without a principal dependency so the SPA can read it on first load,
@@ -1918,15 +2039,15 @@ def get_frontend_config() -> dict[str, int | str]:
     built with, so the advertised cap is the enforced one.
 
     Returns:
-        dict[str, int | str]: ``graph_top_k``, ``graph_max_top_k``,
+        dict[str, int | str | bool]: ``graph_top_k``, ``graph_max_top_k``,
         ``collection_timeout``, ``max_upload_bytes`` (the per-request upload
         ceiling nginx enforces, which the SPA uses to size its upload batches),
         ``report_batch_max_items`` (the most artifacts one report batch add may
         carry, which the SPA refuses an oversize section against),
         ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
-        ``"de"``), and ``collection_retention`` (``COLLECTION_RETENTION``:
+        ``"de"``), ``collection_retention`` (``COLLECTION_RETENTION``:
         ``"off"`` or the idle window, which the SPA checks before asking for
-        expiry dates).
+        expiry dates), and ``topics_enabled`` (``TOPICS_ENABLED``).
     """
     cfg = load_frontend_env()
     return {
@@ -1937,6 +2058,7 @@ def get_frontend_config() -> dict[str, int | str]:
         "report_batch_max_items": REPORT_BATCH_MAX_ITEMS,
         "language": load_language_env().code,
         "collection_retention": load_retention_env().window,
+        "topics_enabled": load_topics_env().enabled,
     }
 
 
@@ -2281,6 +2403,70 @@ def clear_session_scope(
     if not rag.ensure_session_manager().clear_scope(session_id, principal.effective_owner):
         raise HTTPException(status_code=404, detail="Not found.")
     return ScopeOut()
+
+
+@app.get("/sessions/{session_id}/topic", response_model=SessionTopicOut, tags=["Sessions"])
+def get_session_topic(
+    session_id: str,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> SessionTopicOut:
+    """Return the topic a session was opened with, read through its own collection.
+
+    Gated exactly like ``GET /sessions/{id}/history``: a session that does not
+    exist, belongs to another principal, or is pinned to a collection other
+    than the caller's active one is a 404, so the browser's Back button cannot
+    carry one collection's topic into another.
+
+    Args:
+        session_id (str): The session to read.
+        collection (str): The caller's active logical collection.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        SessionTopicOut: The stored topic, or ``None`` when the session has none.
+
+    Raises:
+        HTTPException: 404 when the session is not found for this principal in
+            this collection; 500 on unexpected errors.
+    """
+    try:
+        sm = rag.ensure_session_manager()
+        owner = principal.effective_owner
+        physical = rag.ensure_collection_owner_manager().resolve(owner, collection)
+        if physical is None or sm.get_session_collection(session_id, owner) != physical:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        stored = sm.get_topic_focus(session_id, owner)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("Error reading session topic")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    return SessionTopicOut(topic_focus=TopicFocusOut(**stored) if stored else None)
+
+
+@app.delete("/sessions/{session_id}/topic", tags=["Sessions"])
+def clear_session_topic(
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
+    """Remove the topic a session was opened with.
+
+    Answers are then no longer narrowed to it; the session and its turns stay.
+
+    Args:
+        session_id (str): The session to update.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}``.
+
+    Raises:
+        HTTPException: 404 when the session is missing or not owned.
+    """
+    if not rag.ensure_session_manager().clear_topic_focus(session_id, principal.effective_owner):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return {"ok": True}
 
 
 class ChunkOut(BaseModel):
@@ -2700,6 +2886,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     principal.effective_owner,
                     payload.scope_chunk_ids,
                 )
+                _apply_turn_topic(session_id, principal.effective_owner, payload.topic_focus)
                 # An agent turn reads its own history, and its fallback binds none on this endpoint.
                 agent = _agent_turn_allowed(payload.retrieval_target)
                 if agent and rag.sessions is not None:
@@ -2999,6 +3186,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             )
                             or None
                         )
+                        _apply_turn_topic(resolved_id, session_owner, payload.topic_focus)
                         stream_state["agent"] = _agent_turn_allowed(payload.retrieval_target)
                     # The retry re-answers a rejected lookup, so any second pass is a plain lookup.
                     agent: bool = stream_state["agent"] if retrieval_query is None else False
@@ -5312,6 +5500,29 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
                 "entities_touched": summary.entities_touched,
             }
 
+    topics_cfg = load_topics_env()
+    if topics_cfg.enabled and topics_cfg.align_on_ingest:
+        try:
+            outcome = rag.topics_service().align_on_ingest(
+                state.physical,
+                owner_created_at=lambda: rag.collection_created_at(state.physical),
+                progress=lambda done, total: push("ingestion_progress", progress_payload("aligning", done, total)),
+            )
+        except JobCancelled:
+            raise
+        except Exception:
+            logger.exception("Topic alignment after ingest failed for '{}'", state.logical_name)
+            push("warning", {"message": "Topic alignment failed.", "code": "topics_align_failed"})
+        else:
+            if outcome is not None and outcome.deferred:
+                push(
+                    "warning",
+                    {
+                        "message": "Topic alignment was deferred: another topics run holds this collection.",
+                        "code": "topics_deferred",
+                    },
+                )
+
     # A per-request override of ``SUMMARY_ON_INGEST``: the rebuild maps the
     # whole collection, not just this run's files, so it is the longest tail
     # of a run and the one stage worth skipping for a batch nobody will
@@ -5588,6 +5799,80 @@ def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     return {"empty": False, "resolution": None, "artifact": record, "stats": bundle.counts}
 
 
+#: Static copy for each topics endpoint fault; the exception text names the endpoint.
+_TOPICS_ENDPOINT_MESSAGES: dict[str, str] = {
+    "topics_unreachable": "The topics service could not be reached.",
+    "topics_busy": "The topics service stayed busy; try again later.",
+    "topics_too_large": "The topics service refused a sample this large.",
+    "topics_rejected": "The topics service refused the request.",
+    "topics_bad_response": "The topics service sent an unusable answer.",
+}
+
+
+def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Execute one topics job: build, discover or align.
+
+    Injected via :func:`_run_job` so ``core/jobs.py`` stays free of docint
+    domain imports. Runs on a worker thread; ``push`` is thread-safe.
+
+    Args:
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any]: ``{"empty", "resolution"}``, plus ``artifact`` and
+            ``stats`` once the run did something. A refusal is an empty
+            completion carrying a coded warning.
+
+    Raises:
+        TopicsEndpointError: When the topics service fails, after a coded warning.
+    """
+    # The first push is the cancel checkpoint for a job stopped while queued.
+    push("topics_progress", progress_payload("starting", 0, 0))
+
+    def _progress(stage: str, done: int, total: int) -> None:
+        """Publish one progress frame.
+
+        Args:
+            stage (str): The stage.
+            done (int): Units done.
+            total (int): Units in all, 0 when unknown.
+        """
+        push("topics_progress", progress_payload(stage, done, total))
+
+    def _warn(code: str, message: str) -> None:
+        """Publish one coded warning.
+
+        Args:
+            code (str): The warning code.
+            message (str): Its static message.
+        """
+        push("warning", {"message": message, "code": code})
+
+    try:
+        outcome = rag.topics_service().run(
+            cast(Action, state.action or "build"),
+            state.physical,
+            logical=state.logical_name,
+            owner_created_at=lambda: rag.collection_created_at(state.physical),
+            progress=_progress,
+            warn=_warn,
+        )
+    except TopicsRefused as exc:
+        # A sample too small to fit says how many chunks it held and needs.
+        push("warning", {"message": exc.message, "code": exc.code, **exc.counts()})
+        return {"empty": True, "resolution": None}
+    except TopicsEndpointError as exc:
+        _warn(exc.code, _TOPICS_ENDPOINT_MESSAGES.get(exc.code, "Topics run failed."))
+        raise
+    return {
+        "empty": outcome.empty,
+        "resolution": None,
+        "artifact": outcome.artifact(),
+        "stats": {"topics": outcome.topics, "added": outcome.added, "assigned": outcome.assigned},
+    }
+
+
 def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """Dispatch a job to its kind-specific runner.
 
@@ -5604,6 +5889,8 @@ def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         return _run_extract_job(state, push)
     if state.kind == "report_pdf":
         return _run_report_pdf_job(state, push)
+    if state.kind == "topics":
+        return _run_topics_job(state, push)
     try:
         return _run_ingest_job(state, push)
     finally:
@@ -6127,6 +6414,205 @@ def delete_extract(
     return {"ok": True}
 
 
+def _require_topics_enabled() -> None:
+    """Refuse every topics route while topics are switched off.
+
+    Raises:
+        HTTPException: 404 when ``TOPICS_ENABLED`` is false.
+    """
+    if not load_topics_env().enabled:
+        raise HTTPException(status_code=404, detail="Topics are disabled.")
+
+
+@app.post("/collections/{name}/topics", response_model=None, tags=["Query"])
+async def create_topics(
+    name: str,
+    payload: TopicsIn | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+) -> Response:
+    """Queue a topics run over a collection.
+
+    Progress arrives on ``GET /ingest/jobs/events`` as ``topics_started``/
+    ``topics_progress``/``topics_completed``; a refusal completes the job as
+    empty with a coded warning.
+
+    Args:
+        name (str): The caller's logical collection name.
+        payload (TopicsIn | None): The action, ``build`` when omitted.
+        principal (Principal): The resolved request principal.
+        jobs (IngestJobManager): The shared job registry.
+
+    Returns:
+        Response: 202 ``{"job_id"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled or the collection is not
+            owned; 400 for ``discover``/``align`` without a usable run; 409
+            when a topics run for this collection is already in flight.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    action = payload.action if payload is not None else "build"
+    if action != "build" and await jobs.active_for(principal.effective_owner, physical, "topics") is None:
+        if await to_thread.run_sync(rag._active_topic_run, physical) is None:
+            raise HTTPException(status_code=400, detail="Build topics first.")
+    state, created = await jobs.create_if_idle(
+        owner=principal.effective_owner,
+        logical_name=name,
+        physical=physical,
+        kind="topics",
+        action=action,
+    )
+    if not created:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "A topics run is already in progress.", "job_id": state.job_id},
+        )
+    return JSONResponse({"job_id": state.job_id}, status_code=202)
+
+
+@app.get("/collections/{name}/topics", response_model=None, tags=["Query"])
+def get_topics(name: str, principal: Principal = Depends(resolve_principal)) -> Response | dict[str, Any]:  # noqa: B008 - FastAPI dependency marker
+    """Describe a collection's topics: the run, its coverage and its topics by size.
+
+    Args:
+        name (str): The caller's logical collection name.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        Response | dict[str, Any]: 200 with the overview, or 204 when the
+            collection has no usable run.
+
+    Raises:
+        HTTPException: 404 when topics are disabled or the collection is not
+            owned; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        overview = rag.topics_overview(physical)
+    except Exception as e:
+        logger.exception("Reading the topics of '{}' failed", name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if overview is None:
+        return Response(status_code=204)
+    return overview
+
+
+@app.get("/collections/{name}/topics/{topic_id}/evidence", tags=["Query"])
+def get_topic_evidence(
+    name: str,
+    topic_id: int,
+    limit: int = Query(default=5, ge=1, le=20),
+    run_id: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Return a topic's passages nearest its centre.
+
+    Args:
+        name (str): The caller's logical collection name.
+        topic_id (int): Topic id.
+        limit (int): Most passages (1-20).
+        run_id (str | None): Expected active run; a mismatch returns 404.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"topic", "sources"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled, the collection is not
+            owned, or the topic is unknown; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        sources = rag.topic_evidence(physical, topic_id, limit=limit, run_id=run_id)
+    except Exception as e:
+        logger.exception("Reading the evidence of topic {} of '{}' failed", topic_id, name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if sources is None:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return {"topic": topic_id, "sources": sources}
+
+
+@app.get("/collections/{name}/topics/{topic_id}/documents", tags=["Query"])
+def get_topic_documents(
+    name: str,
+    topic_id: int,
+    limit: int = Query(default=50, ge=1, le=500),
+    run_id: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Count a topic's passages per source file.
+
+    Args:
+        name (str): The caller's logical collection name.
+        topic_id (int): Topic id.
+        limit (int): Most files (1-500).
+        run_id (str | None): Expected active run; a mismatch returns 404.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"documents", "more"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled, the collection is not
+            owned, or the topic is unknown; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        result = rag.topic_documents(physical, topic_id, limit=limit, run_id=run_id)
+    except Exception as e:
+        logger.exception("Reading the documents of topic {} of '{}' failed", topic_id, name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if result is None:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return result
+
+
+@app.get("/collections/{name}/topics/{topic_id}/chunks", tags=["Query"])
+def get_topic_chunks(
+    name: str,
+    topic_id: int,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    run_id: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+) -> dict[str, Any]:
+    """Read one page of a topic's passages.
+
+    Args:
+        name (str): The caller's logical collection name.
+        topic_id (int): Topic id.
+        cursor (str | None): The previous page's ``next_cursor``.
+        limit (int): Page size (1-200).
+        run_id (str | None): Expected active run; a mismatch returns 404.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{"items", "next_cursor"}``.
+
+    Raises:
+        HTTPException: 404 when topics are disabled, the collection is not
+            owned, or the topic is unknown; 400 for a malformed cursor; 500
+            when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        page = rag.topic_chunks(physical, topic_id, cursor=cursor, limit=limit, run_id=run_id)
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail="Invalid request.") from e
+    except Exception as e:
+        logger.exception("Reading the passages of topic {} of '{}' failed", topic_id, name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if page is None:
+        raise HTTPException(status_code=404, detail="Topic not found.")
+    return page
+
+
 def _owned_report_meta(report_id: int, owner: str) -> dict[str, Any]:
     """Return an owned report's identity, or raise 404.
 
@@ -6275,11 +6761,13 @@ async def report_pdf_status(
     """
     owner = principal.effective_owner
     meta = await to_thread.run_sync(_owned_report_meta, report_id, owner)
-    record = await to_thread.run_sync(_report_pdf_store().get, report_id, str(meta["created_at"]))
     key = _report_pdf_key(meta)
     job = next((state for state in await jobs.list_for_owner(owner) if state.physical == key), None)
+    # Keep completion older than the file read, even if the render finishes during that read.
+    snapshot = job.snapshot() if job is not None else None
+    record = await to_thread.run_sync(_report_pdf_store().get, report_id, str(meta["created_at"]))
     pdf = None if record is None else {**record, "current": record["report_updated_at"] == meta["updated_at"]}
-    return {"job": job.snapshot() if job is not None else None, "pdf": pdf}
+    return {"job": snapshot, "pdf": pdf}
 
 
 @app.get("/collections/{name}/sources/{source_id}/extract.{fmt}", response_model=None, tags=["Query"])

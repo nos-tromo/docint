@@ -20,7 +20,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 
 | Method | Path | Tag | Purpose |
 |---|---|---|---|
-| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention window). |
+| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention window, topics flag). |
 | `GET`  | `/config/ingest-defaults` | `Meta` | Deployment defaults for the ingest UI's enrichment toggles. |
 | `GET`  | `/version` | `Meta` | Running app version. Unauthenticated; the Docker healthcheck's liveness probe. |
 | `GET`  | `/health` | `Meta` | Dependency status (Qdrant reachability). Unauthenticated, always `200`. |
@@ -52,12 +52,19 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `GET`  | `/collections/{name}/export/entities.csv` | `Query` | Stream the top entities by mention frequency as CSV. |
 | `GET`  | `/collections/{name}/export/ner-sources.csv` | `Query` | Stream the NER source rows as CSV, with the same entity filters as the paged route. |
 | `GET`  | `/collections/{name}/export/hate-speech.csv` | `Query` | Stream the hate-speech findings table as CSV. |
+| `POST` | `/collections/{name}/topics` | `Query` | Queue a topics job (`build`, `discover` or `align`); `202 {job_id}`. |
+| `GET`  | `/collections/{name}/topics` | `Query` | The active topic run's overview: coverage and topics by size; `204` without a run. |
+| `GET`  | `/collections/{name}/topics/{topic_id}/evidence` | `Query` | A topic's chunks nearest its centre. |
+| `GET`  | `/collections/{name}/topics/{topic_id}/documents` | `Query` | A topic's chunks counted per source file. |
+| `GET`  | `/collections/{name}/topics/{topic_id}/chunks` | `Query` | One page of a topic's chunks. |
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
 | `GET`  | `/sessions/{session_id}/history` | `Sessions` | Return conversation history for a session. |
 | `GET`  | `/sessions/{session_id}/sources.zip` | `Sessions` | Stream a ZIP of every source file cited in the session. |
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
 | `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
 | `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
+| `GET`  | `/sessions/{session_id}/topic` | `Sessions` | Return the topic the session was opened with, or `null`. |
+| `DELETE` | `/sessions/{session_id}/topic` | `Sessions` | Remove the session's topic; the session stays. |
 | `POST` | `/reports` | `Reports` | Create an empty report owned by the caller. |
 | `GET`  | `/reports` | `Reports` | List the caller's reports in one collection. |
 | `GET`  | `/reports/unassigned` | `Reports` | List the caller's reports that belong to no collection. |
@@ -99,15 +106,18 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns seven fields (`FrontendConfigOut`):
+without a principal. Returns eight fields (`FrontendConfigOut`):
 `graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`,
-`report_batch_max_items`, `language` and `collection_retention`. They come
-from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
-`DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS`, `RESPONSE_LANGUAGE`
-and `COLLECTION_RETENTION` respectively (see
+`report_batch_max_items`, `language`, `collection_retention` and
+`topics_enabled`. They come from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`,
+`FRONTEND_COLLECTION_TIMEOUT`, `DOCINT_CLIENT_MAX_BODY_SIZE`,
+`REPORT_BATCH_MAX_ITEMS`, `RESPONSE_LANGUAGE`, `COLLECTION_RETENTION` and
+`TOPICS_ENABLED` respectively (see
 [configuration.md](configuration.md#frontend--frontendconfig)).
 `collection_retention` is `"off"` or the idle window (`"6m"` … `"24m"`); a
-client asks `GET /collections/retention` only when it is not `"off"`.
+client asks `GET /collections/retention` only when it is not `"off"`. While
+`topics_enabled` is false the SPA shows none of its topics screens, and every
+[topics route](#topics) answers `404`.
 
 ### `GET /config/ingest-defaults`
 
@@ -196,8 +206,8 @@ engine if needed, and pre-warms the NER cache when `enable_ner` is on.
 
 Deletes the collection and everything connected to it, in this order: the
 Qdrant collection and its hidden companions, the source files (with the
-docstore, summary cache and ingest manifest inside them), stored extracts, the
-PDF pipeline artifacts no other collection uses, the collection's chat
+docstore, summary cache and ingest manifest inside them), stored extracts and
+topic runs, the PDF pipeline artifacts no other collection uses, the collection's chat
 sessions, the reports built from it, and last the ownership row. A failure stops the cascade with the collection still listed, and a retry
 finishes it. Retention runs the same cascade ([retention.md](retention.md)).
 
@@ -243,6 +253,14 @@ Request (`QueryIn`):
   session routing. A pinned scope outranks it. A value outside the three is
   rejected with 422. See
   [retrieval-and-agents.md](retrieval-and-agents.md#retrieval-targets).
+- `topic_focus` — optional `{run_id, topic_id, label}`: the topic **Ask in
+  chat** opened the chat with. It is stored on the session the turn runs in,
+  which is how a chat keeps its topic across reloads; only the turn that creates
+  the session sends it, so no later turn can bring back a removed topic. Absent
+  leaves the stored topic as it is, and a stateless turn stores nothing. It
+  narrows nothing by itself: the client sends the topic's `docint_topic` rule
+  in `metadata_filters`. A `run_id` that is not a topic run id, a negative
+  `topic_id` or a `label` over 500 characters is rejected with 422.
 - `metadata_filters` — list of `MetadataFilterIn` objects with
   `{field, fields, operator, value, values}`. Supported operators: `eq`, `neq`,
   `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `mime_match`, `date_after`,
@@ -316,7 +334,8 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
   - the tool that ran, with its main argument in `detail`: `search` (the
     model's query), `search_images` (the visual cues it looked for),
     `keyframes` (the clip's name, ending in ` #n` when one frame was asked for),
-    `keyword` (the words it matched) or `read` (the passage number);
+    `keyword` (the words it matched), `topics` (empty for a listing of the
+    topics, `T<n>` for one topic's passages) or `read` (the passage number);
   - `note`: the text the round wrote before its calls, cut to 500 characters,
     with `found` 0. It arrives after the `token` frames it withdraws: discard
     the answer text so far, and treat later tokens as a fresh answer. The first
@@ -721,6 +740,15 @@ and `image_tags`, like the NER source rows.
 
 Lists the documents currently stored in the active collection.
 
+A document whose chunks carry topic values also has `topics`: one
+`{"topic": "<run_id>:<topic_id>", "count": n}` per value, the largest count
+first and ties by value. The values are the stored `docint_topic` payloads, so
+they can include the unassigned `"<run_id>:-1"` and, after an interrupted job,
+another run's values; the Inspector shows only the active run's topics. The
+paginated form reads a per-collection cache, which a topics job run through the
+API drops when it writes and a CLI run cannot (see
+[topics.md](topics.md#limitations)).
+
 ### `GET /collections/documents/count`
 
 Returns `{"count": int}` — the number of unique documents in the caller's
@@ -809,6 +837,90 @@ streaming endpoints and the `query` CLI share — so both produce byte-identical
 CSVs for the same collection. For batch jobs that take many minutes (or should
 not hold an HTTP connection open), run the CLI inside the backend container
 instead; see [cli-reference.md](cli-reference.md#query--batch-chat-summaries-exports).
+
+### Topics
+
+A collection's active topic run, its coverage and the chunks in each topic.
+Runs, the assignment rule and the store are in [topics.md](topics.md).
+
+Owner-gated by the collection name in the path, like the CSV exports above:
+`404` when the collection is not owned by the caller. While `TOPICS_ENABLED` is
+off, every route here answers `404`.
+
+| Route | Contents |
+|---|---|
+| `POST /collections/{name}/topics` | Queue a job. Optional body `{"action": "build" \| "discover" \| "align"}`, `build` when omitted. `202 {"job_id"}`; `409 {"detail": {"message", "job_id"}}` while a topics job is in flight for the collection; `400` for `discover` or `align` when none is and the collection has no usable run. |
+| `GET /collections/{name}/topics` | The active run's overview (below); `204` when the collection has no usable run. |
+| `GET /collections/{name}/topics/{topic_id}/evidence` | `{"topic", "sources"}`: the topic's chunks nearest its centre, closest first. `limit` 1–20, default 5. |
+| `GET /collections/{name}/topics/{topic_id}/documents` | `{"documents": [{"file_hash", "filename", "count"}], "more"}`: the topic's chunks counted per source file, largest first. `limit` 1–500, default 50; `more` says the list was cut. |
+| `GET /collections/{name}/topics/{topic_id}/chunks` | `{"items", "next_cursor"}`: one page of the topic's chunks. `limit` 1–200, default 50; pass `next_cursor` back as `cursor`. `400` for a malformed cursor. |
+
+A topic the active run lacks answers `404`, and so does `-1`: unassigned chunks
+are counted, never listed. Each detail route accepts an optional `run_id`;
+it returns `404` if that run is no longer active. The SPA sends the overview's
+run id so a rebuild cannot put a new topic's passages under an older label.
+A run built before the collection was deleted and
+created again is no usable run. Each entry of `sources` and `items` is shaped
+like a chat source, without `preview_url`, `document_url` and
+`image_collection`, which would name the physical collection.
+
+The overview:
+
+```json
+{
+  "run_id": "20261025-101500-a1b2c3",
+  "created_at": "2026-10-25T10:15:00+00:00",
+  "updated_at": "2026-10-25T10:21:42+00:00",
+  "embed_model": "BAAI/bge-m3",
+  "embed_model_changed": false,
+  "params": {"seed": 42, "min_topic_size": 10, "nr_topics": 0, "top_n_words": 10, "min_df": 2,
+             "max_df": 0.8, "fit_max_points": 100000, "min_text_chars": 40, "admit_percentile": 5.0,
+             "merge_min_similarity": 0.7},
+  "coverage": {"total": 4000, "assigned": 3510, "unassigned": 420, "pending": 70},
+  "topics": [
+    {"id": 2, "label": "Alpha and beta", "description": "Passages that name alpha and beta.",
+     "keywords": [["alpha", 0.0412], ["beta", 0.0377], ["gamma", 0.0201]],
+     "size": 640, "share": 0.16, "origin": "build", "added_at": "2026-10-25T10:14:21+00:00",
+     "first_seen": "2026-03-02T09:14:00+00:00", "last_seen": "2026-09-30T17:05:00+00:00"}
+  ]
+}
+```
+
+- `coverage.total` counts the eligible chunks (every chunk but coarse
+  parents); `assigned` those in one of the run's topics, `unassigned` those the
+  run placed in none (`-1`), and `pending` those it has not placed yet.
+- `topics` is ordered by `size`, largest first, then by `id`. `share` is
+  `size / total`, a fraction from 0 to 1 rounded to four places.
+- `origin` is `build`, or `discover` for a topic a later discover added.
+  `first_seen` and `last_seen` are ISO-8601 UTC, or `null` when no chunk of the
+  topic carries a timestamp.
+- `embed_model_changed` is true when the configured embedding model is not the
+  one the run was built with; the SPA then suggests a rebuild.
+- `params` are the settings the build ran with.
+
+A job runs as `kind="topics"` on the shared stream (`GET /ingest/jobs/events`),
+framed as `topics_started` (`collection`, `action`), `topics_progress`
+(`message`, `stage`, `done`, `total`) and `topics_completed`, which carries
+`empty` and, once the job did something, the `artifact`
+`{"action", "run_id", "topics", "added", "assigned", "deferred"}`. A refusal
+completes the job as `empty` with a coded `warning`, which for a sample too small
+to fit also carries `found` and `needed`; a failure is the `error`
+frame with `code: "topics_failed"`, after a coded `warning` when the fit
+service was at fault. The job snapshot (`GET /ingest/jobs/{job_id}`) carries
+`action` and the same `artifact`. The stages, the warning codes and the endpoint
+faults are in [topics.md](topics.md#jobs-and-events).
+
+```bash
+curl -X POST "http://localhost:8000/collections/my_collection/topics" \
+  -H 'Content-Type: application/json' -d '{"action": "build"}'
+curl "http://localhost:8000/collections/my_collection/topics"
+```
+
+A topic narrows `/query`, `/stream_query` and `/search` as a metadata filter:
+`{"field": "docint_topic", "operator": "eq", "value": "<run_id>:<topic_id>"}`.
+Image points carry no topic keys, so the rule selects text chunks only. An
+answer under a rule naming a topic key is built from the matching chunks alone,
+without their parent sections or a posting's linked siblings.
 
 ## Reports
 
@@ -1028,6 +1140,25 @@ as `missing`.
 Return the session to normal retrieval. Returns an empty scope. `404` when the
 session is missing or not owned.
 
+### `GET /sessions/{session_id}/topic`
+
+Return the topic the session was opened with through **Ask in chat**:
+`{"topic_focus": {"run_id": "...", "topic_id": 3, "label": "..."}}`, or
+`{"topic_focus": null}` for a session without one. The topic is stored on the
+conversation by the turn that created it (`topic_focus` on
+[`POST /query`](#post-query)), so it survives a reload and reopening the session.
+
+`collection` (the caller's active logical collection) is required, and the gate
+is the history's: a session that is missing, belongs to another principal, or is
+pinned to another collection returns `404`.
+
+### `DELETE /sessions/{session_id}/topic`
+
+Remove the session's topic, so its answers are no longer narrowed to it; the
+session and its turns stay. Returns `{"ok": true}`; `404` when the session is
+missing or not owned. Deleting the session, or its collection, removes the topic
+with it.
+
 ## Agent
 
 ### `POST /agent/chat`
@@ -1186,7 +1317,7 @@ run's final node batch.
 
 ### `GET /ingest/jobs/events`
 
-One SSE connection carrying every job the caller owns, of either `kind`,
+One SSE connection carrying every job the caller owns, of any `kind`,
 each frame tagged with its `job_id`. On connect the stream replays a
 **collapsed** history per job — the kind's `*_started` event, then the
 retained warnings, then the latest `*_progress`, then the terminal frame —
@@ -1194,28 +1325,34 @@ so a browser that reloads mid-run re-attaches and resumes the live view.
 Event names are kind-specific: `ingestion_started` / `ingestion_progress` /
 `ingestion_complete` for `kind="ingest"`, `summary_started` /
 `summary_progress` (carrying `mapped`/`total_units`) / `summary_completed`
-for `kind="summary"`. A client must filter frames by `job_id` (and, if it
-cares, `kind`) since both kinds share the one connection.
+for `kind="summary"`, and `topics_started` / `topics_progress` (carrying
+`stage`, `done` and `total`) / `topics_completed` for `kind="topics"` (see
+[Topics](#topics)). A client must filter frames by `job_id` (and, if it
+cares, `kind`) since the kinds share the one connection.
 
 Progress is collapsed to the newest frame because a long run emits thousands
 of them and only the newest describes the current state. Warnings are
 retained individually, since each carries unique information.
 
-Terminal frames are `ingestion_complete`/`summary_completed` or `error`. The
-`error` frame carries a machine-readable `code` (`ingestion_failed` or
-`summary_failed`) alongside static display copy — exception text never
-reaches a client, as it can carry connection strings or file paths.
+Terminal frames are `ingestion_complete`/`summary_completed`/`topics_completed`
+or `error`. The `error` frame carries a machine-readable `code`
+(`ingestion_failed`, `summary_failed` or `topics_failed`) alongside static
+display copy — exception text never reaches a client, as it can carry
+connection strings or file paths.
 
 ### `GET /ingest/jobs`
 
-Lists the caller's jobs of either `kind`, newest first. Not used by the SPA
+Lists the caller's jobs of any `kind`, newest first. Not used by the SPA
 (reload re-discovery goes through the persisted job id plus the SSE replay);
 available for other clients that want to enumerate a caller's runs.
 
 ### `GET /ingest/jobs/{job_id}`
 
-Point-in-time snapshot of one owned job: `kind` (`"ingest"` or `"summary"`),
-status, latest message, error, and timestamps. The owner-namespaced physical
+Point-in-time snapshot of one owned job: `kind` (`"ingest"`, `"summary"`,
+`"extract"`, `"report_pdf"` or `"topics"`), status, latest message, error, and
+timestamps, plus `action` (a topics job's `build`, `discover` or `align`;
+`null` for every other kind) and `artifact` (what a finished extract,
+report-PDF or topics job produced; `null` otherwise). The owner-namespaced physical
 collection name is deliberately excluded — callers only ever see their own
 logical name.
 

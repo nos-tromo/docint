@@ -149,6 +149,22 @@ string>)` whose bounds are floats, and raises `NotImplementedError` for
 overrides the LlamaIndex filters inside `QdrantVectorStore.query`, the native
 filter is the one that executes.
 
+**Topic rules select text only.** A rule asking for a topic (`docint_topic`
+`eq` `<run_id>:<topic_id>`, see [topics.md](topics.md#payload-keys-and-indexes))
+matches chunks of the main collection only: the points of the
+`{collection}_images` companion carry no topic keys. Under one, the image lane
+of an `all` answer finds nothing, a `visual` turn finds no evidence, and a
+search returns no image hits. The SPA's topic focus is therefore left off
+visual turns.
+
+A rule naming a topic key, whatever its operator, also keeps the answer to the
+chunks it matched: the chain leaves out parent-context expansion and
+link-following, as a scoped turn does (see [Scoped answering](#scoped-answering)).
+A topic belongs to each fine chunk alone, while a coarse parent spans chunks of
+several topics and a posting's siblings carry their own, so either step would
+hand the model passages the rule never matched. Coarse parents still stay out
+of retrieval.
+
 ## Scoped answering
 
 When a session carries a search scope (`PUT /sessions/{id}/scope`), the read
@@ -209,11 +225,13 @@ engine for warmup or introspection does not pay that cost.
 
 ## Parent-context expansion
 
-`ParentContextExpansionPostprocessor` (implemented in `rag.py`) takes a
+`ParentContextPostprocessor` (implemented in `rag.py`) takes a
 fine-grained chunk hit and pulls in its coarse parent node for more
 context in the final prompt. It is enabled by
 `PARENT_CONTEXT_RETRIEVAL_ENABLED=true` and requires
-`HIERARCHICAL_CHUNKING_ENABLED=true` at ingest time.
+`HIERARCHICAL_CHUNKING_ENABLED=true` at ingest time. It is left out of a
+turn whose filters name a topic key (see
+[Topic rules select text only](#metadata-filters)).
 
 ## Source diversity
 
@@ -559,6 +577,8 @@ plain lookup.
   - where `keyword` is offered, its line (`agent_tools_keyword.txt`), and the
     fields line (`agent_tools_keyword_fields.txt`) when it offers more than
     the text;
+  - where `topics` is offered, its line (`agent_tools_topics.txt`), after the
+    keyword lines;
   - the assessment rule while `ASSESSMENT_ENABLED` is on;
   - the conversation's summary block;
 - the offered tool schemas;
@@ -568,9 +588,11 @@ plain lookup.
 The room for tool replies is what these leave of the window, less a 5% margin
 and the answer's reserve: 1024 tokens, or 3072 when reasoning is on. With less
 than 1500 tokens of room no turn is built, and the plain path answers. One
-warning gives the numbers. If `keyword` is offered and the room is under 1500,
-the turn is first built again with `keyword` on the text alone, then without
-it (see [Keyword checks](#keyword-checks)).
+warning gives the numbers. If `topics` is offered and the room is under 1500,
+the turn is first built again without it (see [Topics](#topics)). If `keyword`
+is offered and the room is still under 1500, the turn is built again with
+`keyword` on the text alone, then without it (see
+[Keyword checks](#keyword-checks)).
 
 ### The loop
 
@@ -651,15 +673,17 @@ calls, says the round was sent again.
 
 | Target | Tools |
 |---|---|
-| `documents` | `search`, `keyword`, `read` |
+| `documents` | `search`, `keyword`, `topics`, `read` |
 | `visual` | `search_images`, `keyframes`, `read` |
-| `all` | `search`, `search_images`, `keyframes`, `keyword`, `read` |
+| `all` | `search`, `search_images`, `keyframes`, `keyword`, `topics`, `read` |
 
 `keyword` is offered only where the collection's indexes allow it (see
-[Keyword checks](#keyword-checks)).
+[Keyword checks](#keyword-checks)), and `topics` only where the collection has
+an active topic run with topics (see [Topics](#topics)).
 
 - **`search(query)`** retrieves through the turn's own engine, so the request's
-  filters, rerank and parent-context expansion apply as on a lookup. Every
+  filters, rerank and parent-context expansion apply as on a lookup, and under
+  a topic rule parent context and link-following are left out as there. Every
   retrieved child of a section is kept (`AgentSearchQuery`). Each query is
   expanded with graph neighbours for retrieval alone; the reply and the trail
   show the model's own words. A sub-floor image gets no description re-score
@@ -677,6 +701,9 @@ calls, says the round was sent again.
 - **`keyword(words[, field])`** counts the indexed chunks that contain every
   word, exactly over what was checked, and shows the best new ones (see
   [Keyword checks](#keyword-checks)).
+- **`topics([topic])`** lists the active topic run's topics with their sizes
+  and shares, or shows one topic's chunks nearest its centre (see
+  [Topics](#topics)).
 - **`read(n)`** shows passage `[n]` again, as much of it as one reply holds.
 
 A reply numbers only what it shows:
@@ -801,7 +828,8 @@ when more than the text is offered.
 
 **Passages.** The passages are retrieved as a search retrieves them, narrowed to
 the matches by the filter that counts them: the same rerank, image floor and
-parent context, every retrieved child kept. The social diversity cap and
+parent context (none under a topic rule), every retrieved child kept. The
+social diversity cap and
 link-following are left out, so every passage a check adds is a match. They are
 numbered, and named when shown before, as a search's are.
 
@@ -870,6 +898,62 @@ line before the writing line. When the retry cuts a reply holding the writing
 line, it leaves at least the words `The collection was being written`; in a
 short reply, such as a 0 that shows no passages, the cut can fall inside the
 line, so the rest of it may go. The validator is given the same counts (see
+[Answer, validation and storage](#answer-validation-and-storage)).
+
+### Topics
+
+`topics([topic])` reads the collection's active topic run
+(`agents/turn/topics.py`; the runs themselves are in [topics.md](topics.md)).
+The run, its counts and its passages are read in `RAG`, which binds them to the
+request's collection and filters.
+
+**Where it is offered.** On the `all` and `documents` targets, while
+`TOPICS_ENABLED` is on and the collection's active run has topics. It is
+withheld from a `visual` turn, from a scoped one, which offers no tools, and
+from a turn whose filters cannot be compiled for Qdrant, since its counts and
+passages would then cover other material than the turn searches. It is the
+first tool given up for room: when the room for tool replies is under 1500
+tokens with `topics` offered, the turn is built again without it, before
+`keyword` falls back to the text alone. Where `topics` is offered, the system
+prompt ends its tools guide with the topics line (`agent_tools_topics.txt`). A
+DEBUG line names why the tool was withheld (`visual`, `scoped`, `disabled`,
+`filters`, `no_run`, `no_topics`, or `fault` with the exception's type), and an
+INFO line gives the room when it was withheld for that.
+
+**The listing.** `topics()` replies with a count line
+(`12 topics over 4000 chunks:`), then one line per topic, largest first:
+`T3 · <label> · <three keywords> · 640 chunks (16.0%)`, the label cut to 48
+characters. Whole lines are shown while they fit the reply's room, and a last
+line counts the rest (`+5 more topics (7.5% of chunks)`). A listing admits no
+passage but is informative, so a round holding one is not idle.
+
+- **Once per turn.** The listing is read once. A second call in the same turn
+  gets `The topics are already listed above; pass topic=T<n> to read one.`,
+  which tells the model nothing new and is not informative. The first listing
+  stays in the transcript: making room never clears it, since it shows no
+  passage.
+- **Under the turn's filters**, the listing counts only the chunks they select:
+  each topic's size and the total are counted within the filters, a topic with
+  none of their chunks is left out, and the count line ends in
+  `within the turn's filters`.
+
+**One topic.** `topics(topic=T3)` (also `t3` or `3`) shows the topic's five
+chunks nearest its centre, within the turn's filters, after a note naming it
+(`T3 · <label>`). They are numbered, and named when shown before, as a search's
+passages are; a reply cleared to make room keeps the note ahead of its stub. A
+topic the run lacks, `-1` included, gets an error reply, and so does an
+argument that is no topic id. A read is a repeat when it names the same topic,
+whatever the spelling.
+
+**The share in the answer.** A topic's size or share is a fact about the
+collection, not a source. The topics line of the system prompt tells the model
+to state it without `[n]` and to cite only the passages `topic=T<n>` returns.
+
+**The trail.** The step's `action` is `topics`, with an empty `detail` for a
+listing and `T<n>` for a read, whose `found` counts the passages it added. A
+stored listing step adds `total`, `filtered` and `topics`: one
+`[id, label, size]` per topic the listing showed. These are what the validator
+is given as topic checks (see
 [Answer, validation and storage](#answer-validation-and-storage)).
 
 ### Evidence and sources
@@ -1125,8 +1209,8 @@ answer without a separate source-backed part is labelled but not validated. An
 agent lookup is validated against the sources it cites, with the user's
 previous message shown ahead of the question. Either way the validator sees at
 most six sources: the first six when the answer cites none, or none when the
-turn holds keyword checks with a known count, since such an answer rests on the
-checks. Agent turns never take the corrective retry.
+turn holds keyword checks with a known count or topic checks, since such an
+answer rests on the checks. Agent turns never take the corrective retry.
 
 In both modes the validator is also given the turn's keyword checks with a
 known count, as facts about the collection rather than sources: one line per
@@ -1142,6 +1226,19 @@ never as the words being absent. An answer that rests on checks alone, citing
 no passage, is therefore validated by the model against the checks, its
 relevance judged by them, rather than mismatched for having no sources or
 judged against passages the search happened to find.
+
+A turn's topic listings reach the validator the same way, as topic checks
+under their own heading after the keyword checks: one line per topic a listing
+showed (`- T3 "<label>": 640 of 4000 chunks (16.0%)`), ending in
+`; within the turn's filters` when the listing counted under them, whole lines
+within 3000 characters, matching the listing's maximum reply budget. An empty
+listing supplies a check that no topic covers the counted chunks. Both
+validator prompts accept a statement of how many chunks a topic holds, or of
+its share, when a listed check gives that count or share. A check
+marked `within the turn's filters` counted only the chunks the filters select,
+so it grounds a share of those chunks, never of the whole collection. An answer
+that cites no passage beside topic checks is validated against the checks, as
+above.
 
 An agent turn is stored with its `answer_mode` and its trail. It reports
 `retrieval_mode: "agent"` (or `"scoped"`), `retrieval_query: null` and a
@@ -1201,7 +1298,10 @@ without finding it again (`SessionManager._agent_window`,
 - **Filters.** The request's filter rules judge each passage by its own
   metadata. A filter on a field only a section's chunks carry, such as hate
   speech, leaves that section out: it fails closed. Filters active without
-  rules carry nothing.
+  rules carry nothing. A topic rule is judged by the topic keys stored on the
+  passage's point in the main collection, since a docstore node holds none. A
+  passage without topic keys, such as a picture, is judged as one without a
+  topic: a rule asking for a topic drops it, a `neq` rule keeps it.
 - **Loading never fails a turn.** A store or index failure carries nothing,
   with one warning naming the exception's type, and the turn goes on. One INFO
   line counts the outcome (`An agent turn carries 2 of the 3 passages its

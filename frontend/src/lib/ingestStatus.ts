@@ -141,7 +141,8 @@ const TASK_PATTERNS: readonly { re: RegExp; key: string; label: string }[] = [
     re: /^Summarizing collection:\s*(\d+)\/(\d+) units processed$/,
     key: 'summary',
     label: 'Summarizing collection'
-  }
+  },
+  { re: /^Aligning topics:\s*(\d+)\/(\d+) chunks processed$/, key: 'topics', label: 'Aligning topics' }
 ]
 
 /**
@@ -206,12 +207,14 @@ export function parseProgressMessage(message: string): ParsedProgress {
  * `ingestion_progress` — otherwise a 3,000-unit summary build appends one
  * entry per unit and every append re-scans the whole log (`selectHasRunningJob`
  * is O(n)) and re-renders the sidebar. A report PDF reports one frame per
- * page it lays out, so `report_pdf_progress` is the same case.
+ * page it lays out, so `report_pdf_progress` is the same case, and a topics
+ * fit repeats its elapsed-seconds frame for as long as it runs.
  */
 const COLLAPSIBLE_PROGRESS_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_progress',
   'summary_progress',
-  'report_pdf_progress'
+  'report_pdf_progress',
+  'topics_progress'
 ])
 
 /**

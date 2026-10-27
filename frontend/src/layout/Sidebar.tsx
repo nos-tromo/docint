@@ -9,6 +9,7 @@ import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useChatUiStore } from '@/stores/chatUi'
+import { focusInScope, useTopicFocusStore } from '@/stores/topicFocus'
 import { useIngestJobsStore, selectHasRunningJob } from '@/stores/ingestJobs'
 import { cn } from '@/lib/cn'
 import {
@@ -130,6 +131,11 @@ export function Sidebar() {
           setCurrentSessionId(null)
           const clearDraft = useChatUiStore.getState().clearDraft
           for (const id of deletedSessionIds) clearDraft(id)
+          // The sessions took their topics with them; a pick made for a chat
+          // not started yet goes too, or a new collection of the same name
+          // would inherit it.
+          const topicPick = useTopicFocusStore.getState()
+          if (focusInScope(topicPick.focus, { collection: name, owner })) topicPick.clear()
           qc.invalidateQueries({ queryKey: sessionsKey })
         }
       }
@@ -141,6 +147,8 @@ export function Sidebar() {
     // A blank or stateless chat has no session to lose, so the Chat route's
     // reset never fires there; the next chat starts at everything regardless.
     setRetrievalTarget('all')
+    // And without a topic: "Ask in chat" is how a chat gets one.
+    useTopicFocusStore.getState().clear()
     navigate('/chat')
   }
 

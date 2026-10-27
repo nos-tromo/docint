@@ -75,6 +75,7 @@ export type AgentAction =
   | 'keyframes'
   | 'read'
   | 'keyword'
+  | 'topics'
 
 /** One step of an agent turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
@@ -82,8 +83,9 @@ export interface AgentStep {
   action: AgentAction
   /**
    * The search's words, the image search's cues or the keyword check's words; the
-   * clip, with ` #n` when one frame was asked for; the passage number read; or the
-   * note's text. Empty for `seed`, `carried` and `answer`.
+   * clip, with ` #n` when one frame was asked for; the passage number read; the topic
+   * read (`T12`); or the note's text. Empty for `seed`, `carried`, `answer` and a
+   * listing of the topics.
    */
   detail: string
   found: number
@@ -279,6 +281,13 @@ export interface ScopeResult {
   missing: number
 }
 
+/** A chat session's topic as the API stores it: the run it was picked from, its id and its label. */
+export interface SessionTopicFocus {
+  run_id: string
+  topic_id: number
+  label: string
+}
+
 export interface ChatRequest {
   question: string
   session_id?: string
@@ -297,6 +306,10 @@ export interface ChatRequest {
   // turn, so a selection made before it exists has nowhere to be written —
   // pinning it afterwards left that first answer unscoped.
   scope_chunk_ids?: string[]
+  // The topic "Ask in chat" opened this chat with. Sent only by the turn that
+  // creates the session, which stores it on the session row; later turns leave
+  // it out, so none of them can bring back a topic the user removed.
+  topic_focus?: SessionTopicFocus
   // The chat's reasoning toggle. Sent as an explicit boolean: the server
   // reads an absent field as "use the env default", which a toggle the user
   // can see must never silently mean. Applies to answer synthesis only.
@@ -338,6 +351,8 @@ export interface DocumentRecord {
   row_count?: number
   node_count?: number
   entity_types?: string[]
+  /** The topics the file's chunks sit in, each as `<run id>:<topic id>` with its chunk count. */
+  topics?: { topic: string; count: number }[]
 }
 
 export interface FileTypeCount {
@@ -693,6 +708,10 @@ export interface IngestEvent {
     | 'report_pdf_progress'
     | 'report_pdf_completed'
     | 'report_pdf_cancelled'
+    | 'topics_started'
+    | 'topics_progress'
+    | 'topics_completed'
+    | 'topics_cancelled'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
@@ -763,7 +782,7 @@ export interface IngestJobSnapshot {
   empty: boolean
   resolution: Record<string, number> | null
   /** Which job kind this is; drives the event names its frames carry. */
-  kind?: 'ingest' | 'summary' | 'extract' | 'report_pdf'
+  kind?: 'ingest' | 'summary' | 'extract' | 'report_pdf' | 'topics'
   /**
    * The one source an extract job covers, or null for a whole collection. A
    * report-PDF job carries its report's id here, as a string.
@@ -815,6 +834,11 @@ export interface AppConfig {
    * retention leaves every deadline surface hidden.
    */
   collection_retention?: string
+  /**
+   * `TOPICS_ENABLED`. Optional: a backend predating topics leaves every topics
+   * surface hidden.
+   */
+  topics_enabled?: boolean
 }
 
 /** One collection's retention clock and deletion date (`GET /collections/retention`). */

@@ -38,7 +38,7 @@ class FakeQdrant:
         offset: Any,
         scroll_filter: Any,
         with_payload: bool,
-        with_vectors: bool,
+        with_vectors: bool | list[str],
     ) -> tuple[list[FakePoint], Any]:
         """Record the call and return the requested slice + next offset."""
         self.calls.append(
@@ -69,6 +69,13 @@ def test_iter_scroll_yields_all_pages_in_order() -> None:
     assert [len(p) for p in pages] == [200, 200, 150]
     flat = [pt.id for page in pages for pt in page]
     assert flat == list(range(550))
+
+
+def test_iter_scroll_passes_a_vector_selector_through() -> None:
+    """Iter scroll passes a named-vector selector to the client unchanged."""
+    client = FakeQdrant(_points(3))
+    list(iter_scroll(client, collection_name="c", with_vectors=["text-dense"]))
+    assert client.calls[0]["with_vectors"] == ["text-dense"]
 
 
 def test_iter_scroll_stops_on_empty_page() -> None:

@@ -8373,6 +8373,96 @@ def test_the_text_chain_leaves_the_social_steps_out_when_asked(monkeypatch: pyte
     assert floor.rescore == rag._rescore_images_by_description
 
 
+class _PassThroughReranker:
+    """A reranker that keeps the retrieved order."""
+
+    top_n = 5
+
+    def model_copy(self, update: dict[str, Any]) -> Any:
+        """Answer an override like the real reranker, unchanged.
+
+        Args:
+            update (dict[str, Any]): Ignored.
+
+        Returns:
+            Any: This reranker.
+        """
+        return self
+
+    def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+        """Return the nodes untouched.
+
+        Args:
+            nodes (list[Any]): The nodes.
+            query_bundle (Any): Ignored.
+
+        Returns:
+            list[Any]: The same nodes.
+        """
+        return nodes
+
+
+@pytest.mark.parametrize("operator", [None, "eq", "neq"], ids=["no-rule", "eq", "neq"])
+def test_a_topic_rule_answers_from_the_matching_chunks_alone(
+    monkeypatch: pytest.MonkeyPatch, operator: str | None
+) -> None:
+    """Under a topic rule the evidence is the matched chunks themselves, never their wider context.
+
+    A coarse parent holds fine chunks of several topics, and a posting's siblings carry their own, so
+    expanding a hit to either hands the model passages the rule never matched. Without a rule the
+    same hit does expand, which is what shows the evidence below is the one synthesis receives.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        operator (str | None): The topic rule's operator; ``None`` for no rule.
+    """
+    rag, captured = _lookup_rag(monkeypatch, social=True, parent=True)
+    posting = {"posting_uuid": "post-1"}
+    parent = TextNode(
+        id_="p0",
+        text="Harbour cranes unload the ship. Grain silos fill up inland.",
+        metadata={"filename": "beitraege.csv", **posting},
+    )
+    child = TextNode(
+        id_="c1",
+        text="Harbour cranes unload the ship.",
+        metadata={"hier.parent_id": "p0", "docint_hier_type": "fine", **posting},
+    )
+    sibling = NodeWithScore(node=TextNode(id_="m1", text="Grain silos in the clip.", metadata=posting), score=0.5)
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=types.SimpleNamespace(
+                get_node=lambda node_id, raise_error=False: parent if node_id == "p0" else None
+            ),
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+        ),
+    )
+    rag._reranker = cast(Any, _PassThroughReranker())
+    monkeypatch.setattr(rag, "_fetch_posting_entity_nodes", lambda posting_uuid, *, exclude_node_ids: [sibling])
+    rules = (
+        []
+        if operator is None
+        else [{"field": "docint_topic", "operator": operator, "value": "20260102-030405-a1b2c3:3"}]
+    )
+
+    rag.build_query_engine(
+        metadata_filter_rules=rules, metadata_filters_active=bool(rules), retrieval_target="documents"
+    )
+
+    bundle = QueryBundle(query_str="harbour cranes")
+    evidence = [NodeWithScore(node=child, score=0.9)]
+    for postprocessor in captured["node_postprocessors"]:
+        evidence = postprocessor.postprocess_nodes(evidence, query_bundle=bundle)
+    text = " ".join(scored.node.get_content() for scored in evidence)
+    if operator is None:
+        assert [scored.node.node_id for scored in evidence] == ["p0", "m1"]
+        assert "Grain silos" in text
+    else:
+        assert [scored.node.node_id for scored in evidence] == ["c1"]
+        assert "Grain silos" not in text
+
+
 # ---------------------------------------------------------------------------
 # the keyword matcher an agent turn is offered
 # ---------------------------------------------------------------------------
@@ -8948,6 +9038,22 @@ def test_keyword_retrieval_keeps_every_child_and_leaves_the_social_links_out(mon
     assert [chain["social_links"] for chain in chains] == [False]
 
 
+def test_a_keyword_match_hands_the_request_rules_to_its_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The chain a keyword match runs hears the turn's rules, so a topic rule keeps its passages in the topic."""
+    keyword_coverage(monkeypatch, {"test": (10, 10)})
+    rag, _, _, _, chains = _keyword_rag(
+        monkeypatch,
+        {"test": TEXT_READY},
+        counts={"test": 1},
+        nodes=[NodeWithScore(node=TextNode(id_="n1", text="x"), score=1.0)],
+    )
+    rules = [{"field": "docint_topic", "operator": "eq", "value": "20260102-030405-a1b2c3:3"}]
+
+    _matcher(rag, rules=rules, active=True).run("Kontrollgruppe", "text")
+
+    assert [chain.get("metadata_filter_rules") for chain in chains] == [rules]
+
+
 def test_the_keyword_chain_sees_the_bundle_the_match_retrieved_with(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every postprocessor is handed the agent's own search bundle, which is what turns the image re-score off."""
     keyword_coverage(monkeypatch, {"test": (10, 10)})
@@ -9133,3 +9239,29 @@ def test_a_keyword_match_run_outside_its_collection_raises_before_reading_anythi
 
     assert (client.counted, built) == ([], [])
     assert matcher.run("Kontrollgruppe", "text").matches == 4
+
+
+def test_deleting_a_collection_removes_its_topics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Stored topic runs and the index cache entry go with the collection.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory standing in for the topic store root.
+    """
+    topics = tmp_path / "topics"
+    monkeypatch.setenv("TOPICS_DIR", str(topics))
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path / "sources"
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+    stored = topics / "target" / "20260102-030405-abcdef"
+    stored.mkdir(parents=True)
+    (topics / "target" / ".lock").touch()
+    rag._topic_indexes_ensured.add("target")
+
+    rag.delete_collection("target")
+
+    # The lock stays, so a job still running on the old collection excludes one on a new one of the same name.
+    assert [p.name for p in (topics / "target").iterdir()] == [".lock"]
+    assert "target" not in rag._topic_indexes_ensured

@@ -683,7 +683,8 @@ Loaded by `load_frontend_env()` (`env_cfg.py:346`).
 | `REPORT_BATCH_MAX_ITEMS` | `2000` | Most artifacts one `POST /reports/{id}/items/batch` may carry (clamped to ≥ 1). Read **once at import**: it becomes the request model's `max_length`, so a change needs a backend restart, and `GET /config` always advertises the value actually enforced. The Analysis screens' "Add all" refuses a larger section against this number rather than adding part of it. Raising it far past the default also means checking `DOCINT_API_MAX_BODY_SIZE` (see [deployment.md](deployment.md)) — the count is what the SPA refuses against, the bytes are what nginx stops. |
 
 All five values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE` — six fields in all (`FrontendConfigOut`).
+`RESPONSE_LANGUAGE`, `COLLECTION_RETENTION` and `TOPICS_ENABLED` — eight fields
+in all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 
@@ -731,6 +732,7 @@ Loaded by `load_path_env()` (`docint/utils/env_cfg.py`). Every path expands `~`.
 | `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` | Pipeline artifact root (also read by `PipelineConfig`). Compose: `/var/lib/docint/pipeline/artifacts`. Deleting a collection removes the artifacts no other collection uses ([retention.md](retention.md#what-is-deleted)). |
 | `QDRANT_SRC_DIR` | `~/docint/qdrant_sources` | Where raw source files are staged for preview. |
 | `EXTRACT_DIR` | `~/docint/extracts` | Where rendered data extracts are stored. Compose: `/var/lib/docint/pipeline/extracts`. |
+| `TOPICS_DIR` | `~/docint/topics` | Where each collection's topic runs are stored ([topics.md](topics.md#the-store-and-its-lock)). Compose: `/var/lib/docint/pipeline/topics`. `load_path_env()` raises `ValueError` when it lies inside `QDRANT_SRC_DIR` or `PIPELINE_ARTIFACTS_DIR`, both of which docint walks. Deleting a collection removes its runs. |
 | `REPORT_PDF_DIR` | `<temp dir>/docint-report-pdfs` | Where each report's newest rendered PDF is kept — one per report, replaced by the next render and deleted with the report. Scratch space by default, since a PDF can always be rendered again; in the container that is the `media-tmp` volume. |
 | `HF_HUB_CACHE` | `~/.cache/huggingface/hub` | HF Hub cache path. |
 
@@ -751,6 +753,54 @@ extracts described in [extracts.md](extracts.md); the store's location is
 | `EXTRACT_PDF_MAX_FIGURES` | `400` | The same cap counted in figures — what actually fills WeasyPrint's memory. |
 | `EXTRACT_SYNC_MAX_UNITS` | `50` | Units a per-source download may render on the request. Above it the route answers 413 and the caller queues a job. Minimum 1. |
 | `DOCINT_EXTRACT_CONCURRENCY` | `1` | Concurrent WeasyPrint renders: collection extracts and report PDF jobs share these slots, never an ingest or summary worker slot. |
+
+## Topics — `TopicsConfig`
+
+Loaded by `load_topics_env()` (`docint/utils/env_cfg.py`). Governs scalable
+collection clustering, described in [topics.md](topics.md); the store's
+location is `TOPICS_DIR` in the Paths table above. A number that cannot be
+parsed, or one outside its range, keeps its default and logs one warning; the
+exceptions are noted in the table.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOPICS_ENABLED` | `true` | Switch topics on. Off, every topics route answers 404, `GET /config` reports `topics_enabled: false` and the SPA hides its topics screens, agent turns offer no `topics` tool, ingest jobs skip the align stage, and the `topics` CLI exits with code 2. On without a reachable fit service, a build fails with a coded warning ([topics.md](topics.md#the-fit-service)). |
+| `TOPICS_ALIGN_ON_INGEST` | `true` | Run an align as a stage of every ingest job, placing the collection's pending chunks, the job's new ones among them, in the active run ([topics.md](topics.md#the-ingest-stage)). Off, they stay pending until an align job places them. |
+| `TOPICS_LABELS` | `true` | Have the chat model (`TEXT_MODEL`) write each new topic's label and one-sentence description. Off, a topic is named by its first four keywords. |
+| `TOPICS_FIT_MAX_POINTS` | `100000` | Most chunks one fit samples; at least `1`. A fit never exceeds what the service accepts at its default limit either: 150,000 points of up to 1,024 dimensions, proportionally fewer for wider vectors. |
+| `TOPICS_MIN_TEXT_CHARS` | `40` | Shortest prepared chunk text, in characters, that may join a fit. Shorter chunks are still assigned. A negative value clamps to `0`. |
+| `TOPICS_SEED` | `42` | Sampling seed and the fit's random seed, `0` to `2³² − 1`. |
+| `TOPICS_MIN_TOPIC_SIZE` | `0` | Smallest topic the fit may form. `0` sizes it from the sample of `n` chunks: `round(√n / 3)` between 2 and 10, and from 813 chunks on `n // 1000` between 10 and 100; a discover never goes below the build's size, counted up to 10. `1` is raised to the service's minimum, `2`. A build needs a sample of at least twice the size, and at least 8 chunks. |
+| `TOPICS_MAX_TOPICS` | `0` | Topic-reduction target; `0` keeps every topic the fit finds. Sent to the service as `nr_topics = N + 1`, because the service counts its outlier class as a topic. |
+| `TOPICS_ADMIT_PERCENTILE` | `5` | Percentile, `0` to `100`, of a topic's fit members' cosines to its centre that sets the topic's admission floor; a discovered topic counts only the members that stayed in it ([topics.md](topics.md#discover)). A higher value admits fewer aligned chunks. |
+| `TOPICS_MERGE_MIN_SIMILARITY` | `0.7` | Centre cosine, above `0` and at most `1`, at or above which a topic found by discover repeats an existing one and is not added. |
+
+A topic keeps the floor it was given when it was added, and `run.json` records
+the build's settings as `params`.
+
+Topics jobs (`kind="topics"`, queued by `POST /collections/{name}/topics`) take
+one knob of their own, read by `load_topics_concurrency()`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCINT_TOPICS_CONCURRENCY` | `1` | Topics jobs allowed to run at once, process-wide, bounded apart from ingest, summary and extract jobs. A build holds its sample's vectors in memory while the service fits them. Unparseable values fall back to `1`; values below `1` clamp to `1`. |
+
+### Topics endpoint — `TopicsClientConfig`
+
+Loaded by `load_topics_client_env()`. The topic-model fit is a remote service
+(vllm-service's `topics`), reached at `{TOPICS_API_BASE}/topics/fit`. Like the
+NER and CLIP clients, and unlike the embed, sparse, rerank and OCR clients,
+these do **not** inherit `OPENAI_API_BASE`, `OPENAI_API_KEY` or
+`OPENAI_TIMEOUT`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOPICS_API_BASE` | `http://vllm-router:4000` | Base URL of the fit service, with no path: docint appends `/topics/fit` and drops a trailing slash. For the `topics-only` deployment shape (no router), set `http://topics-only:8000`. |
+| `TOPICS_API_KEY` | *unset* | Sent as `Authorization: Bearer …` when set. The router enforces auth (use the master key); the `topics-only` shape has none, so leave it unset there. |
+| `TOPICS_TIMEOUT` | `3600` | Per-request HTTP timeout in seconds. One request holds for the whole fit, which takes seconds to minutes. A value that is not a positive, finite number keeps the default and logs a warning. |
+
+What docint sends, the limits it obeys and how an endpoint fault is reported
+are in [topics.md](topics.md#the-fit-service).
 
 ## Collection retention — `RetentionConfig`
 

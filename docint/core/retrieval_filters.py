@@ -164,6 +164,24 @@ def matches_metadata_filters(
     return True
 
 
+def rule_fields(raw_rules: Sequence[Any] | None) -> set[str]:
+    """Return every metadata key the request's filter rules name.
+
+    Args:
+        raw_rules (Sequence[Any] | None): Filter-like mappings or objects, as
+            :func:`matches_metadata_filters` takes them.
+
+    Returns:
+        set[str]: The ``fields`` of each rule that normalizes; empty without rules.
+    """
+    fields: set[str] = set()
+    for raw_rule in raw_rules or []:
+        rule = _coerce_rule(raw_rule)
+        if rule is not None:
+            fields.update(rule["fields"])
+    return fields
+
+
 def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
     """Normalize a raw filter payload into a plain dictionary.
 

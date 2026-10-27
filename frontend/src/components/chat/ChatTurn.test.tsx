@@ -2,7 +2,7 @@ import type { ReactElement } from 'react'
 import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { DocumentsIcon, ImageIcon, SearchIcon } from '@infra/ui'
+import { DocumentsIcon, ImageIcon, LayersIcon, SearchIcon } from '@infra/ui'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
@@ -782,6 +782,68 @@ describe('ChatTurn', () => {
       'Passage [2] gelesen',
       'Wortprüfung „Regenjacke“: 3 Treffer (2 Abschnitte nicht geprüft), 1 neu'
     ])
+  })
+
+  it.each([
+    [
+      'en',
+      ['Listed the topics', 'Read topic T12: 1 passage', 'Read topic T3: 4 passages', 'Read topic T7: 0 passages']
+    ],
+    [
+      'de',
+      ['Themen aufgelistet', 'Thema T12 gelesen: 1 Passage', 'Thema T3 gelesen: 4 Passagen', 'Thema T7 gelesen: 0 Passagen']
+    ]
+  ] as const)('labels a topics listing and a topic read in %s', (lang, labels) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [
+          { step: 1, action: 'topics', detail: '', found: 0 },
+          { step: 2, action: 'topics', detail: 'T12', found: 1 },
+          { step: 2, action: 'topics', detail: 'T3', found: 4 },
+          { step: 3, action: 'topics', detail: 'T7', found: 0 }
+        ]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual(labels)
+  })
+
+  it('draws a topics step with the layers icon, not a magnifier', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 1, action: 'topics', detail: '', found: 0 },
+        { step: 2, action: 'topics', detail: 'T12', found: 3 }
+      ]
+    })
+
+    const layers = innerMarkup(<LayersIcon />)
+    expect(layers).not.toBe(innerMarkup(<SearchIcon />))
+    const rows = within(screen.getByTestId('agent-trail-live')).getAllByRole('listitem')
+    expect(rows.map((row) => row.querySelector('svg')?.innerHTML)).toEqual([layers, layers])
+  })
+
+  it('keeps a topics step in a finished trail', async () => {
+    const stored: AgentTrail = {
+      ...LOOKUP_TRAIL,
+      actions: [
+        { action: 'topics', detail: '', found: 0 },
+        { action: 'topics', detail: 'T12', found: 2 }
+      ]
+    }
+
+    renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    expect(trailRows('agent-trail')).toEqual(['Listed the topics', 'Read topic T12: 2 passages'])
   })
 
   it('names a passage the model asked for as it cites it, by its number alone', () => {

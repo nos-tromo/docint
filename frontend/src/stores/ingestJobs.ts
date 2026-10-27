@@ -18,6 +18,14 @@ export interface IngestJobsState {
    * something that changes once per run rather than once per progress frame.
    */
   terminal: Record<string, true>
+  /**
+   * Ids of jobs this page watched while they ran: a frame arrived at least
+   * {@link LIVE_AFTER_MS} after the job's started frame. A reconnect replays a
+   * job's whole history in one burst, so only frames arriving apart tell a run
+   * watched as it went from one merely replayed. Latched for the page session:
+   * a later replay resets the log but never this.
+   */
+  liveJobs: Record<string, true>
   /** True once the SSE stream exhausted its reconnect budget. */
   streamLost: boolean
   /** Bumped to force `useIngestJobStream` to re-subscribe after giving up. */
@@ -28,8 +36,8 @@ export interface IngestJobsState {
   /** Clear the lost-stream flag and bump `retryNonce` so the stream hook's
    *  effect re-runs and opens a fresh connection. */
   retryStream: () => void
-  /** Drop every log and the lost-stream flag but keep `retryNonce`: for a
-   *  stream reopened under another owner, whose replay starts from nothing. */
+  /** Drop every log, live latch and the lost-stream flag but keep `retryNonce`:
+   *  for a stream reopened under another owner, whose replay starts from nothing. */
   resetLogs: () => void
   clear: () => void
 }
@@ -38,15 +46,16 @@ export interface IngestJobsState {
  * SSE event names that open a run, across every job kind this store can hold:
  * an ingest job starts with `ingestion_started`, a summary job with
  * `summary_started`, an extract job with `extract_started`, a report-PDF job
- * with `report_pdf_started`. The backend replays a job's collapsed history
- * from its started frame on every reconnect, so all of them must reset the
- * local log.
+ * with `report_pdf_started`, a topics job with `topics_started`. The backend
+ * replays a job's collapsed history from its started frame on every
+ * reconnect, so all of them must reset the local log.
  */
 const STARTED_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_started',
   'summary_started',
   'extract_started',
-  'report_pdf_started'
+  'report_pdf_started',
+  'topics_started'
 ])
 
 /**
@@ -74,9 +83,36 @@ function nextTerminal(
   return terminal
 }
 
+/** How long after a job's started frame a later frame must arrive to show the job was watched as it ran. */
+export const LIVE_AFTER_MS = 1000
+
+/**
+ * Fold one frame into the live-job latch, returning the *same* map when
+ * nothing changed.
+ *
+ * @param live - The current map.
+ * @param jobId - The job the frame belongs to.
+ * @param log - The job's log before the frame.
+ * @param ev - The frame.
+ * @returns The next map, or `live` itself when unchanged.
+ */
+function nextLive(
+  live: Record<string, true>,
+  jobId: string,
+  log: IngestEvent[] | undefined,
+  ev: IngestEvent
+): Record<string, true> {
+  // A started frame opens a fold, and a replayed one is restamped on arrival: neither shows a run watched.
+  if (live[jobId] || STARTED_EVENTS.has(ev.event) || ev.receivedAt === undefined) return live
+  const started = log?.find((frame) => STARTED_EVENTS.has(frame.event))
+  if (started?.receivedAt === undefined || ev.receivedAt - started.receivedAt < LIVE_AFTER_MS) return live
+  return { ...live, [jobId]: true }
+}
+
 export const useIngestJobsStore = create<IngestJobsState>((set) => ({
   events: {},
   terminal: {},
+  liveJobs: {},
   streamLost: false,
   retryNonce: 0,
   appendEvent: (jobId, ev) =>
@@ -84,6 +120,7 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
       // Only rebuilt when the flag actually changes, so a run of progress
       // frames leaves the reference — and every subscriber — untouched.
       terminal: nextTerminal(s.terminal, jobId, ev),
+      liveJobs: nextLive(s.liveJobs, jobId, s.events[jobId], ev),
       events: {
         ...s.events,
         // A job's *started* frame is the first frame of every replay, so it
@@ -102,16 +139,18 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
   setStreamLost: (streamLost) => set({ streamLost }),
   dropJob: (jobId) =>
     set((s) => {
-      if (!(jobId in s.events) && !(jobId in s.terminal)) return s // stable reference -> no needless re-render
+      if (!(jobId in s.events) && !(jobId in s.terminal) && !(jobId in s.liveJobs)) return s // stable reference -> no needless re-render
       const events = { ...s.events }
       delete events[jobId]
       const terminal = { ...s.terminal }
       delete terminal[jobId]
-      return { events, terminal }
+      const liveJobs = { ...s.liveJobs }
+      delete liveJobs[jobId]
+      return { events, terminal, liveJobs }
     }),
   retryStream: () => set((s) => ({ streamLost: false, retryNonce: s.retryNonce + 1 })),
-  resetLogs: () => set({ events: {}, terminal: {}, streamLost: false }),
-  clear: () => set({ events: {}, terminal: {}, streamLost: false, retryNonce: 0 })
+  resetLogs: () => set({ events: {}, terminal: {}, liveJobs: {}, streamLost: false }),
+  clear: () => set({ events: {}, terminal: {}, liveJobs: {}, streamLost: false, retryNonce: 0 })
 }))
 
 /**
@@ -119,20 +158,23 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
  * run. Mirrors the backend's `jobs.py::TERMINAL_EVENTS` — an ingest job
  * terminates on `ingestion_complete`, a summary job on `summary_completed`,
  * an extract job on `extract_completed`, a report-PDF job on
- * `report_pdf_completed`, any kind on `error`. The stream is multiplexed
- * across kinds with no kind filter (`useIngestJobStream.ts`), so every kind
- * must be recognized here or its finished jobs would look permanently
- * "running" to the selector below and leave the sidebar badge stuck on.
+ * `report_pdf_completed`, a topics job on `topics_completed`, any kind on
+ * `error`. The stream is multiplexed across kinds with no kind filter
+ * (`useIngestJobStream.ts`), so every kind must be recognized here or its
+ * finished jobs would look permanently "running" to the selector below and
+ * leave the sidebar badge stuck on.
  */
 const TERMINAL_EVENTS: ReadonlySet<IngestEvent['event']> = new Set([
   'ingestion_complete',
   'summary_completed',
   'extract_completed',
   'report_pdf_completed',
+  'topics_completed',
   'ingestion_cancelled',
   'summary_cancelled',
   'extract_cancelled',
   'report_pdf_cancelled',
+  'topics_cancelled',
   'error'
 ])
 

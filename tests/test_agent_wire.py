@@ -203,5 +203,6 @@ def test_an_agent_step_is_named_by_an_action_the_client_knows() -> None:
         "search_images",
         "keyframes",
         "keyword",
+        "topics",
         "read",
     }

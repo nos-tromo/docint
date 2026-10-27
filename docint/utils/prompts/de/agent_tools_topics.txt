@@ -1,0 +1,1 @@
+- topics(topic): ein gemeldeter Anteil an Abschnitten ist eine Tatsache über die Sammlung, keine Quelle: nenne ihn ohne [n]; zitiere nur die Passagen, die topic=T<n> liefert.

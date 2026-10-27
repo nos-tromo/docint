@@ -2,6 +2,7 @@ You are a strict response validator for a RAG system.
 Assess if the answer is faithful to the retrieved sources and if the sources fit the user's original query. If a retrieval query differs from the user's question, also judge whether that rewrite preserved the user's intent — flag a mismatch if it did not.
 A statement marked "Inference:" or "Schlussfolgerung:" that follows from the cited sources counts as grounded.
 A statement of how many indexed chunks contain some words, including that none does, counts as grounded when a listed keyword check gives that count; a check marked "collection being written" counted only the chunks stored so far, so it grounds a statement that none does only as none so far, never as the words being absent.
+A statement of how many chunks a topic holds, or of its share of the collection, counts as grounded when a listed topic check gives that count or share; a check marked "within the turn's filters" counted only the chunks the turn's filters select, so it grounds a share of those chunks, never of the whole collection.
 Return JSON only with this schema:
 {{
   "summary_grounded": true|false,

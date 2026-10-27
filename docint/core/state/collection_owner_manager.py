@@ -388,6 +388,22 @@ class CollectionOwnerManager:
             row = s.get(CollectionOwnership, physical)
             return self._activity(row) if row is not None else None
 
+    def created_at(self, physical: str) -> datetime | None:
+        """Return when a collection's ownership row was created.
+
+        A recreated collection gets a new row, so this tells a collection
+        apart from an earlier one of the same name.
+
+        Args:
+            physical (str): The Qdrant collection name.
+
+        Returns:
+            datetime | None: Aware UTC; ``None`` when no such collection is owned.
+        """
+        with self._session_scope() as s:
+            row = s.get(CollectionOwnership, physical)
+            return _as_utc(cast(datetime, row.created_at)) if row is not None else None
+
     def list_all_activity(self) -> list[CollectionActivity]:
         """Return every collection's retention clock, sorted by owner then name.
 

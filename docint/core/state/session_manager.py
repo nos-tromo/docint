@@ -8,7 +8,7 @@ import json
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -149,6 +149,31 @@ def _load_trail(raw: str | None) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return trail if isinstance(trail, dict) else None
+
+
+def _load_topic_focus(raw: str | None) -> dict[str, Any] | None:
+    """Parse a session's persisted topic focus.
+
+    Args:
+        raw (str | None): The stored JSON, or ``None`` on a session without one.
+
+    Returns:
+        dict[str, Any] | None: ``{"run_id", "topic_id", "label"}``, or ``None``
+            when absent or not of that shape.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    run_id, topic_id, label = parsed.get("run_id"), parsed.get("topic_id"), parsed.get("label", "")
+    # ``bool`` is an ``int`` to isinstance; a stored ``true`` names no topic.
+    if not isinstance(run_id, str) or not isinstance(topic_id, int) or isinstance(topic_id, bool):
+        return None
+    return {"run_id": run_id, "topic_id": topic_id, "label": label if isinstance(label, str) else ""}
 
 
 def _evidence_chars(raw: str | None) -> int | None:
@@ -1600,6 +1625,77 @@ class SessionManager:
             bool: ``True`` when cleared, ``False`` when missing or not owned.
         """
         return self.set_scope(session_id, owner, [])
+
+    def get_topic_focus(self, session_id: str, owner: str | None) -> dict[str, Any] | None:
+        """Return the topic a session was opened with through "Ask in chat".
+
+        Owner-scoped like :meth:`get_scope`: a session that does not exist or
+        belongs to another principal has no topic, so the caller cannot probe
+        other users' sessions.
+
+        Args:
+            session_id (str): The session to read.
+            owner (str | None): The principal requesting the lookup.
+
+        Returns:
+            dict[str, Any] | None: ``{"run_id", "topic_id", "label"}``, or
+                ``None`` when the session has none, is missing, or is not
+                owned by ``owner``.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return None
+            raw = cast(str | None, conv.topic_focus)
+        focus = _load_topic_focus(raw)
+        if raw and focus is None:
+            logger.warning("Discarding an unreadable topic focus on session '{}'.", session_id)
+        return focus
+
+    def set_topic_focus(self, session_id: str, owner: str | None, focus: Mapping[str, Any] | None) -> bool:
+        """Store the topic a session belongs to, or clear it.
+
+        Args:
+            session_id (str): The session to update.
+            owner (str | None): The principal that must own it.
+            focus (Mapping[str, Any] | None): ``{"run_id", "topic_id",
+                "label"}``; ``None`` clears the topic.
+
+        Returns:
+            bool: ``True`` when stored, ``False`` when the session is missing
+                or not owned by ``owner``.
+        """
+        payload = (
+            json.dumps(
+                {
+                    "run_id": str(focus["run_id"]),
+                    "topic_id": int(focus["topic_id"]),
+                    "label": str(focus.get("label") or ""),
+                }
+            )
+            if focus is not None
+            else None
+        )
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return False
+            conv.topic_focus = cast(Any, payload)
+            # ``_session_scope`` only closes the session; callers commit.
+            s.commit()
+            return True
+
+    def clear_topic_focus(self, session_id: str, owner: str | None) -> bool:
+        """Drop a session's topic, so its answers are no longer narrowed to one.
+
+        Args:
+            session_id (str): The session to update.
+            owner (str | None): The principal that must own it.
+
+        Returns:
+            bool: ``True`` when cleared, ``False`` when missing or not owned.
+        """
+        return self.set_topic_focus(session_id, owner, None)
 
     def _persist_turn(
         self,
