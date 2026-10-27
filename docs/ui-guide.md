@@ -126,9 +126,9 @@ chip is drawn from the target stored with the turn, so it survives a reload.
 Everything shows no chip, nor does a turn answered from a hand-picked scope
 (the scope outranks the target) or one saved before the target was recorded.
 
-**Ask in chat** on an Analysis topic sets the chat's **topic focus**
-(`src/stores/topicFocus.ts`), shown as a chip at the inner end of the header's
-controls (`src/components/chat/TopicFocusChip.tsx`): the topic's number and
+**Ask in chat** on an Analysis topic opens a new chat with that topic as its
+**topic focus**, shown as a chip at the inner end of the header's controls
+(`src/components/chat/TopicFocusChip.tsx`): the topic's number and
 label (`T3 · <label>`) over a line saying what the next turn does with it, and
 a control that removes it. The focus adds one metadata rule, `docint_topic`
 equal to `<run id>:<topic id>` ([topics.md](topics.md#payload-keys-and-indexes)), to
@@ -146,13 +146,23 @@ apply, the first wins:
 - **applied**: the chip is tinted, and the rule rides on searches and turns
   alike.
 
+The focus belongs to the chat it was asked in. Until that chat's first turn it
+is only a pick (`src/stores/topicFocus.ts`); the first turn sends it as
+`topic_focus`, and the server keeps it on the session that turn creates. From
+then on the chat's topic is the session's (`useChatTopicFocus`, read from
+`GET /sessions/{id}/topic`), so reopening the chat after a reload, or in
+another browser, brings it back, and every other chat keeps its own topic or
+none. The chip's remove control takes it off the chat for good
+(`DELETE /sessions/{id}/topic`); deleting the chat, or its collection, removes
+it too. **New chat** starts without a topic.
+
 Topic focus is text-only: image points carry no topic keys, so a focused search
-returns no image hits and a focused answer has no image lane. The focus is
-keyed by collection and owner, so it shows and applies only in the collection
-it was picked in; an admin who switches to another owner's collection of the
-same name does not carry it over. It is not kept across reloads. Until the
-active run has been read the chip is hidden; a search waits for that read,
-while a turn sent meanwhile goes out without the rule. A topics job that ends
+returns no image hits and a focused answer has no image lane. A pick is keyed
+by collection and owner, so it shows and applies only in the collection it was
+picked in; an admin who switches to another owner's collection of the same name
+does not carry it over. Until the chat's topic and the active run have been
+read the chip is hidden; a search waits for those reads, while a turn sent
+meanwhile goes out without the rule. A topics job that ends
 while the chat is open refetches the run, so a rebuild finished from the app
 marks the focus stale at once; one run through the CLI sends no such signal
 (see [topics.md](topics.md#limitations)).
@@ -385,8 +395,9 @@ span. Opening a row, one at a time, shows the topic's description, its
 **Evidence** (the five chunks nearest its centre), its **Documents** (the
 source files it draws on, at most 50, each with its chunk count) and **All
 passages**, 50 at a time; the three are read only while the row is open. **Ask
-in chat** sets the chat's topic focus (see [Chat](#chat-srcrouteschattsx)) and
-opens Chat.
+in chat** opens a new chat focused on the topic (see
+[Chat](#chat-srcrouteschattsx)); the chat keeps it once its first question is
+sent.
 
 The tab shows warnings or errors for the collection's newest topics job
 only when this tab started it or
@@ -550,6 +561,9 @@ locale) is not yet supported.
   `buildPayload()` serialises the filters for requests. Persisted to
   `localStorage`, except the retrieval target, which belongs to one chat and
   starts each new one at `all`.
+- **`src/stores/topicFocus.ts`** (`useTopicFocusStore`) — the topic **Ask in
+  chat** picked for a chat not started yet. Not persisted: once the chat's
+  first turn has run, its topic is the one the server keeps with the session.
 - Server state (collections, documents, NER, sessions) is owned by
   TanStack Query hooks under `src/hooks/` (`useCollections`, `useNer`,
   `useSessions`, `useDocuments`). A collection-scoped key carries the owner

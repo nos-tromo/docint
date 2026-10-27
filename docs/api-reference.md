@@ -63,6 +63,8 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
 | `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
 | `DELETE` | `/sessions/{session_id}/scope` | `Sessions` | Return the session to normal retrieval. |
+| `GET`  | `/sessions/{session_id}/topic` | `Sessions` | Return the topic the session was opened with, or `null`. |
+| `DELETE` | `/sessions/{session_id}/topic` | `Sessions` | Remove the session's topic; the session stays. |
 | `POST` | `/reports` | `Reports` | Create an empty report owned by the caller. |
 | `GET`  | `/reports` | `Reports` | List the caller's reports in one collection. |
 | `GET`  | `/reports/unassigned` | `Reports` | List the caller's reports that belong to no collection. |
@@ -251,6 +253,14 @@ Request (`QueryIn`):
   session routing. A pinned scope outranks it. A value outside the three is
   rejected with 422. See
   [retrieval-and-agents.md](retrieval-and-agents.md#retrieval-targets).
+- `topic_focus` — optional `{run_id, topic_id, label}`: the topic **Ask in
+  chat** opened the chat with. It is stored on the session the turn runs in,
+  which is how a chat keeps its topic across reloads; only the turn that creates
+  the session sends it, so no later turn can bring back a removed topic. Absent
+  leaves the stored topic as it is, and a stateless turn stores nothing. It
+  narrows nothing by itself: the client sends the topic's `docint_topic` rule
+  in `metadata_filters`. A `run_id` that is not a topic run id, a negative
+  `topic_id` or a `label` over 500 characters is rejected with 422.
 - `metadata_filters` — list of `MetadataFilterIn` objects with
   `{field, fields, operator, value, values}`. Supported operators: `eq`, `neq`,
   `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `mime_match`, `date_after`,
@@ -1127,6 +1137,25 @@ as `missing`.
 
 Return the session to normal retrieval. Returns an empty scope. `404` when the
 session is missing or not owned.
+
+### `GET /sessions/{session_id}/topic`
+
+Return the topic the session was opened with through **Ask in chat**:
+`{"topic_focus": {"run_id": "...", "topic_id": 3, "label": "..."}}`, or
+`{"topic_focus": null}` for a session without one. The topic is stored on the
+conversation by the turn that created it (`topic_focus` on
+[`POST /query`](#post-query)), so it survives a reload and reopening the session.
+
+`collection` (the caller's active logical collection) is required, and the gate
+is the history's: a session that is missing, belongs to another principal, or is
+pinned to another collection returns `404`.
+
+### `DELETE /sessions/{session_id}/topic`
+
+Remove the session's topic, so its answers are no longer narrowed to it; the
+session and its turns stay. Returns `{"ok": true}`; `404` when the session is
+missing or not owned. Deleting the session, or its collection, removes the topic
+with it.
 
 ## Agent
 

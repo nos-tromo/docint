@@ -429,8 +429,11 @@ described in [ui-guide.md](ui-guide.md).
   download. Which job outcome it shows, and how its CSV keeps a spreadsheet
   from reading a cell as a formula, are in
   [ui-guide.md](ui-guide.md#analysis-srcroutesanalysistsx).
-- **The topic focus** narrows the chat and the search panel to one topic, set
-  by a topic row's **Ask in chat**; its states are in
+- **The topic focus** narrows the chat and the search panel to one topic. A
+  topic row's **Ask in chat** opens a new chat with it, and the chat's first
+  turn stores it with the session (`topic_focus` on `/query` and
+  `/stream_query`), so each chat keeps its own topic across reloads until it is
+  removed or the chat is deleted; its states are in
   [ui-guide.md](ui-guide.md#chat-srcrouteschattsx). It is text-only: image
   points carry no topic keys, so a focused search returns no image hits and a
   focused answer has no image lane.
