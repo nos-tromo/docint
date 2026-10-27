@@ -238,6 +238,44 @@ class TopicStore:
         record = {**run.record, "run_id": run.run_id, "topics": [t.to_json() for t in run.table.topics]}
         _write_private(directory / "run.json", json.dumps(record).encode("utf-8"))
 
+    def widen_seen(self, physical: str, run_id: str, seen: Mapping[int, tuple[str, str]], *, updated_at: str) -> bool:
+        """Widen a stored run's first and last seen times, rewriting ``run.json`` alone.
+
+        The topics are read back from disk and only their seen fields change,
+        so the record always matches ``centres.npy``. It never creates a
+        directory: a run deleted meanwhile, with its collection or by a failed
+        build, stays deleted.
+
+        Args:
+            physical (str): Collection name.
+            run_id (str): The run id.
+            seen (Mapping[int, tuple[str, str]]): Topic id to ``(min, max)`` ISO-8601 UTC strings.
+            updated_at (str): The record's ``updated_at``, written only when a range grows.
+
+        Returns:
+            bool: ``False`` when the run is gone; otherwise ``True``, its stored
+                ranges then covering ``seen``.
+        """
+        run = self.load(physical, run_id)
+        if run is None:
+            return False
+        widened = run.table.with_seen(seen)
+        if [(t.first_seen, t.last_seen) for t in widened.topics] == [
+            (t.first_seen, t.last_seen) for t in run.table.topics
+        ]:
+            return True
+        record = {
+            **run.record,
+            "run_id": run_id,
+            "updated_at": updated_at,
+            "topics": [t.to_json() for t in widened.topics],
+        }
+        try:
+            _write_private(self._run_dir(physical, run_id) / "run.json", json.dumps(record).encode("utf-8"))
+        except FileNotFoundError:
+            return False
+        return True
+
     def load(self, physical: str, run_id: str) -> TopicRun | None:
         """Read a run back.
 

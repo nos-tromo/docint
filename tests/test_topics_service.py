@@ -11,6 +11,7 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1803,6 +1804,234 @@ def test_first_and_last_seen_span_the_members_timestamps(client: QdrantClient, r
     first = run.table.topics[0]
     assert (first.first_seen, first.last_seen) == ("2024-01-15T08:00:00+00:00", "2024-06-01T00:00:00+00:00")
     assert (run.table.topics[1].first_seen, run.table.topics[1].last_seen) == (None, None)
+
+
+def _dated(year: int) -> Callable[[int, str], dict[str, Any]]:
+    """Give each added point its own day of a year, rising with its index.
+
+    Args:
+        year: The year.
+
+    Returns:
+        A payload function for :func:`_add_blobs`.
+    """
+    start = datetime(year, 1, 1, tzinfo=UTC)
+    return lambda i, _pid: {"reference_metadata": {"timestamp": (start + timedelta(days=i)).isoformat()}}
+
+
+def _member_times(client: QdrantClient, run_id: str) -> dict[int, list[datetime]]:
+    """Read the timestamps of every chunk a run placed in a topic.
+
+    Args:
+        client: Qdrant client.
+        run_id: The run.
+
+    Returns:
+        Topic id to its members' times, UTC; members without a time are left out.
+    """
+    out: dict[int, list[datetime]] = {}
+    for payload in _payloads(client).values():
+        topic = _topic_of(payload)
+        when = service._timestamp(payload)
+        if payload.get(RUN_FIELD) == run_id and topic is not None and topic >= 0 and when is not None:
+            out.setdefault(topic, []).append(when)
+    return out
+
+
+def _stored_ranges(root: Path, run_id: str) -> dict[int, tuple[str | None, str | None]]:
+    """Read a stored run's first and last seen times.
+
+    Args:
+        root: Store root.
+        run_id: The run.
+
+    Returns:
+        Topic id to ``(first_seen, last_seen)``.
+    """
+    run = TopicStore(root).load(COLL, run_id)
+    assert run is not None
+    return {t.id: (t.first_seen, t.last_seen) for t in run.table.topics}
+
+
+def _assert_dates_cover_members(client: QdrantClient, root: Path, run_id: str) -> None:
+    """Check that every placed chunk's time lies inside its topic's stored range.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        run_id: The run.
+    """
+    members, ranges = _member_times(client, run_id), _stored_ranges(root, run_id)
+    assert members, "no dated chunk was placed"
+    for topic, times in members.items():
+        first, last = ranges[topic]
+        assert first is not None and last is not None, f"T{topic} has members but no dates"
+        assert datetime.fromisoformat(first) <= min(times)
+        assert max(times) <= datetime.fromisoformat(last)
+
+
+def _stop_on(stage: str) -> Callable[[str, int, int], None]:
+    """Cancel a job on its first frame of one stage.
+
+    Args:
+        stage: The stage.
+
+    Returns:
+        A frame hook.
+    """
+
+    def stop(seen: str, done: int, total: int) -> None:
+        """Raise on the stage.
+
+        Args:
+            seen: Stage name.
+            done: Units done.
+            total: Units in all.
+
+        Raises:
+            Stop: On the stage.
+        """
+        if seen == stage:
+            raise Stop
+
+    return stop
+
+
+@pytest.mark.parametrize("action", ["align", "ingest", "build", "discover"])
+def test_a_job_stopped_mid_write_keeps_the_dates_of_what_it_wrote(
+    client: QdrantClient,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: Literal["align", "ingest", "build", "discover"],
+) -> None:
+    """Dates reach the run before the chunks that carry them, so a stopped job loses none.
+
+    A retry never revisits a chunk the stopped job placed, so a date not stored by then was lost for good.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+        action: Which job is stopped.
+    """
+    monkeypatch.setattr(gather, "PAGE_SIZE", 16)
+    if action == "discover":
+        _add_blobs(client, per=150, payload=_dated(2025))
+        run_id = _run(_service(client, root, FakeFit(BLOBS[:2])), "build").run_id
+        with pytest.raises(Stop):
+            _run(_service(client, root, FakeFit(BLOBS)), "discover", Frames(_stop_on("assigning")))
+        assert run_id is not None
+        # The discover's new topic got chunks before it stopped.
+        assert max(_member_times(client, run_id)) >= 2
+    elif action == "build":
+        _add_blobs(client, payload=_dated(2026))
+        activate = TopicStore.activate
+
+        def with_pending(self: TopicStore, physical: str, run_id: str) -> None:
+            """Add points just after activation so the build's catch-up has work.
+
+            Args:
+                self: The store.
+                physical: Collection name.
+                run_id: The run being activated.
+            """
+            activate(self, physical, run_id)
+            _add_blobs(client, per=20, offset=1000, payload=_dated(2025))
+
+        monkeypatch.setattr(TopicStore, "activate", with_pending)
+        with pytest.raises(Stop):
+            _run(_service(client, root), "build", Frames(_stop_on("aligning")))
+        run_id = TopicStore(root).active_id(COLL)
+    else:
+        _add_blobs(client, payload=_dated(2026))
+        run_id = _run(_service(client, root), "build").run_id
+        _add_blobs(client, per=20, offset=1000, payload=_dated(2025))
+        svc = _service(client, root)
+
+        def stop_ingest(done: int, total: int) -> None:
+            """Cancel the ingest stage on its first frame.
+
+            Args:
+                done: Units done.
+                total: Units in all.
+
+            Raises:
+                Stop: Always.
+            """
+            raise Stop
+
+        with pytest.raises(Stop):
+            if action == "align":
+                _run(svc, "align", Frames(_stop_on("aligning")))
+            else:
+                svc.align_on_ingest(COLL, owner_created_at=lambda: CREATED, progress=stop_ingest)
+    assert run_id is not None
+    _assert_dates_cover_members(client, root, run_id)
+    if action == "align":
+        _run(_service(client, root), "align")
+        assert count(client, COLL, pending_filter(run_id)) == 0
+        ranges = _stored_ranges(root, run_id)
+        for topic, times in _member_times(client, run_id).items():
+            assert ranges[topic] == (min(times).isoformat(), max(times).isoformat())
+
+
+def test_a_failed_write_after_its_dates_were_stored_is_placed_and_dated_by_the_retry(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails after its dates were stored leaves its chunks pending for the next align.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setattr(gather, "PAGE_SIZE", 16)
+    _add_blobs(client, payload=_dated(2026))
+    run_id = _run(_service(client, root), "build").run_id
+    assert run_id is not None
+    _add_blobs(client, per=20, offset=1000, payload=_dated(2025))
+    with pytest.raises(RuntimeError, match="write refused"):
+        _run(_service(WriteSpy(client, fail=True), root), "align")
+    _run(_service(client, root), "align")
+    assert count(client, COLL, pending_filter(run_id)) == 0
+    ranges = _stored_ranges(root, run_id)
+    for topic, times in _member_times(client, run_id).items():
+        assert ranges[topic] == (min(times).isoformat(), max(times).isoformat())
+
+
+def test_storing_dates_for_a_deleted_run_refuses_instead_of_recreating_it(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An align whose run is deleted under it, the collection's clock unchanged, never writes the run back.
+
+    The deletion cascade removes the stored runs before the ownership row, so for a moment only the
+    store says the collection is gone.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+    """
+    monkeypatch.setattr(gather, "PAGE_SIZE", 16)
+    _add_blobs(client)
+    _run(_service(client, root), "build")
+    _add_blobs(client, per=20, offset=1000, payload=_dated(2025))
+
+    def delete_store(stage: str, done: int, total: int) -> None:
+        """Delete the stored runs after the first page.
+
+        Args:
+            stage: Stage name.
+            done: Units done.
+            total: Units in all.
+        """
+        if stage == "aligning":
+            TopicStore(root).delete_collection(COLL)
+
+    with pytest.raises(TopicsRefused) as caught:
+        _run(_service(client, root), "align", Frames(delete_store))
+    assert caught.value.code == "collection_changed"
+    assert _run_dirs(root) == set()
 
 
 def test_the_service_logs_counts_only(client: QdrantClient, root: Path) -> None:

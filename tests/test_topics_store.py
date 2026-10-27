@@ -333,6 +333,33 @@ def test_delete_collection_removes_every_run_and_keeps_the_lock(tmp_path: Path) 
     assert not (tmp_path / "never-stored").exists()
 
 
+def test_widen_seen_rewrites_only_the_record_and_never_recreates_a_deleted_run(tmp_path: Path) -> None:
+    """Widening seen times touches run.json alone, only ever widens, and leaves a deleted run deleted."""
+    store = TopicStore(tmp_path)
+    run = _run(_id(store))
+    store.save(PHYSICAL, run)
+    directory = tmp_path / PHYSICAL / run.run_id
+    centres = (directory / "centres.npy").read_bytes()
+    jan, feb = "2025-01-01T00:00:00+00:00", "2025-02-01T00:00:00+00:00"
+
+    assert store.widen_seen(PHYSICAL, run.run_id, {0: (jan, feb)}, updated_at="2026-03-01T00:00:00+00:00")
+
+    stored = store.load(PHYSICAL, run.run_id)
+    assert stored is not None
+    assert [(t.first_seen, t.last_seen) for t in stored.table.topics] == [(jan, feb), (None, None)]
+    assert stored.record["updated_at"] == "2026-03-01T00:00:00+00:00"
+    assert stored.record["owner_created_at"] == run.record["owner_created_at"]
+    assert (directory / "centres.npy").read_bytes() == centres
+    before = (directory / "run.json").read_bytes()
+    narrower = ("2025-01-10T00:00:00+00:00", "2025-01-20T00:00:00+00:00")
+    assert store.widen_seen(PHYSICAL, run.run_id, {0: narrower}, updated_at="2026-04-01T00:00:00+00:00")
+    assert (directory / "run.json").read_bytes() == before
+
+    store.delete_run(PHYSICAL, run.run_id)
+    assert not store.widen_seen(PHYSICAL, run.run_id, {0: (jan, feb)}, updated_at="2026-05-01T00:00:00+00:00")
+    assert not directory.exists()
+
+
 def test_prune_removes_a_run_even_when_it_is_the_active_one(tmp_path: Path) -> None:
     """Prune ignores the active pointer."""
     store = TopicStore(tmp_path)

@@ -197,7 +197,9 @@ only.
   An id is checked against that pattern before it joins a path.
 - **Writes** are atomic (written beside the target, then renamed) and readable
   by the process user only. A run is saved centres first and `run.json` last; a
-  reader that meets new centres beside the old record reads once more.
+  reader that meets new centres beside the old record reads once more. While a
+  job places chunks, `run.json` alone is rewritten whenever their times widen a
+  topic's first or last seen (see [Limitations](#limitations)).
 - **`run.json`** records the settings the build ran with (`params`), the dense
   vector's name and dimension, the embedding model, the stop-word list's count
   and SHA-256, the ownership row's creation time (`owner_created_at`),
@@ -495,7 +497,11 @@ with its compose value, in its Paths table.
 - **First and last seen only widen.** Every job that places chunks in a topic
   widens its range to the earliest and latest `reference_metadata.timestamp`
   (or `reference_metadata.posting_timestamp`) among them, and nothing narrows
-  it. A topic whose chunks carry neither has none.
+  it. A topic whose chunks carry neither has none. A page's times are stored
+  with the run before the page is written, because no later job revisits a
+  placed chunk: a job cancelled, failed or killed after a write keeps them. A
+  page whose write then fails may have widened a range already; its chunks stay
+  pending, and the next align places them.
 - **A rebuild ends old topic filters.** A rebuild mints a new run id, writes
   every eligible chunk under it and deletes every other run, so a rule naming
   an older run's value matches nothing. Once it has read the new run, the SPA

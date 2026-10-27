@@ -379,6 +379,23 @@ def _widen(seen: _Seen, topic_id: int, when: datetime) -> None:
     seen[topic_id] = (when, when) if current is None else (min(current[0], when), max(current[1], when))
 
 
+def _widens(seen: _Seen, page: _Seen) -> bool:
+    """Tell whether a page's ranges reach past the ranges a job has seen.
+
+    Args:
+        seen: The job's ranges.
+        page: The page's ranges.
+
+    Returns:
+        True when the page has a topic the job has not seen or a time outside its range.
+    """
+    for topic_id, (lo, hi) in page.items():
+        current = seen.get(topic_id)
+        if current is None or lo < current[0] or hi > current[1]:
+            return True
+    return False
+
+
 def _iso_ranges(seen: _Seen) -> dict[int, tuple[str, str]]:
     """Render seen ranges as ISO-8601 UTC strings.
 
@@ -1088,6 +1105,11 @@ class TopicsService:
     def _write(self, physical: str, run_id: str, rows: Sequence[PointRow], topics: Sequence[int], job: _Job) -> int:
         """Write one page's assignments and widen the seen ranges.
 
+        A page's times are stored with the run before the page is written:
+        no later job revisits a chunk once it is placed, so a job stopped after
+        the write would otherwise lose them for good. The run is read back and
+        rewritten only when the page reaches past what the job has seen.
+
         Args:
             physical: Physical collection name.
             run_id: The run.
@@ -1100,7 +1122,8 @@ class TopicsService:
 
         Raises:
             TopicsRefused: ``collection_changed``, before anything is written, once
-                the collection was replaced since the job started.
+                the collection was replaced since the job started or its run was
+                deleted.
         """
         groups: dict[int, list[str]] = {}
         for row, tid in zip(rows, topics, strict=True):
@@ -1108,9 +1131,7 @@ class TopicsService:
         if not groups:
             return 0
         job.guard()
-        # Set before the call: a write that fails midway may still have landed.
-        job.wrote = True
-        write_assignments(self._deps.client, physical, run_id, groups)
+        page: _Seen = {}
         placed = 0
         for row, tid in zip(rows, topics, strict=True):
             if tid < 0:
@@ -1118,7 +1139,17 @@ class TopicsService:
             placed += 1
             when = _timestamp(row.payload)
             if when is not None:
-                _widen(job.seen, tid, when)
+                _widen(page, tid, when)
+        if _widens(job.seen, page) and not self._deps.store.widen_seen(
+            physical, run_id, _iso_ranges(page), updated_at=self._now_iso()
+        ):
+            raise TopicsRefused("collection_changed")
+        # Set before the call: a write that fails midway may still have landed.
+        job.wrote = True
+        write_assignments(self._deps.client, physical, run_id, groups)
+        for tid, (lo, hi) in page.items():
+            _widen(job.seen, tid, lo)
+            _widen(job.seen, tid, hi)
         return placed
 
     def _save_seen(self, physical: str, run: TopicRun, table: TopicTable, job: _Job) -> TopicRun:
