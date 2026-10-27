@@ -157,6 +157,14 @@ of an `all` answer finds nothing, a `visual` turn finds no evidence, and a
 search returns no image hits. The SPA's topic focus is therefore left off
 visual turns.
 
+A rule naming a topic key, whatever its operator, also keeps the answer to the
+chunks it matched: the chain leaves out parent-context expansion and
+link-following, as a scoped turn does (see [Scoped answering](#scoped-answering)).
+A topic belongs to each fine chunk alone, while a coarse parent spans chunks of
+several topics and a posting's siblings carry their own, so either step would
+hand the model passages the rule never matched. Coarse parents still stay out
+of retrieval.
+
 ## Scoped answering
 
 When a session carries a search scope (`PUT /sessions/{id}/scope`), the read
@@ -217,11 +225,13 @@ engine for warmup or introspection does not pay that cost.
 
 ## Parent-context expansion
 
-`ParentContextExpansionPostprocessor` (implemented in `rag.py`) takes a
+`ParentContextPostprocessor` (implemented in `rag.py`) takes a
 fine-grained chunk hit and pulls in its coarse parent node for more
 context in the final prompt. It is enabled by
 `PARENT_CONTEXT_RETRIEVAL_ENABLED=true` and requires
-`HIERARCHICAL_CHUNKING_ENABLED=true` at ingest time.
+`HIERARCHICAL_CHUNKING_ENABLED=true` at ingest time. It is left out of a
+turn whose filters name a topic key (see
+[Topic rules select text only](#metadata-filters)).
 
 ## Source diversity
 
@@ -672,7 +682,8 @@ calls, says the round was sent again.
 an active topic run with topics (see [Topics](#topics)).
 
 - **`search(query)`** retrieves through the turn's own engine, so the request's
-  filters, rerank and parent-context expansion apply as on a lookup. Every
+  filters, rerank and parent-context expansion apply as on a lookup, and under
+  a topic rule parent context and link-following are left out as there. Every
   retrieved child of a section is kept (`AgentSearchQuery`). Each query is
   expanded with graph neighbours for retrieval alone; the reply and the trail
   show the model's own words. A sub-floor image gets no description re-score
@@ -817,7 +828,8 @@ when more than the text is offered.
 
 **Passages.** The passages are retrieved as a search retrieves them, narrowed to
 the matches by the filter that counts them: the same rerank, image floor and
-parent context, every retrieved child kept. The social diversity cap and
+parent context (none under a topic rule), every retrieved child kept. The
+social diversity cap and
 link-following are left out, so every passage a check adds is a match. They are
 numbered, and named when shown before, as a search's are.
 

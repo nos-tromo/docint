@@ -2223,6 +2223,22 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
         return cast(list[NodeWithScore], reranker._postprocess_nodes(nodes, query_bundle))
 
 
+def _names_topic(rules: Sequence[Any] | None) -> bool:
+    """Tell whether a request's filter rules name a topic key, whatever their operator.
+
+    Topic keys are stored on each fine chunk's point alone: no docstore node or
+    coarse parent carries them, so such a rule can only be checked against the
+    retrieved chunks themselves.
+
+    Args:
+        rules (Sequence[Any] | None): The request's raw filter rules.
+
+    Returns:
+        bool: True when a rule names ``docint_topic`` or ``docint_topic_run``.
+    """
+    return any(name.startswith(TOPIC_FIELD) for name in rule_fields(rules))
+
+
 def _as_qdrant_point_id(node_id: str) -> str | int:
     """Restore a point id's native type for a Qdrant lookup.
 
@@ -6844,7 +6860,9 @@ class RAG:
                 ),
             )
 
-        node_postprocessors = self._text_postprocessors(profile=profile, retrieval_options=retrieval_options)
+        node_postprocessors = self._text_postprocessors(
+            profile=profile, retrieval_options=retrieval_options, metadata_filter_rules=metadata_filter_rules
+        )
         return RetrieverQueryEngine.from_args(
             retriever=self._build_retriever(
                 metadata_filters=metadata_filters,
@@ -6868,11 +6886,20 @@ class RAG:
         profile: dict[str, Any],
         retrieval_options: dict[str, Any] | None = None,
         social_links: bool = True,
+        metadata_filter_rules: Sequence[Any] | None = None,
     ) -> list[BaseNodePostprocessor]:
         """Build the postprocessor chain of the ``all`` and ``documents`` targets.
 
         A lookup's engine runs it, and so does an agent turn's keyword match, which
         leaves the social steps out.
+
+        Under a rule naming a topic key, parent context and link-following are
+        left out, as on a scoped turn: a topic belongs to each fine chunk alone,
+        while a coarse parent spans chunks of several topics and a posting's
+        siblings carry their own, so either step would hand the model passages
+        the rule never matched. This is not the ``parent_context_enabled`` switch,
+        which also keeps coarse parents out of retrieval: turned off, a ``neq``
+        topic rule would retrieve them, since they carry no topic keys.
 
         Args:
             profile (dict[str, Any]): The collection profile; ``is_social_table`` sizes
@@ -6882,15 +6909,18 @@ class RAG:
             social_links (bool): Whether a social collection's diversity cap and
                 link-following join the chain. A keyword match leaves them out: its
                 passages must be matches, and the cap would thin an author's postings.
+            metadata_filter_rules (Sequence[Any] | None): The request's raw filter rules.
 
         Returns:
             list[BaseNodePostprocessor]: Rerank, the image floor with its description
             re-score, parent context when enabled, the social steps when asked, then
-            citation numbering.
+            citation numbering; without parent context and link-following under a
+            topic rule.
         """
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
+        within_topic = _names_topic(metadata_filter_rules)
         node_postprocessors: list[BaseNodePostprocessor] = [
             # The reranker scores without cutting; the floor below owns the
             # cut, so a sub-floor image can never hold a slot a text hit
@@ -6905,7 +6935,7 @@ class RAG:
                 rescore_min_score=self._image_rescore_floor(),
             ),
         ]
-        if retrieval_settings["parent_context_enabled"] and self.index is not None:
+        if retrieval_settings["parent_context_enabled"] and self.index is not None and not within_topic:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(
                 social_table=bool(profile.get("is_social_table")),
             )
@@ -6930,7 +6960,8 @@ class RAG:
             # summarizer's social config, but this call site is on the
             # chat/retrieval path, not the summarizer.
             node_postprocessors.append(SocialSourceDiversityPostprocessor(diversity_limit=self.social_diversity_limit))
-            node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
+            if not within_topic:
+                node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
         node_postprocessors.append(CitationNumberingPostprocessor())
@@ -9259,7 +9290,10 @@ class RAG:
                 )
                 nodes = list(retriever.retrieve(bundle))
                 # No profile: without the social steps it would only size parent context's prompt allowance.
-                for postprocessor in self._text_postprocessors(profile={}, social_links=False):
+                chain = self._text_postprocessors(
+                    profile={}, social_links=False, metadata_filter_rules=metadata_filter_rules
+                )
+                for postprocessor in chain:
                     nodes = postprocessor.postprocess_nodes(nodes, query_bundle=bundle)
             return KeywordResult(
                 nodes=nodes, matches=matches, unchecked=unchecked[field], keywords=keywords, writing=written()
@@ -9342,7 +9376,7 @@ class RAG:
             loaded = [(node_id, found[node_id]) for node_id in asked if node_id in found]
             # A docstore node carries no topic keys: a topic rule is checked on the stored ones.
             topic_keys: dict[str, dict[str, Any]] = {}
-            if any(name.startswith(TOPIC_FIELD) for name in rule_fields(metadata_filter_rules)):
+            if _names_topic(metadata_filter_rules):
                 topic_keys = self._payloads_by_id(
                     collection, [node_id for node_id in asked if node_id in main], with_payload=[TOPIC_FIELD, RUN_FIELD]
                 )

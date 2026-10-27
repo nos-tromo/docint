@@ -133,8 +133,9 @@ label (`T3 · <label>`) over a line saying what the next turn does with it, and
 a control that removes it. The focus adds one metadata rule, `docint_topic`
 equal to `<run id>:<topic id>` ([topics.md](topics.md#payload-keys-and-indexes)), to
 every search of the search panel, its CSV export included, and to chat turns
-answered from Everything or Documents. The chip has four states; when several
-apply, the first wins:
+answered from Everything or Documents, which then answer from the topic's
+chunks alone, without their wider sections. The chip has four states; when
+several apply, the first wins:
 
 - **stale**: the focused run is no longer the collection's active run, for
   example after a rebuild. Nothing is sent, since the old value matches no

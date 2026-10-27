@@ -918,7 +918,9 @@ curl "http://localhost:8000/collections/my_collection/topics"
 
 A topic narrows `/query`, `/stream_query` and `/search` as a metadata filter:
 `{"field": "docint_topic", "operator": "eq", "value": "<run_id>:<topic_id>"}`.
-Image points carry no topic keys, so the rule selects text chunks only.
+Image points carry no topic keys, so the rule selects text chunks only. An
+answer under a rule naming a topic key is built from the matching chunks alone,
+without their parent sections or a posting's linked siblings.
 
 ## Reports
 

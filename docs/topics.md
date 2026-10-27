@@ -174,7 +174,10 @@ A topic is an ordinary metadata filter. The rule
 on `/query`, `/stream_query` or `/search` narrows an answer or a search to that
 topic's chunks; it is the rule the SPA's topic focus sends. Image points in the
 `_images` companion carry no topic keys, so such a rule selects text chunks
-only.
+only. An answer under it is built from the matching chunks alone: a chunk's
+parent section and a posting's linked siblings hold passages of other topics,
+so parent-context expansion and link-following are left out (see
+[retrieval-and-agents.md](retrieval-and-agents.md#parent-context-expansion)).
 
 ## The store and its lock
 
