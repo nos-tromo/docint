@@ -662,6 +662,21 @@ describe('ChatTurn', () => {
     expect(region).toContainElement(screen.getByTestId('agent-trail-live'))
   })
 
+  it('shows a spinner while the answer is pending, announced once through the live region', () => {
+    const view = renderTurn({ user: 'q', assistant: '', done: false, meta: null })
+    expect(screen.getByTestId('answer-pending')).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.queryByText('…')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Working on an answer…')
+
+    view.update({ user: 'q', assistant: 'Alice', done: false, meta: null })
+    expect(screen.queryByTestId('answer-pending')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).not.toHaveTextContent('Working on an answer…')
+
+    view.update({ user: 'q', assistant: '', done: true, meta: null })
+    expect(screen.queryByTestId('answer-pending')).not.toBeInTheDocument()
+    expect(screen.getByText('(no answer)')).toBeInTheDocument()
+  })
+
   it.each([
     ['no actions key', undefined],
     ['a null actions value', null],

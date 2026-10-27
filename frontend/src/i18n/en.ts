@@ -112,6 +112,7 @@ export const en = {
   'chat.you': 'You',
   'chat.assistant': 'Assistant',
   'chat.no_answer': '(no answer)',
+  'chat.answer_pending': 'Working on an answer…',
   'chat.error_title': 'Chat error',
   'chat.entities': 'Entities',
   'chat.entities_more': '+{count} more',

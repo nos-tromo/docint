@@ -118,6 +118,7 @@ export const de: Strings = {
   'chat.you': 'Sie',
   'chat.assistant': 'Assistent',
   'chat.no_answer': '(keine Antwort)',
+  'chat.answer_pending': 'Antwort wird erstellt…',
   'chat.error_title': 'Chat-Fehler',
   'chat.entities': 'Entitäten',
   'chat.entities_more': '+{count} weitere',
