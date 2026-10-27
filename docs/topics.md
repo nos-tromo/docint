@@ -41,26 +41,35 @@ cannot stay pending forever.
    accepts at the collection's vector size (see
    [The fit service](#the-fit-service)).
 2. **Prepare.** A chunk's text is its `search_text`, or its node text where that
-   is blank, with control characters removed, whitespace collapsed to single
-   spaces and the result cut to 2,000 characters. A chunk whose prepared text is
-   shorter than `TOPICS_MIN_TEXT_CHARS` leaves the sample. Points with an
-   identical vector are fitted once: the first by point id represents the
-   others.
+   is blank, with control characters removed and whitespace collapsed to single
+   spaces. It is then cut to `200,000,000 ÷ n` characters for the `n` chunks
+   ranked into the sample, kept between 2,000 and 8,000. A fit of up to 25,000
+   chunks therefore sees whole 1,024-token chunks, and the largest fit sends no
+   more text in all than 100,000 chunks of 2,000 characters. A chunk whose
+   prepared text is shorter than `TOPICS_MIN_TEXT_CHARS` leaves the sample.
+   Points with an identical vector are fitted once: the first by point id
+   represents the others.
 3. **Size.** The minimum topic size is `TOPICS_MIN_TOPIC_SIZE`, or, at `0`,
-   `n // 1000` clamped to 10–100 for a sample of `n` chunks. A sample smaller
-   than `max(3 × minimum topic size, 50)` is refused.
+   `round(√n / 3)` between 2 and 10 for a sample of `n` chunks, and from 813
+   chunks on `n // 1000` between 10 and 100. A sample smaller than
+   `max(8, 2 × minimum topic size)` is refused: 8 is the fewest points the
+   service fits. The refusal says how many chunks the sample held and how many
+   a fit needs.
 4. **Fit.** The sample is sent to the service. A fit that finds no topic leaves
    the collection's current run as it was, with the warning `none_found`.
 5. **Topics.** A topic's centre is the normalised mean of its fit members' unit
    vectors, stored at float32 precision, and its floor is set from the same
    members (see [Assignment](#assignment)). Its keywords are the service's:
    single words, at most 10 per topic, each found in at least two texts, stop
-   words left out. With `TOPICS_LABELS` on, the chat model (`TEXT_MODEL`) writes
-   each topic a label of at most 80 characters and a one-sentence description,
-   from its keywords and its five fit members nearest the centre, four topics
-   at a time. The prompt is `docint/utils/prompts/{en,de}/topic_label.txt`,
-   and the reply is constrained by a JSON schema while the endpoint accepts one.
-   A topic whose label cannot be written is named by its first four keywords.
+   words left out (see [The fit service](#the-fit-service)). With
+   `TOPICS_LABELS` on, the chat model (`TEXT_MODEL`) writes each topic a label
+   of at most 80 characters and a one-sentence description, from its keywords
+   and the first 800 characters of its five fit members nearest the centre,
+   four topics at a time. The label names what the passages share, never the
+   title or author of the work they come from. The prompt is
+   `docint/utils/prompts/{en,de}/topic_label.txt`, and the reply is constrained
+   by a JSON schema while the endpoint accepts one. A topic whose label cannot
+   be written is named by its first four keywords.
 6. **Assign.** If the collection's ownership row still has the creation time
    it had when the build started, the run is saved, then every eligible chunk
    is written (see [Assignment](#assignment)).
@@ -81,8 +90,10 @@ whose `docint_topic` is `<run_id>:-1`.
 1. Pending chunks are aligned first. Then the pool is aligned again against the
    current topics, which places chunks an interrupted earlier discover left
    behind; in the steady state it writes nothing.
-2. The pool is sampled, prepared and fitted like a build's collection. A pool
-   too small to fit is refused with `too_few_unassigned`.
+2. The pool is sampled, prepared and fitted like a build's collection, except
+   that at `TOPICS_MIN_TOPIC_SIZE=0` its minimum topic size is never below the
+   build's, counted up to 10, so a small pool cannot add topics finer than the
+   build made. A pool too small to fit is refused with `too_few_unassigned`.
 3. A pool sample member stays in its pool topic only where that topic is its
    nearest. Each pool topic gets a provisional centre from all its members,
    and the member's cosine to it, computed as in alignment, must be the
@@ -191,8 +202,10 @@ only.
   vector's name and dimension, the embedding model, the stop-word list's count
   and SHA-256, the ownership row's creation time (`owner_created_at`),
   `created_at` and `updated_at`, an entry for the build's fit and one for each
-  discover that added topics (its kind, time, sample size, topic and outlier
-  counts, and the versions, runtime and timings the service reported; a
+  discover that added topics (its kind, time, sample size, the characters it
+  kept of each text (`text_chars`), the count and SHA-256 of the stop words it
+  sent and how many of them its own texts added (`stop_words`), topic and
+  outlier counts, and the versions, runtime and timings the service reported; a
   discover's entry adds how many topics it kept; a discover that finds nothing
   new adds none), and the topics:
   id, label, description, keywords, origin (`build` or `discover`), when it was
@@ -233,7 +246,14 @@ It carries `Authorization: Bearer <TOPICS_API_KEY>` when the key is set.
 `top_n_words` is fixed at 10 and `min_df` at 2. `nr_topics` is `0`, or
 `TOPICS_MAX_TOPICS + 1`, because the service counts its outlier class as a
 topic. `stop_words` are the NLTK English and German lists that llama-index-core
-ships inside its wheel, merged, so nothing is fetched at runtime.
+ships inside its wheel, merged, so nothing is fetched at runtime, plus a short
+supplement of words those lists lack (auxiliaries such as `would` and `wurde`,
+`said`, honorifics such as `mr`, citation fragments such as `et al` and `doi`).
+Each fit then adds the words its own texts call for, found the way the
+service's vectorizer finds words (lowercased, two or more word characters):
+every number found in at least two texts, and every word found in more than 80%
+of the texts (`max_df`), which cannot tell one topic from another. When the
+service's limits leave room for only some, the most widespread go first.
 
 **The limits it obeys.** docint keeps every request within these, and checks
 them before anything is sent:
@@ -243,6 +263,8 @@ them before anything is sent:
 - at most 10,000 stop words, each at most 64 characters (a longer word is left
   out of the list);
 - `dim` from 1 to 8,192, and every vector value finite;
+- `n` at least `max(8, 2 × min_topic_size)`: a smaller sample is refused
+  before it is sent (see [Build](#build));
 - `n` at most `min(150000, 150000 × 1024 // dim)`: the service's default
   capacity of 150,000 points of 1,024 values each. docint samples no more than
   that;
@@ -304,8 +326,9 @@ service image and CPU class, therefore produce the same topics, keywords and
 assignment, under new run ids: the id carries a random suffix. Labels are
 written by the chat model and repeat only as far as its endpoint does; nothing
 else depends on them. `run.json` records what a result depends on: the
-settings, the dense vector's name and size, the embedding model, the stop-word
-list's SHA-256, and the library versions and runtime the service reported.
+settings, the dense vector's name and size, the embedding model, the SHA-256 of
+the bundled stop-word list and of each fit's full list, which follows from the
+sample's texts, and the library versions and runtime the service reported.
 
 ## Jobs and events
 
@@ -330,7 +353,7 @@ frame.
 |---|---|
 | `topics_started` | `collection`, `action` |
 | `topics_progress` | `message`, `stage`, `done`, `total` (`0` when the stage has no total) |
-| `warning` | `message`, `code` |
+| `warning` | `message`, `code`; `found` and `needed` for `too_few_chunks` and `too_few_unassigned` |
 | `topics_completed` | `collection`, `empty`, `duration_ms`; `artifact` (`action`, `run_id`, `topics`, `added`, `assigned`, `deferred`) once the job did something |
 | `topics_cancelled` | `collection`, `duration_ms` |
 | `error` | `message` (`Topics run failed.`), `code` (`topics_failed`), `duration_ms` |
@@ -352,8 +375,8 @@ Warning codes:
 
 | Code | The job | Meaning |
 |---|---|---|
-| `too_few_chunks` | completes, `empty` | The collection has too few chunks with enough text to build topics. |
-| `too_few_unassigned` | completes, `empty` | Too few unassigned chunks to look for new topics. |
+| `too_few_chunks` | completes, `empty` | The collection has too few chunks with enough text to build topics; `found` says how many the sample held, `needed` how many a fit needs. |
+| `too_few_unassigned` | completes, `empty` | Too few unassigned chunks to look for new topics; `found` and `needed` as for `too_few_chunks`. |
 | `no_run` | completes, `empty` | There is no active run to discover on or align. |
 | `dimension_changed` | completes, `empty` | The dense vectors changed size since the build; rebuild. |
 | `collection_changed` | completes, `empty` | The collection was replaced while a build, discover or align ran. |
@@ -368,7 +391,8 @@ client.
 
 Each job leaves one log line, such as
 `Topics build | run=… topics=… added=… assigned=… deferred=…`, and a refused
-one `Topics build refused for '<collection>' | code=…`. The fit adds
+one `Topics build refused for '<collection>' | code=…`, with `found=… needed=…`
+for a sample too small to fit. The fit adds
 `Topics fit | n=… dim=… topics=… outliers=… fit_s=…`, and the labels
 `Topic labels | written=… fallback=…`. These lines carry counts, codes and ids,
 never chunk text, labels, keywords or vectors.

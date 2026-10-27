@@ -395,7 +395,9 @@ watched it live. A job counts as watched live once any of its frames arrives
 (`liveJobs` in `src/stores/ingestJobs.ts`). A replayed history arrives within
 milliseconds, so after a reload a run that finished elsewhere does not show its
 old outcome again; the overview reflects that run all the same. Warnings render
-from their codes, never from the backend's message. The CSV holds one row per
+from their codes, never from the backend's message; a collection too small to
+fit is told how many chunks with enough text it has and how many topics need,
+when the warning carries both counts. The CSV holds one row per
 topic (`id,label,size,share,keywords,first_seen,last_seen,origin`, `share` as a
 fraction, keywords joined by `; `), and a text cell starting with `=`, `+`, `-`,
 `@`, a tab or a carriage return is written with a leading apostrophe, so a

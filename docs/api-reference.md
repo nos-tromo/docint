@@ -864,7 +864,7 @@ The overview:
   "embed_model": "BAAI/bge-m3",
   "embed_model_changed": false,
   "params": {"seed": 42, "min_topic_size": 10, "nr_topics": 0, "top_n_words": 10, "min_df": 2,
-             "fit_max_points": 100000, "min_text_chars": 40, "admit_percentile": 5.0,
+             "max_df": 0.8, "fit_max_points": 100000, "min_text_chars": 40, "admit_percentile": 5.0,
              "merge_min_similarity": 0.7},
   "coverage": {"total": 4000, "assigned": 3510, "unassigned": 420, "pending": 70},
   "topics": [
@@ -893,7 +893,8 @@ framed as `topics_started` (`collection`, `action`), `topics_progress`
 (`message`, `stage`, `done`, `total`) and `topics_completed`, which carries
 `empty` and, once the job did something, the `artifact`
 `{"action", "run_id", "topics", "added", "assigned", "deferred"}`. A refusal
-completes the job as `empty` with a coded `warning`; a failure is the `error`
+completes the job as `empty` with a coded `warning`, which for a sample too small
+to fit also carries `found` and `needed`; a failure is the `error`
 frame with `code: "topics_failed"`, after a coded `warning` when the fit
 service was at fault. The job snapshot (`GET /ingest/jobs/{job_id}`) carries
 `action` and the same `artifact`. The stages, the warning codes and the endpoint
