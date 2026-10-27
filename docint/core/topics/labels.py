@@ -25,7 +25,7 @@ from docint.utils.prompt_loader import load_localized_prompt
 LABEL_CHARS = 80
 DESCRIPTION_CHARS = 300
 PASSAGES_PER_TOPIC = 5
-PASSAGE_CHARS = 300
+PASSAGE_CHARS = 800
 MAX_IN_FLIGHT = 4
 
 Complete = Callable[[str, dict[str, Any] | None], str]
@@ -35,8 +35,9 @@ DEFAULT_TEMPLATE = (
     "Its most characteristic words, strongest first: {keywords}\n\n"
     "Passages from the topic:\n{passages}\n\n"
     'Reply with a JSON object with two keys: "description", one sentence saying what the passages have in '
-    'common, and "label", a name for the topic of at most six words. Use the passages\' own terms and invent '
-    "nothing."
+    'common, and "label", a name for the topic of at most six words. Name what the passages share, such as a '
+    "theme, an event, a setting or an argument, never the title or author of the work, document or collection "
+    "they come from. Use the passages' own terms and invent nothing."
 )
 
 

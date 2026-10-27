@@ -50,6 +50,7 @@ from docint.core.topics.model import (
     merge_new,
 )
 from docint.core.topics.sample import (
+    MAX_DF,
     MIN_DF,
     TOP_N_WORDS,
     FitSample,
@@ -57,9 +58,11 @@ from docint.core.topics.sample import (
     build_sample,
     min_eligible,
     nr_topics_for,
+    text_chars_for,
     texts_within,
     top_ranked,
 )
+from docint.core.topics.stopwords import corpus_stop_words, stop_words_digest
 from docint.core.topics.store import TopicLock, TopicRun, TopicStore
 from docint.utils.env_cfg import TopicsConfig
 from docint.utils.topics_client import FitParams, FitResult, TopicsBusy, max_fit_points, texts_limit
@@ -145,17 +148,44 @@ class TopicsRefused(Exception):
     Attributes:
         code: The refusal code, a key of :data:`REFUSALS`.
         message: Its static English message, naming nothing.
+        found: For a sample too small to fit, the chunks with enough text it held.
+        needed: For a sample too small to fit, the fewest a fit needs.
     """
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, found: int | None = None, needed: int | None = None) -> None:
         """Look the message up.
 
         Args:
             code: The refusal code.
+            found: The chunks with enough text a too-small sample held.
+            needed: The fewest a fit needs.
         """
         self.code = code
         self.message = REFUSALS[code]
+        self.found = found
+        self.needed = needed
         super().__init__(self.message)
+
+    def counts(self) -> dict[str, int]:
+        """Return the counts a refusal carries.
+
+        Returns:
+            ``found`` and ``needed`` when both are known, otherwise nothing.
+        """
+        if self.found is None or self.needed is None:
+            return {}
+        return {"found": self.found, "needed": self.needed}
+
+    def describe(self) -> str:
+        """Render the message with its counts, for a log line or the CLI.
+
+        Returns:
+            The message, followed by the counts when it carries them.
+        """
+        counts = self.counts()
+        if not counts:
+            return self.message
+        return f"{self.message} Found {counts['found']}; a fit needs at least {counts['needed']}."
 
 
 @dataclass(frozen=True)
@@ -254,6 +284,8 @@ class _Fitted:
         labels: The fit's topic id per row, filtered to kept members during discovery.
         result: The fit response.
         min_topic_size: The minimum topic size used.
+        text_chars: Most characters of each text the fit was sent.
+        stop_words: The stop words the fit was sent.
     """
 
     sample: FitSample
@@ -261,6 +293,8 @@ class _Fitted:
     labels: np.ndarray
     result: FitResult
     min_topic_size: int
+    text_chars: int
+    stop_words: tuple[str, ...]
 
 
 @dataclass
@@ -360,6 +394,20 @@ def _inherit(sample: FitSample, overrides: dict[str, int]) -> dict[str, int]:
     return {**overrides, **copies}
 
 
+def _built_topic_size(run: TopicRun) -> int:
+    """Read the minimum topic size a run was built with.
+
+    Args:
+        run: The run.
+
+    Returns:
+        The recorded size, or 2 when the record holds none.
+    """
+    params = run.record.get("params")
+    value = params.get("min_topic_size") if isinstance(params, Mapping) else None
+    return value if isinstance(value, int) and value >= 2 else 2
+
+
 def _refuse_if_replaced(owner_created_at: Callable[[], str | None], created: str | None) -> None:
     """Refuse a job whose collection was replaced since it started.
 
@@ -419,7 +467,8 @@ class TopicsService:
         try:
             outcome = self._run_locked(action, physical, owner_created_at, progress, warn, job)
         except TopicsRefused as exc:
-            logger.info("Topics {} refused for '{}' | code={}", action, logical, exc.code)
+            counts = "".join(f" {key}={value}" for key, value in exc.counts().items())
+            logger.info("Topics {} refused for '{}' | code={}{}", action, logical, exc.code, counts)
             raise
         finally:
             # Writes from a cancelled or failed job are announced too.
@@ -663,7 +712,10 @@ class TopicsService:
         _refuse_if_replaced(owner_created_at, created)
         run = self._save_seen(physical, run, run.table, job)
         pool = and_filters(topic_filter(run_id, -1), eligible_filter())
-        fitted = self._fit_pool(physical, dense, pool, "too_few_unassigned", progress)
+        # A small pool must not add topics finer than the build's own, counted up to 10.
+        fitted = self._fit_pool(
+            physical, dense, pool, "too_few_unassigned", progress, least_topic_size=min(10, _built_topic_size(run))
+        )
         _refuse_if_replaced(owner_created_at, created)
         # A member nearer another topic, old or new, is aligned with the rest of the pool instead.
         kept = kept_members(fitted.vectors, fitted.labels, run.table.centres, min_topic_size=fitted.min_topic_size)
@@ -730,7 +782,14 @@ class TopicsService:
         return TopicsOutcome("align", run.run_id, len(saved.table.topics), 0, assigned, empty=False)
 
     def _fit_pool(
-        self, physical: str, dense: DenseVector, flt: models.Filter, refusal: str, progress: Progress
+        self,
+        physical: str,
+        dense: DenseVector,
+        flt: models.Filter,
+        refusal: str,
+        progress: Progress,
+        *,
+        least_topic_size: int = 2,
     ) -> _Fitted:
         """Sample the points a filter selects and fit them.
 
@@ -740,28 +799,37 @@ class TopicsService:
             flt: Which points may join the sample.
             refusal: The refusal code for a sample too small to fit.
             progress: The progress channel.
+            least_topic_size: Smallest automatic minimum topic size; a configured size ignores it.
 
         Returns:
             The sample and its fit.
 
         Raises:
-            TopicsRefused: With ``refusal`` when the sample is too small.
+            TopicsRefused: With ``refusal`` and the counts when the sample is too small.
         """
         cfg, client = self._deps.config, self._deps.client
         limit = min(cfg.fit_max_points, max_fit_points(dense.dim))
         ids = top_ranked(_scanned(scan_ids(client, physical, scroll_filter=flt), progress), seed=cfg.seed, limit=limit)
-        candidates = retrieve_candidates(
-            client, physical, ids, dense, progress=lambda read: progress("sampling", read, len(ids))
+        text_chars = text_chars_for(len(ids))
+        # Built straight from the reads, so the raw texts are not held through the fit.
+        sample = build_sample(
+            retrieve_candidates(
+                client, physical, ids, dense, progress=lambda read: progress("sampling", read, len(ids))
+            ),
+            min_text_chars=cfg.min_text_chars,
+            text_chars=text_chars,
         )
-        sample = build_sample(candidates, min_text_chars=cfg.min_text_chars)
-        mts = cfg.min_topic_size or auto_min_topic_size(sample.n)
-        if sample.n < min_eligible(mts):
-            raise TopicsRefused(refusal)
-        params = FitParams(cfg.seed, mts, nr_topics_for(cfg.max_topics), TOP_N_WORDS, MIN_DF, self._deps.stop_words)
+        mts = cfg.min_topic_size or max(auto_min_topic_size(sample.n), least_topic_size)
+        needed = min_eligible(mts)
+        if sample.n < needed:
+            raise TopicsRefused(refusal, found=sample.n, needed=needed)
         texts = texts_within([p.text for p in sample.points], texts_limit(sample.n))
+        stop_words = corpus_stop_words(texts, self._deps.stop_words, max_df=MAX_DF, min_df=MIN_DF)
+        params = FitParams(cfg.seed, mts, nr_topics_for(cfg.max_topics), TOP_N_WORDS, MIN_DF, stop_words)
         vectors = np.stack([p.vector for p in sample.points])
         result = self._fit(texts, vectors, params, progress)
-        return _Fitted(sample, vectors, np.asarray(result.labels, dtype=np.int64), result, mts)
+        labels = np.asarray(result.labels, dtype=np.int64)
+        return _Fitted(sample, vectors, labels, result, mts, text_chars, stop_words)
 
     def _fit(self, texts: Sequence[str], vectors: np.ndarray, params: FitParams, progress: Progress) -> FitResult:
         """Call the fit on a daemon thread, heartbeating and retrying while busy.
@@ -1038,6 +1106,7 @@ class TopicsService:
             "nr_topics": nr_topics_for(cfg.max_topics),
             "top_n_words": TOP_N_WORDS,
             "min_df": MIN_DF,
+            "max_df": MAX_DF,
             "fit_max_points": min(cfg.fit_max_points, max_fit_points(dense.dim)),
             "min_text_chars": cfg.min_text_chars,
             "admit_percentile": cfg.admit_percentile,
@@ -1052,13 +1121,21 @@ class TopicsService:
             fitted: The sample and its fit.
 
         Returns:
-            ``{kind, at, n, topics, outliers, versions, runtime, timings}``.
+            ``{kind, at, n, text_chars, stop_words, topics, outliers, versions, runtime, timings}``;
+            ``stop_words`` gives the count and SHA-256 of the list the fit was sent and how
+            many of its words the fit's own texts added.
         """
         result = fitted.result
         return {
             "kind": kind,
             "at": self._now_iso(),
             "n": fitted.sample.n,
+            "text_chars": fitted.text_chars,
+            "stop_words": {
+                "count": len(fitted.stop_words),
+                "sha256": stop_words_digest(fitted.stop_words),
+                "corpus": len(fitted.stop_words) - len(set(self._deps.stop_words)),
+            },
             "topics": len(result.topics),
             "outliers": result.outliers,
             "versions": dict(result.versions),

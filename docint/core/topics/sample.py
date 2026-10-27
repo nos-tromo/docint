@@ -10,17 +10,21 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import math
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
-from docint.utils.topics_client import encode_texts
+from docint.utils.topics_client import SERVICE_MIN_POINTS, encode_texts
 
 TEXT_CHARS = 2000
+TEXT_CHARS_MAX = 8000
+TEXT_BUDGET_CHARS = 200_000_000
 TOP_N_WORDS = 10
 MIN_DF = 2
+MAX_DF = 0.8
 
 _BUDGET_OVERHEAD = 6
 
@@ -53,18 +57,34 @@ def top_ranked(ids: Iterable[str], *, seed: int, limit: int) -> list[str]:
     return [i for _, i in ranked]
 
 
-def fit_text(text: str) -> str:
+def fit_text(text: str, limit: int = TEXT_CHARS) -> str:
     """Prepare a chunk's text for the fit.
 
     Args:
         text: Raw chunk text.
+        limit: Most characters kept.
 
     Returns:
         The text without control characters, whitespace collapsed to single
-        spaces, stripped and cut to ``TEXT_CHARS``.
+        spaces, stripped and cut to ``limit``.
     """
     kept = "".join(c for c in text if c.isspace() or unicodedata.category(c) != "Cc")
-    return " ".join(kept.split())[:TEXT_CHARS].rstrip()
+    return " ".join(kept.split())[:limit].rstrip()
+
+
+def text_chars_for(points: int) -> int:
+    """Return how many characters of each text a fit of ``points`` chunks keeps.
+
+    A small or medium fit keeps whole chunks; a large one shares a fixed total,
+    so the largest fit sends no more text than a 2,000-character cut always did.
+
+    Args:
+        points: Chunks ranked into the sample.
+
+    Returns:
+        ``TEXT_BUDGET_CHARS // points``, between ``TEXT_CHARS`` and ``TEXT_CHARS_MAX``.
+    """
+    return max(TEXT_CHARS, min(TEXT_CHARS_MAX, TEXT_BUDGET_CHARS // max(1, points)))
 
 
 @dataclass(frozen=True)
@@ -116,19 +136,20 @@ def _vector_key(vector: np.ndarray) -> bytes:
     return (np.asarray(vector, dtype="<f4") + 0.0).tobytes()
 
 
-def build_sample(candidates: Iterable[Candidate], *, min_text_chars: int) -> FitSample:
+def build_sample(candidates: Iterable[Candidate], *, min_text_chars: int, text_chars: int = TEXT_CHARS) -> FitSample:
     """Filter, order and deduplicate candidates into a fit sample.
 
     Args:
         candidates: Candidate points.
         min_text_chars: Shortest prepared text that is eligible.
+        text_chars: Most characters of each text kept.
 
     Returns:
         The sample; the first point per distinct vector represents its copies.
     """
     eligible = []
     for cand in candidates:
-        text = fit_text(cand.text)
+        text = fit_text(cand.text, text_chars)
         if len(text) >= min_text_chars:
             eligible.append(Candidate(cand.point_id, cand.vector, text))
     eligible.sort(key=lambda c: c.point_id)
@@ -197,25 +218,30 @@ def texts_within(texts: Sequence[str], limit_bytes: int) -> list[str]:
 def auto_min_topic_size(n: int) -> int:
     """Return the automatic minimum topic size for a sample.
 
+    A small sample gets small topics, so a few documents still split into
+    several: ``round(sqrt(n) / 3)``, at least 2 and at most 10. From 813
+    chunks on the size is ``n // 1000``, between 10 and 100.
+
     Args:
         n: Sample size.
 
     Returns:
-        ``n // 1000`` clamped to 10..100.
+        The size, from 2 to 100.
     """
-    return min(100, max(10, n // 1000))
+    return min(100, max(2, min(10, round(math.sqrt(n) / 3)), n // 1000))
 
 
 def min_eligible(min_topic_size: int) -> int:
-    """Return how many eligible points a build needs.
+    """Return how many eligible points a fit needs.
 
     Args:
         min_topic_size: Minimum topic size.
 
     Returns:
-        Three times the size, at least 50.
+        Twice the size, at least ``SERVICE_MIN_POINTS``: the service's own
+        minimum, so a sample it would refuse is refused before it is sent.
     """
-    return max(3 * min_topic_size, 50)
+    return max(SERVICE_MIN_POINTS, 2 * min_topic_size)
 
 
 def nr_topics_for(max_topics: int) -> int:

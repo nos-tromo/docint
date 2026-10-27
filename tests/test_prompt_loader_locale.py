@@ -310,6 +310,15 @@ def test_the_topic_label_prompt_exists_in_both_locales_with_its_two_placeholders
         assert _placeholders(_prompt("topic_label", code)) == {"keywords", "passages"}
 
 
+def test_the_topic_label_prompt_forbids_naming_the_source_in_both_locales() -> None:
+    """A label names what the passages share, never the title of the work they come from.
+
+    A topic covering most of one book was otherwise labelled with the book's own title.
+    """
+    assert "never the title or author of the work, document or collection" in _prompt("topic_label", "en")
+    assert "nie den Titel oder die Urheberschaft des Werks, Dokuments oder der Sammlung" in _prompt("topic_label", "de")
+
+
 def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None = None, *, topics: bool = False) -> str:
     """Render the system prompt of a turn with no history: the target's guide and the assessment rule filled in.
 

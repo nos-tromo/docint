@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 from qdrant_client import QdrantClient, models
 
-from docint.utils.topics_client import FitParams, FitResult, FitTopic
+from docint.utils.topics_client import SERVICE_MIN_POINTS, FitParams, FitResult, FitTopic, _validate_params
 
 DIM = 8
 SPARSE_NAME = "text-sparse-new"
@@ -153,8 +153,13 @@ class FakeFit:
 
         Raises:
             Exception: The scripted failure, once.
+            ValueError: For settings or a point count the service would refuse.
         """
         self.requests.append((list(texts), np.asarray(vectors), params))
+        _validate_params(params)
+        minimum = max(SERVICE_MIN_POINTS, 2 * params.min_topic_size)
+        if len(vectors) < minimum:
+            raise ValueError(f"need at least {minimum} points for min_topic_size={params.min_topic_size}")
         if self.raise_first is not None:
             exc, self.raise_first = self.raise_first, None
             raise exc

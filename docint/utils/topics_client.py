@@ -29,6 +29,8 @@ from docint.utils.env_cfg import TopicsClientConfig, load_topics_client_env
 
 FIT_PATH = "/topics/fit"
 SERVICE_MAX_POINTS = 150_000
+#: Fewest points the service fits; it also needs twice the minimum topic size.
+SERVICE_MIN_POINTS = 8
 VALUES_PER_POINT = 1024
 MAX_DIM = 8192
 MAX_STOP_WORDS = 10_000

@@ -52,6 +52,7 @@ from docint.core.topics.service import (
     progress_message,
     progress_payload,
 )
+from docint.core.topics.stopwords import stop_words_digest
 from docint.core.topics.store import TopicRun, TopicStore
 from docint.utils import topics_client
 from docint.utils.env_cfg import TopicsConfig
@@ -600,22 +601,52 @@ def test_a_point_without_a_dense_vector_is_written_unassigned(client: QdrantClie
 
 
 def test_a_build_with_too_few_chunks_is_refused_and_writes_nothing(client: QdrantClient, root: Path) -> None:
-    """Mostly short chunks shrink the sample below the minimum: refused, nothing written.
+    """Mostly short chunks shrink the sample below the service's 8 points: refused with counts, nothing written.
 
     Args:
         client: Qdrant client.
         root: Store root.
     """
-    _add_blobs(client, per=20, payload=lambda i, _pid: {"search_text": "short"} if i % 4 else {})
+    _add_blobs(client, per=20, payload=lambda i, _pid: {"search_text": "short"} if i % 9 else {})
     fit = FakeFit(BLOBS)
-    with pytest.raises(TopicsRefused) as caught:
-        _run(_service(client, root, fit), "build")
+    lines: list[str] = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="INFO", format="{message}")
+    try:
+        with pytest.raises(TopicsRefused) as caught:
+            _run(_service(client, root, fit), "build")
+    finally:
+        logger.remove(sink)
     assert caught.value.code == "too_few_chunks"
     assert caught.value.message == "The collection has too few chunks with enough text to build topics."
+    assert caught.value.counts() == {"found": 7, "needed": 8}
+    assert caught.value.describe() == (
+        "The collection has too few chunks with enough text to build topics. Found 7; a fit needs at least 8."
+    )
+    assert any(
+        line.strip() == "Topics build refused for 'coll' | code=too_few_chunks found=7 needed=8" for line in lines
+    )
     assert fit.requests == []
     assert all(RUN_FIELD not in p for p in _payloads(client).values())
     assert _run_dirs(root) == set()
     assert TopicStore(root).try_lock(COLL) is not None
+
+
+def test_a_small_collection_builds_with_small_topics(client: QdrantClient, root: Path) -> None:
+    """Fifteen chunks, far below the old floor of 50, fit with a minimum topic size of 2.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=5)
+    fit = FakeFit(BLOBS)
+    outcome = _run(_service(client, root, fit), "build")
+    assert len(fit.requests) == 1
+    _texts, vectors, params = fit.requests[0]
+    assert len(vectors) == 15 and params.min_topic_size == 2
+    assert not outcome.empty and outcome.topics == 3 and outcome.assigned == 15
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and run.record["params"]["min_topic_size"] == 2
 
 
 def test_a_fit_without_topics_warns_none_found_and_keeps_the_current_run(client: QdrantClient, root: Path) -> None:
@@ -693,10 +724,26 @@ def test_a_service_that_stays_busy_fails_after_the_last_attempt(client: QdrantCl
     assert TopicStore(root).try_lock(COLL) is not None
 
 
-def test_texts_sent_to_the_fit_are_cut_and_within_the_service_limit(
+def test_texts_sent_to_the_fit_keep_whole_chunks_up_to_the_cap(client: QdrantClient, root: Path) -> None:
+    """A small fit sends each chunk whole up to 8,000 characters, and records the cap it used.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, payload=lambda i, _pid: {"search_text": f"passage{i} " + "x" * 9000})
+    fit = FakeFit(BLOBS)
+    _run(_service(client, root, fit), "build")
+    texts = fit.requests[0][0]
+    assert {len(t) for t in texts} == {8000}
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and run.record["fits"][0]["text_chars"] == 8000
+
+
+def test_texts_sent_to_the_fit_stay_within_the_service_limit(
     client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Long non-Latin texts are cut to 2,000 characters and to the texts-part limit.
+    """Long non-Latin texts are cut to the texts-part limit at a character boundary.
 
     Args:
         client: Qdrant client.
@@ -704,12 +751,50 @@ def test_texts_sent_to_the_fit_are_cut_and_within_the_service_limit(
         monkeypatch: Pytest monkeypatch.
     """
     monkeypatch.setattr(service, "texts_limit", lambda n: n * 3000)
-    _add_blobs(client, payload=lambda i, _pid: {"search_text": "語" * 3000 + str(i)})
+    sources = {}
+
+    def payload(i: int, pid: str) -> dict[str, Any]:
+        """Give each chunk a long non-Latin text.
+
+        Args:
+            i: Index.
+            pid: Point id.
+
+        Returns:
+            The payload.
+        """
+        sources[pid] = "語" * 3000 + str(i)
+        return {"search_text": sources[pid]}
+
+    _add_blobs(client, payload=payload)
     fit = FakeFit(BLOBS)
     _run(_service(client, root, fit), "build")
     texts = fit.requests[0][0]
-    assert all(len(t) <= 2000 for t in texts)
     assert len(encode_texts(texts)) <= len(texts) * 3000
+    assert all(t and len(t) < 3000 and t == "語" * len(t) for t in texts)
+
+
+def test_the_run_records_the_settings_and_stop_words_its_fit_used(client: QdrantClient, root: Path) -> None:
+    """``params`` carries ``max_df``; the fit entry the text cap and the list sent, with the corpus additions.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    fit = FakeFit(BLOBS)
+    _run(_service(client, root, fit), "build")
+    sent = fit.requests[0][2].stop_words
+    # "passage", "shared" and "words" are in every chunk, so they cannot tell topics apart.
+    assert {"the", "and", "passage", "shared", "words"} <= set(sent)
+    assert not {"blob0", "blob1", "blob2"} & set(sent)
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    assert run.record["params"]["max_df"] == 0.8
+    entry = run.record["fits"][0]
+    assert entry["text_chars"] == 8000
+    assert entry["stop_words"] == {"count": len(sent), "sha256": stop_words_digest(sent), "corpus": len(sent) - 2}
+    assert run.record["stop_words"] == {"count": 2, "sha256": "0" * 64}
 
 
 def test_the_sample_is_capped_by_the_vector_dimension(
@@ -1374,6 +1459,26 @@ def test_discover_with_too_few_unassigned_is_refused(client: QdrantClient, root:
     with pytest.raises(TopicsRefused) as caught:
         _run(_service(client, root), "discover")
     assert caught.value.code == "too_few_unassigned"
+    assert caught.value.counts() == {"found": 0, "needed": 8}
+
+
+def test_discover_never_fits_topics_finer_than_the_build(client: QdrantClient, root: Path) -> None:
+    """The pool's automatic minimum topic size is at least the build's, counted up to 10.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60)
+    built = _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and built.run_id == run.run_id
+    assert run.record["params"]["min_topic_size"] == 4  # 180 chunks
+    fit = FakeFit(BLOBS)
+    _run(_service(client, root, fit), "discover")
+    _texts, vectors, params = fit.requests[0]
+    assert len(vectors) == 60  # alone, a 60-chunk pool would fit with a size of 3
+    assert params.min_topic_size == 4
 
 
 def _strand_a_discover(

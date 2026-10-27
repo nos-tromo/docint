@@ -69,6 +69,7 @@ def test_render_prompt_fills_keywords_and_numbered_passages_and_leaves_braces_al
 
     text = render_prompt("{keywords}|{passages}|{other}", request)
 
+    assert PASSAGE_CHARS == 800  # enough of each passage to say what it is about
     assert text == "a, b|1. " + "x" * PASSAGE_CHARS + "\n2. {keywords} {x}|{other}"
     request = LabelRequest(0, ("{passages}",), ("{keywords}",))
     assert render_prompt("{keywords}|{passages}", request) == "{passages}|1. {keywords}"
