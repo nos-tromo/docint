@@ -9151,9 +9151,11 @@ def test_deleting_a_collection_removes_its_topics(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
     stored = topics / "target" / "20260102-030405-abcdef"
     stored.mkdir(parents=True)
+    (topics / "target" / ".lock").touch()
     rag._topic_indexes_ensured.add("target")
 
     rag.delete_collection("target")
 
-    assert not (topics / "target").exists()
+    # The lock stays, so a job still running on the old collection excludes one on a new one of the same name.
+    assert [p.name for p in (topics / "target").iterdir()] == [".lock"]
     assert "target" not in rag._topic_indexes_ensured

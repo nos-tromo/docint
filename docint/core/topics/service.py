@@ -5,6 +5,9 @@ Orchestration only: Qdrant access lives in :mod:`gather`, the maths in
 the collection's lock from start to finish, the fit included, and reports
 through ``progress``, which is also its cancel channel: whatever it raises
 ends the job once the lock is released and any half-built run is removed.
+Before every write and every progress frame a job checks that its collection
+was not replaced since it started, so one left running on a deleted
+collection stops before it touches a new collection of the same name.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, wait
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Literal
 
 import numpy as np
@@ -234,6 +238,10 @@ def _noop(_physical: str) -> None:
     """
 
 
+def _unguarded() -> None:
+    """Check nothing: the guard of a job that has not read its collection's creation time yet."""
+
+
 def _utcnow() -> datetime:
     """Return the current time.
 
@@ -299,15 +307,18 @@ class _Fitted:
 
 @dataclass
 class _Job:
-    """What one job has written so far.
+    """What one job has written so far, and the check its writes pass first.
 
     Attributes:
         seen: Topic id to the earliest and latest member time written, UTC.
         wrote: Whether any assignment was written, so ``on_written`` must fire.
+        guard: Raises ``collection_changed`` once the collection was replaced
+            since the job started; runs before every write.
     """
 
     seen: _Seen = field(default_factory=dict)
     wrote: bool = False
+    guard: Callable[[], None] = _unguarded
 
 
 def _lookup(payload: Mapping[str, Any], key: str) -> object:
@@ -422,6 +433,35 @@ def _refuse_if_replaced(owner_created_at: Callable[[], str | None], created: str
         raise TopicsRefused("collection_changed")
 
 
+def _guarded(progress: Progress, guard: Callable[[], None]) -> Progress:
+    """Run a check before every progress frame.
+
+    The fit and the labels report progress while they run, so a job whose
+    collection was replaced during either stops at its next frame instead of
+    holding the collection's lock until they end.
+
+    Args:
+        progress: The job's progress channel.
+        guard: The check; whatever it raises ends the job.
+
+    Returns:
+        The channel with the check in front.
+    """
+
+    def report(stage: str, done: int, total: int) -> None:
+        """Check, then report.
+
+        Args:
+            stage: The stage.
+            done: Units done.
+            total: Units in all, 0 when unknown.
+        """
+        guard()
+        progress(stage, done, total)
+
+    return report
+
+
 class TopicsService:
     """Builds, extends and maintains a collection's topics."""
 
@@ -506,6 +546,7 @@ class TopicsService:
         job = _Job()
         try:
             created = owner_created_at()
+            job.guard = partial(_refuse_if_replaced, owner_created_at, created)
             store.discard_stale(physical, owner_created_at=created)
             run = store.active(physical, owner_created_at=created)
             if run is None:
@@ -515,9 +556,8 @@ class TopicsService:
             if dense.dim != run.table.dim:
                 logger.warning("Topic alignment after ingest skipped | code={}", "dimension_changed")
                 return None
-            outcome = self._align(
-                physical, dense, run, created, owner_created_at, lambda _stage, done, total: progress(done, total), job
-            )
+            report = _guarded(lambda _stage, done, total: progress(done, total), job.guard)
+            outcome = self._align(physical, dense, run, created, owner_created_at, report, job)
         except TopicsRefused as exc:
             logger.warning("Topic alignment after ingest skipped | code={}", exc.code)
             return None
@@ -573,6 +613,9 @@ class TopicsService:
     ) -> TopicsOutcome:
         """Dispatch a job once the lock is held.
 
+        The job's guard is set from the creation time read here, and runs before
+        every write and every progress frame from then on.
+
         Args:
             action: The action.
             physical: Physical collection name.
@@ -585,10 +628,13 @@ class TopicsService:
             The outcome.
 
         Raises:
-            TopicsRefused: ``no_run`` or ``dimension_changed`` for discover and align.
+            TopicsRefused: ``no_run`` or ``dimension_changed`` for discover and align;
+                ``collection_changed`` once the collection is replaced.
         """
         store, client = self._deps.store, self._deps.client
         created = owner_created_at()
+        job.guard = partial(_refuse_if_replaced, owner_created_at, created)
+        progress = _guarded(progress, job.guard)
         store.discard_stale(physical, owner_created_at=created)
         ensure_topic_indexes(client, physical)
         dense = dense_vector(client, physical)
@@ -1051,12 +1097,17 @@ class TopicsService:
 
         Returns:
             Rows placed in a topic.
+
+        Raises:
+            TopicsRefused: ``collection_changed``, before anything is written, once
+                the collection was replaced since the job started.
         """
         groups: dict[int, list[str]] = {}
         for row, tid in zip(rows, topics, strict=True):
             groups.setdefault(tid, []).append(row.point_id)
         if not groups:
             return 0
+        job.guard()
         # Set before the call: a write that fails midway may still have landed.
         job.wrote = True
         write_assignments(self._deps.client, physical, run_id, groups)

@@ -220,11 +220,14 @@ only.
   from it counts as absent: reads answer as if there were no run, and the next
   job on the collection, the ingest stage included, deletes it.
 - **Deletion.** Deleting a collection, by hand or by retention, removes its
-  whole directory. A build or discover still running on it is refused by the
-  creation-time check (`collection_changed`) between its fit and the writes
-  that follow, and again before a build activates or a discover completes; a
-  collection replaced while those writes run still receives the rest of them,
-  which stay.
+  runs and `active.json` but keeps `.lock`. A job still running on the deleted
+  collection holds that lock, and a collection created again under the same
+  name takes the same file, so its jobs wait for the old one, and its ingest
+  stage defers, until it ends. The old job does not run on: before every page
+  it writes and with every progress frame, the fit's and the labels' included,
+  it reads the collection's creation time again, and it ends refused with
+  `collection_changed` once that differs. Mid-fit it stops at the next 5 s
+  heartbeat. A deleted collection leaves its empty `.lock` behind.
 
 ## The fit service
 

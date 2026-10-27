@@ -2,9 +2,11 @@
 
 One directory per physical collection holding one subdirectory per run
 (``centres.npy`` and ``run.json``), the ``active.json`` pointer and a ``.lock``
-file. The run id and the collection name both arrive from a request, so the id
-is pattern-checked before any path join and a collection only becomes a
-directory as itself when it is a plain file name; any other is hashed.
+file. The lock file outlives the collection: deleting one removes its runs and
+its pointer only. The run id and the collection name both arrive from a
+request, so the id is pattern-checked before any path join and a collection
+only becomes a directory as itself when it is a plain file name; any other is
+hashed.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ __all__ = ["RUN_ID_PATTERN", "TopicLock", "TopicRun", "TopicStore"]
 RUN_ID_PATTERN = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
 #: A collection name that is its own directory; any other is hashed (see ``TopicStore._dir``).
 _COLLECTION_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_LOCK_NAME = ".lock"
 _TORN_RETRY_S = 0.05
 
 
@@ -205,7 +208,7 @@ class TopicStore:
         """
         directory = self._dir(physical)
         directory.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(directory / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = os.open(directory / _LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -391,17 +394,29 @@ class TopicStore:
                 shutil.rmtree(child, ignore_errors=True)
 
     def delete_collection(self, physical: str) -> None:
-        """Remove every run of a collection; a missing one is ignored.
+        """Remove every run of a collection and its pointer; a missing one is ignored.
 
-        This is the collection-deletion cascade. It takes no lock and removes
-        ``.lock`` with the rest. A build still running against the deleted
-        collection is refused by its ``owner_created_at`` checks before it
-        activates, and a discover before it completes.
+        This is the collection-deletion cascade. It takes no lock and keeps
+        ``.lock``: a job still running on the deleted collection holds that
+        file's lock, and a collection created again under the same name opens
+        the same file, so the two jobs still exclude each other. Removing it
+        would hand the new collection a second lock beside the old one. The
+        running job stops before its next write, once its creation-time check
+        sees the collection replaced.
 
         Args:
             physical (str): Collection name.
         """
-        shutil.rmtree(self._dir(physical), ignore_errors=True)
+        directory = self._dir(physical)
+        if not directory.is_dir():
+            return
+        for child in directory.iterdir():
+            if child.name == _LOCK_NAME:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
 def _npy_bytes(array: np.ndarray) -> bytes:

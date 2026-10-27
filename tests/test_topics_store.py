@@ -304,16 +304,33 @@ def test_prune_keeps_only_the_given_run(tmp_path: Path) -> None:
     assert json.loads((tmp_path / PHYSICAL / "active.json").read_text())["run_id"] == b.run_id
 
 
-def test_delete_collection_removes_everything(tmp_path: Path) -> None:
-    """Delete collection removes everything."""
-    store = TopicStore(tmp_path)
-    run = _run(_id(store))
-    store.save(PHYSICAL, run)
-    store.activate(PHYSICAL, run.run_id)
-    store.delete_collection(PHYSICAL)
-    assert not (tmp_path / PHYSICAL).exists()
-    store.delete_collection(PHYSICAL)
-    store.delete_run(PHYSICAL, run.run_id)
+def test_delete_collection_removes_every_run_and_keeps_the_lock(tmp_path: Path) -> None:
+    """A deleted collection's lock still excludes a job on a collection created again under its name."""
+    first, second = TopicStore(tmp_path), TopicStore(tmp_path)
+    run = _run(_id(first))
+    held = first.try_lock(PHYSICAL)
+    assert held is not None
+    first.save(PHYSICAL, run)
+    first.activate(PHYSICAL, run.run_id)
+    directory = tmp_path / PHYSICAL
+    (directory / ".active.json.abc123.tmp").write_bytes(b"{}")
+    inode = (directory / ".lock").stat().st_ino
+
+    first.delete_collection(PHYSICAL)
+
+    assert [p.name for p in directory.iterdir()] == [".lock"]
+    assert (directory / ".lock").stat().st_ino == inode
+    assert second.load(PHYSICAL, run.run_id) is None
+    assert second.active_id(PHYSICAL) is None
+    assert second.try_lock(PHYSICAL) is None
+    held.release()
+    again = second.try_lock(PHYSICAL)
+    assert again is not None
+    again.release()
+    first.delete_collection(PHYSICAL)
+    assert [p.name for p in directory.iterdir()] == [".lock"]
+    first.delete_collection("never-stored")
+    assert not (tmp_path / "never-stored").exists()
 
 
 def test_prune_removes_a_run_even_when_it_is_the_active_one(tmp_path: Path) -> None:

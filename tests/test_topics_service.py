@@ -1256,6 +1256,124 @@ def test_a_waiting_job_reports_progress_until_the_lock_frees(client: QdrantClien
     assert outcome.topics == 3
 
 
+class Waiting(Exception):
+    """Raised by a waiting job's sleep, to show it could not take the lock."""
+
+
+def test_a_job_on_a_deleted_collection_keeps_its_replacement_waiting(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A collection deleted and created again under a running align waits for it and gets none of its writes.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch, used to shrink pages.
+    """
+    monkeypatch.setattr(gather, "PAGE_SIZE", 16)
+    _add_blobs(client)
+    _run(_service(client, root), "build")
+    _add_blobs(client, per=20, offset=1000)
+    clock = {"value": CREATED}
+    replacement: list[str] = []
+    waiting: list[tuple[str, int, int]] = []
+    spy = WriteSpy(client)
+
+    def give_up(_seconds: float) -> None:
+        """Stop a job that has to wait for the lock.
+
+        Args:
+            _seconds: Requested sleep.
+
+        Raises:
+            Waiting: Always.
+        """
+        raise Waiting
+
+    def replace_collection(stage: str, done: int, total: int) -> None:
+        """Delete and recreate the collection once the align has written a page.
+
+        Args:
+            stage: Stage name.
+            done: Units done.
+            total: Units in all.
+        """
+        if stage != "aligning" or replacement:
+            return
+        TopicStore(root).delete_collection(COLL)
+        client.delete_collection(COLL)
+        make_collection(client, COLL)
+        replacement.extend(_add_blobs(client, offset=5000))
+        clock["value"] = "2026-02-02T00:00:00+00:00"
+        assert TopicStore(root).try_lock(COLL) is None
+        ingest = _service(client, root).align_on_ingest(
+            COLL, owner_created_at=lambda: clock["value"], progress=lambda _done, _total: None
+        )
+        assert ingest is not None and ingest.deferred
+        frames = Frames()
+        with pytest.raises(Waiting):
+            _run(_service(client, root, sleep=give_up), "build", frames, created=lambda: clock["value"])
+        waiting.extend(frames.frames)
+        spy.written.clear()
+
+    with pytest.raises(TopicsRefused) as caught:
+        _run(_service(spy, root), "align", Frames(replace_collection), created=lambda: clock["value"])
+    assert caught.value.code == "collection_changed"
+    assert waiting == [("waiting", 0, 0)]
+    assert spy.written == []
+
+    rebuilt = _run(_service(client, root), "build", created=lambda: clock["value"])
+    assert rebuilt.run_id is not None
+    payloads = _payloads(client)
+    assert sorted(payloads) == sorted(replacement)
+    assert {payloads[pid][RUN_FIELD] for pid in replacement} == {rebuilt.run_id}
+    assert count(client, COLL, pending_filter(rebuilt.run_id)) == 0
+    assert TopicStore(root).active_id(COLL) == rebuilt.run_id
+
+
+def test_a_job_on_a_replaced_collection_stops_at_its_next_fit_heartbeat(
+    client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build whose collection is replaced during its fit is refused while the fit still runs.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        monkeypatch: Pytest monkeypatch.
+    """
+    _add_blobs(client)
+    monkeypatch.setattr(service, "HEARTBEAT_S", 0.01)
+    clock = {"value": CREATED}
+    release, finished = threading.Event(), threading.Event()
+    inner = FakeFit(BLOBS)
+
+    def replaced_meanwhile(texts: Sequence[str], vectors: np.ndarray, params: FitParams) -> FitResult:
+        """Replace the collection, then block until released.
+
+        Args:
+            texts: Texts.
+            vectors: Vectors.
+            params: Settings.
+
+        Returns:
+            The fake result.
+        """
+        clock["value"] = "2026-02-02T00:00:00+00:00"
+        release.wait(5)
+        finished.set()
+        return inner(texts, vectors, params)
+
+    try:
+        with pytest.raises(TopicsRefused) as caught:
+            _run(_service(client, root, replaced_meanwhile), "build", created=lambda: clock["value"])
+        assert caught.value.code == "collection_changed"
+        assert not finished.is_set()
+        assert TopicStore(root).try_lock(COLL) is not None
+        assert _run_dirs(root) == set()
+    finally:
+        release.set()
+
+
 # Align
 
 
