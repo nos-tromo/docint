@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, text
 
+from docint.core.state import base as base_module
 from docint.core.state import session_manager as session_manager_module
 from docint.core.state.base import (
     SessionStoreMigrationError,
@@ -29,15 +31,39 @@ from docint.core.state.base import (
 )
 
 
+def _readonly_url(db_path: Path) -> str:
+    """Build a URL that has SQLite open an existing DB file read-only.
+
+    Root ignores file permission bits, so ``chmod 0o444`` cannot make the file
+    read-only for a test run as root. ``mode=ro`` makes SQLite refuse writes for
+    every uid, with the same ``attempt to write a readonly database`` error a
+    non-writable file raises.
+
+    Args:
+        db_path (Path): The SQLite database file.
+
+    Returns:
+        str: A SQLAlchemy URL for a read-only connection to ``db_path``.
+    """
+    return f"sqlite:///file:{db_path}?mode=ro&uri=true"
+
+
 def _readonly_engine(tmp_path: Path, ddl: str) -> Engine:
-    """An engine over a pre-existing DB whose file is not writable."""
+    """Create a DB holding one pre-existing table and return an engine that can only read it.
+
+    Args:
+        tmp_path (Path): Directory to create ``sessions.sqlite3`` in.
+        ddl (str): Statement that creates the table.
+
+    Returns:
+        Engine: A read-only engine over the new DB.
+    """
     db_path = tmp_path / "sessions.sqlite3"
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
         conn.execute(text(ddl))
     engine.dispose()
-    db_path.chmod(0o444)
-    return create_engine(f"sqlite:///{db_path}")
+    return create_engine(_readonly_url(db_path))
 
 
 @pytest.mark.parametrize(
@@ -107,7 +133,7 @@ def test_missing_table_is_still_not_an_error(tmp_path: Path) -> None:
     _ensure_conversation_scope_columns(engine)  # must not raise
 
 
-def test_make_session_maker_propagates_a_failed_migration(tmp_path: Path) -> None:
+def test_make_session_maker_propagates_a_failed_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The store factory must not hand out a session maker over a stale schema."""
     db_path = tmp_path / "sessions.sqlite3"
     db_url = f"sqlite:///{db_path}"
@@ -116,7 +142,13 @@ def test_make_session_maker_propagates_a_failed_migration(tmp_path: Path) -> Non
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE conversations DROP COLUMN scope_chunk_ids"))
     engine.dispose()
-    db_path.chmod(0o444)
+
+    def _readonly_create_engine(_url: str, **kwargs: Any) -> Engine:
+        return create_engine(_readonly_url(db_path), **kwargs)
+
+    # Patch the engine, not the URL: ``_ensure_sqlite_parent_dir`` reads a
+    # ``file:`` URI as a relative path and would create it under the working directory.
+    monkeypatch.setattr(base_module, "create_engine", _readonly_create_engine)
 
     with pytest.raises(SessionStoreMigrationError):
         _make_session_maker(db_url)
