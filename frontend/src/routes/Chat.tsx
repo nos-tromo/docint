@@ -148,7 +148,7 @@ export function Chat() {
   const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
   const setRetrievalTarget = useChatFiltersStore((s) => s.setRetrievalTarget)
-  const { rule: topicRule } = useTopicFocusRule()
+  const { rule: topicRule, pending: topicPending } = useTopicFocusRule()
   const { focus: topicFocus } = useChatTopicFocus()
   const activeCollection = useActiveCollection()
   const clearTopicPick = useTopicFocusStore((s) => s.clear)
@@ -301,7 +301,9 @@ export function Chat() {
 
   const send = async () => {
     const message = draft.trim()
-    if (!message || state.inflight) return
+    // Until the chat's topic and its run are read, whether the turn carries the topic's rule is not
+    // known; sent now, it would answer from the whole collection.
+    if (!message || state.inflight || topicPending) return
     // Read once: the same list is sent with the question and recorded on the
     // turn, so the guardrail below compares what was asked for against what
     // the server says it did.
@@ -642,9 +644,16 @@ export function Chat() {
               variant="primary"
               size="md"
               busy={state.inflight}
-              disabled={!draft.trim()}
+              disabled={!draft.trim() || topicPending}
             />
           </form>
+          {/* Only once there is something to send: a reopened chat reads its topic every time, and a
+              hint flashing past on each would say nothing. */}
+          {topicPending && draft.trim() && (
+            <p role="status" className="mt-1 pr-2 text-xs text-muted-foreground">
+              {t('chat.topic_focus_reading')}
+            </p>
+          )}
         </section>
 
         {/* Kept mounted while collapsed so a running search stays warm and the

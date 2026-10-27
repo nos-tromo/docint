@@ -1663,16 +1663,21 @@ describe('Chat topic focus', () => {
    *
    * @param stored - The topics sessions hold, by session id; updated in place.
    * @param failDelete - Refuse every removal with a 500.
+   * @param hold - Requests whose URL matches `pattern` are answered only once `until` settles.
    * @returns The fetch mock.
    */
-  function stubTopicsApi(stored: Record<string, SessionTopicFocus> = {}, failDelete = false) {
+  function stubTopicsApi(
+    stored: Record<string, SessionTopicFocus> = {},
+    failDelete = false,
+    hold?: { pattern: RegExp; until: Promise<void> }
+  ) {
     const json = (body: unknown, status = 200) => ({
       ok: status < 400,
       status,
       json: async () => body,
       text: async () => JSON.stringify(body)
     })
-    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
+    const answer = (req: RequestInfo | URL, init?: RequestInit): Promise<unknown> => {
       const u = String(req)
       if (u.includes('/stream_query')) {
         const sent = JSON.parse(String(init?.body ?? '{}')) as { session_id?: string; topic_focus?: SessionTopicFocus }
@@ -1698,7 +1703,10 @@ describe('Chat topic focus', () => {
       if (u.includes('/config')) return Promise.resolve(json({ topics_enabled: true }))
       if (u.includes('/topics')) return Promise.resolve(json(OVERVIEW))
       return Promise.resolve(json({}))
-    })
+    }
+    const fetchMock = vi.fn((req: RequestInfo | URL, init?: RequestInit) =>
+      hold && hold.pattern.test(String(req)) ? hold.until.then(() => answer(req, init)) : answer(req, init)
+    )
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
   }
@@ -1724,7 +1732,10 @@ describe('Chat topic focus', () => {
 
   async function ask() {
     await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    const send = screen.getByRole('button', { name: /send/i })
+    // Held while the chat's topic is read; a click on a disabled button would silently do nothing.
+    await waitFor(() => expect(send).toBeEnabled())
+    await userEvent.click(send)
   }
 
   beforeEach(() => {
@@ -1892,6 +1903,47 @@ describe('Chat topic focus', () => {
       await screen.findByText('The topic filter could not be removed; this chat still keeps it.')
     ).toBeInTheDocument()
     expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent('T3 · Harbour cranes')
+  })
+
+  it.each([
+    { read: 'a reopened chat’s stored topic', pattern: /\/sessions\/sess-restored\/topic/, reopened: true },
+    { read: 'a reopened chat’s active run', pattern: /\/collections\/docs\/topics/, reopened: true },
+    { read: 'a new chat’s active run', pattern: /\/collections\/docs\/topics/, reopened: false }
+  ])('holds a turn until $read is read', async ({ pattern, reopened }) => {
+    let release: () => void = () => {}
+    const until = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchMock = stubTopicsApi({ 'sess-restored': STORED }, false, { pattern, until })
+    if (reopened) {
+      renderChatWithSession('sess-restored')
+    } else {
+      useTopicFocusStore.setState({
+        focus: { collection: 'docs', owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' }
+      })
+      renderChat()
+    }
+    const box = await screen.findByPlaceholderText(/ask something/i)
+    await userEvent.type(box, 'hi')
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => pattern.test(String(u)))).toBe(true))
+
+    // Sent now, the turn would go out without the topic's rule and answer from the whole collection.
+    const send = screen.getByRole('button', { name: /send/i })
+    expect(send).toBeDisabled()
+    expect(screen.getByText('Reading this chat’s topic…')).toBeInTheDocument()
+    await userEvent.type(box, '{Enter}')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(sentTurns(fetchMock)).toEqual([])
+    expect(box).toHaveValue('hi')
+
+    release()
+
+    await waitFor(() => expect(send).toBeEnabled())
+    expect(screen.queryByText('Reading this chat’s topic…')).not.toBeInTheDocument()
+    await userEvent.click(send)
+    await waitFor(() => expect(sentTurns(fetchMock)).toHaveLength(1))
+    expect(sentTurn(fetchMock).metadata_filters).toEqual([{ field: 'docint_topic', operator: 'eq', value: `${RUN}:3` }])
+    if (!reopened) expect(sentTurn(fetchMock).topic_focus).toEqual(STORED)
   })
 
   it('starts a new chat without the topic', async () => {

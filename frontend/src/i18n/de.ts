@@ -144,6 +144,7 @@ export const de: Strings = {
   'chat.topic_focus_not_visual': 'Nicht auf Antworten aus Bildern angewendet.',
   'chat.topic_focus_remove': 'Themenfilter entfernen',
   'chat.topic_focus_remove_error': 'Der Themenfilter konnte nicht entfernt werden; dieser Chat behält ihn.',
+  'chat.topic_focus_reading': 'Das Thema dieses Chats wird gelesen…',
   'chat.visual_source_type': 'Art des Bildes',
   'chat.visual_source.any': 'Beliebig',
   'chat.visual_source.video': 'Video-Keyframes',

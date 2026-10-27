@@ -162,8 +162,11 @@ returns no image hits and a focused answer has no image lane. A pick is keyed
 by collection and owner, so it shows and applies only in the collection it was
 picked in; an admin who switches to another owner's collection of the same name
 does not carry it over. Until the chat's topic and the active run have been
-read the chip is hidden; a search waits for those reads, while a turn sent
-meanwhile goes out without the rule. A topics job that ends
+read the chip is hidden, and searches and turns both wait for those reads:
+**Send** stays disabled, Enter sends nothing, and once something is typed a
+note under the composer says the chat's topic is being read. A read that fails
+holds nothing: the search or turn goes out without the rule, and the chip stays
+hidden. A topics job that ends
 while the chat is open refetches the run, so a rebuild finished from the app
 marks the focus stale at once; one run through the CLI sends no such signal
 (see [topics.md](topics.md#limitations)).

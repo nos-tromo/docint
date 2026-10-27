@@ -138,6 +138,7 @@ export const en = {
   'chat.topic_focus_not_visual': 'Not applied to answers from images.',
   'chat.topic_focus_remove': 'Remove topic filter',
   'chat.topic_focus_remove_error': 'The topic filter could not be removed; this chat still keeps it.',
+  'chat.topic_focus_reading': 'Reading this chat’s topic…',
   'chat.visual_source_type': 'Kind of image',
   'chat.visual_source.any': 'Any',
   'chat.visual_source.video': 'Video keyframes',
