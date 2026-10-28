@@ -1155,11 +1155,16 @@ table.manifest tr { break-inside: avoid; }
    columns. WeasyPrint justifies only text whose spaces collapse, so the finding
    cells trade `pre-wrap` for `pre-line` here: every line break stays, a line
    ending at one is never stretched, and a run of spaces prints as one. The
-   HTML export keeps both as they are on screen. */
+   HTML export keeps both as they are on screen.
+   Machine-written text and notes hyphenate in the report's language, which
+   narrows the gaps justification opens. Evidence never does: a hyphen added to
+   quoted text is one the source never had, and its words may not be in the
+   report's language. Neither do names, links or the posting's own text. */
 @media print {
   .prose p, .prose li, .topic-summary, .item .note,
   table.finding td.f-text, table.finding td.f-val, .m-text, .m-val { text-align: justify; }
   table.finding td.f-text, table.finding td.f-val, .m-text, .m-val { white-space: pre-line; }
+  .prose p, .prose li, .topic-summary, .item .note, table.finding td.f-prose, .m-val { hyphens: auto; }
 }
 """
 
@@ -1362,7 +1367,7 @@ _VALUE_LINE = (72, 12.0)
 _KEEP_MAX_PT = 150.0
 
 
-def _html_finding_row(label: str, value_html: str, *, keep: bool) -> str:
+def _html_finding_row(label: str, value_html: str, *, keep: bool, prose: bool = False) -> str:
     """One label/value row of a finding table (value passed as ready HTML).
 
     Args:
@@ -1370,22 +1375,26 @@ def _html_finding_row(label: str, value_html: str, *, keep: bool) -> str:
         value_html (str): The value, already escaped.
         keep (bool): Whether the row moves to the next page whole rather than
             splitting.
+        prose (bool): Whether the value is machine-written text or a note, which
+            the PDF may hyphenate — never quoted source text, a name or a link.
 
     Returns:
         str: The row markup.
     """
     row_class = ' class="f-keep"' if keep else ""
-    return f'<tr{row_class}><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
+    value_class = "f-val f-prose" if prose else "f-val"
+    return f'<tr{row_class}><td class="f-key">{_esc(label)}</td><td class="{value_class}">{value_html}</td></tr>'
 
 
-def _html_text_row(label: str, text: str) -> str:
+def _html_text_row(label: str, text: str, *, prose: bool = False) -> str:
     """A label/value row of plain text, kept whole only while it is short (:data:`_KEEP_MAX_PT`).
 
     So a label never ends a page while its value starts the next, and a long
     value — a posting of many lines, its translation — still splits rather than
-    leaving a page half blank.
+    leaving a page half blank. ``prose`` is :func:`_html_finding_row`'s.
     """
-    return _html_finding_row(label, _esc(text), keep=_text_height_pt(text, *_VALUE_LINE) <= _KEEP_MAX_PT)
+    keep = _text_height_pt(text, *_VALUE_LINE) <= _KEEP_MAX_PT
+    return _html_finding_row(label, _esc(text), keep=keep, prose=prose)
 
 
 def _html_evidence_row(label: str, text: str) -> str:
@@ -1428,7 +1437,7 @@ def _translation_part(snap: dict[str, Any]) -> tuple[str, str] | None:
 def _html_translation_row(snap: dict[str, Any]) -> str:
     """Finding-table row for an optional machine-translation, or ''."""
     part = _translation_part(snap)
-    return _html_text_row(*part) if part else ""
+    return _html_text_row(*part, prose=True) if part else ""
 
 
 def _html_image_rows(snap: dict[str, Any]) -> str:
@@ -1445,9 +1454,9 @@ def _html_image_rows(snap: dict[str, Any]) -> str:
         rows.append(_html_evidence_row(ui_string("image_label_text"), printed))
         rows.append(_html_translation_row(snap))
     if description:
-        rows.append(_html_text_row(ui_string("image_label_description"), description))
+        rows.append(_html_text_row(ui_string("image_label_description"), description, prose=True))
     if tags:
-        rows.append(_html_text_row(ui_string("image_label_tags"), tags))
+        rows.append(_html_text_row(ui_string("image_label_tags"), tags, prose=True))
     return "".join(rows)
 
 
@@ -1535,7 +1544,7 @@ def _html_media_rows(snap: dict[str, Any], view: tuple[str, str]) -> list[str]:
     rows = [f'<tr class="f-media"><td colspan="2">{figure}</td></tr>']
     for part_label, text, evidence in parts:
         if not evidence:
-            rows.append(_html_text_row(part_label, text))
+            rows.append(_html_text_row(part_label, text, prose=True))
         elif part_label:
             rows.append(_html_evidence_row(part_label, text))
         else:
@@ -1576,7 +1585,7 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, band_html: st
     rows += [*detail_rows, *posting_rows] if _is_image_finding(snap) else [*posting_rows, *detail_rows]
     rows.extend(_html_text_row(label, value) for label, value in _provenance_rows(snap))
     if note:
-        rows.append(_html_text_row(ui_string("report_label_note"), note))
+        rows.append(_html_text_row(ui_string("report_label_note"), note, prose=True))
     return (
         '<table class="finding"><colgroup><col class="f-key"><col></colgroup>'
         f'<thead><tr class="f-head"><td colspan="2">{band_html}</td></tr></thead>'
@@ -1638,7 +1647,7 @@ def _html_hate(snap: dict[str, Any], note: str | None, number: int) -> str:
     )
     detail_rows: list[str] = []
     if snap.get("reason"):
-        detail_rows.append(_html_text_row(ui_string("report_label_reason"), str(snap.get("reason"))))
+        detail_rows.append(_html_text_row(ui_string("report_label_reason"), str(snap.get("reason")), prose=True))
     return _html_finding_table(snap, note, band_html=_html_band(number, tags_html), detail_rows=detail_rows)
 
 

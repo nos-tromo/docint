@@ -205,6 +205,11 @@ and the document overview stay left-aligned. WeasyPrint justifies only text
 whose spaces collapse, so a finding's text keeps every line break (a line ending
 at one is never stretched) but prints a run of spaces as one; the other exports
 keep the text exactly, and the HTML export stays ragged-right on screen.
+Machine-written text and notes (summaries, answers, topic summaries, reasons,
+image descriptions, tags, translations) hyphenate in the report's language,
+which keeps justified lines from opening wide gaps. Evidence, the posting's own
+text, names and links never hyphenate: a hyphen added to quoted text is one the
+source never had.
 Findings flow across page
 breaks, but a short row never splits — a label stays with its value, a picture
 with the words beside it — a finding's header band (number, category,

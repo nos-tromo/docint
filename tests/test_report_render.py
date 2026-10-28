@@ -1252,8 +1252,8 @@ def test_image_finding_renders_its_parts_as_labelled_rows(monkeypatch: pytest.Mo
 
     htm = R.render_html(report)
     printed = f'<td class="f-key">Text in the image</td><td class="f-text">{_PRINTED}</td>'
-    described = f'<td class="f-key">Image description</td><td class="f-val">{_DESCRIPTION}</td>'
-    tagged = '<td class="f-key">Tags</td><td class="f-val">poster, crowd</td>'
+    described = f'<td class="f-key">Image description</td><td class="f-val f-prose">{_DESCRIPTION}</td>'
+    tagged = '<td class="f-key">Tags</td><td class="f-val f-prose">poster, crowd</td>'
     assert htm.index(printed) < htm.index(described) < htm.index(tagged)
     assert '<td colspan="2" class="f-text">' not in htm
 
@@ -1274,7 +1274,9 @@ def test_image_finding_translation_sits_under_the_printed_words(monkeypatch: pyt
     )
 
     htm = R.render_html(report)
-    translated = '<td class="f-key">Machine translation (→ English)</td><td class="f-val">TRANSLATED SLOGAN</td>'
+    translated = (
+        '<td class="f-key">Machine translation (→ English)</td><td class="f-val f-prose">TRANSLATED SLOGAN</td>'
+    )
     assert htm.index("Text in the image") < htm.index(translated) < htm.index("Image description")
     assert htm.count("TRANSLATED SLOGAN") == 1
 
@@ -1497,6 +1499,26 @@ def test_pdf_justifies_a_finding_s_text_and_keeps_its_line_breaks(monkeypatch: p
     assert max(_inner_gaps(document, "f-key")) > 1
     drawn = {word for page in words_drawn(document) for word in page}
     assert set(evidence.split()) <= drawn
+
+
+_GERMAN_PARAGRAPH = (
+    "Die ehrenamtlichen Zählteams begingen jeden Monat die nördliche Ästuarroute und hielten die Anzahl der "
+    "Watvögel an jedem der zwölf festen Beobachtungspunkte entlang der Uferbefestigung fest. Ihre Aufzeichnungen "
+    "beschreiben Gezeitenwechsel, Witterungsverhältnisse und die Naturschutzfortbildungsveranstaltungen, die neue "
+    "Ehrenamtliche vor ihrem ersten Einsatz besuchten. Mehrere Einträge vergleichen die Zählergebnisse mit "
+    "früheren Jahren und fragen, ob der Rückgang eine tatsächliche Bestandsveränderung widerspiegelt."
+)
+
+
+def test_pdf_hyphenates_machine_written_text_but_never_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A translation splits words in the report's language; the quoted evidence above it keeps every word whole."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    translation = {"text": _GERMAN_PARAGRAPH, "target_lang": "de", "model": "m"}
+    document = html_cls(string=R.render_html(_long_finding(_GERMAN_PARAGRAPH, translation=translation))).render()
+
+    assert hyphenated_text(document, "f-prose") != []
+    assert hyphenated_text(document, "f-text") == []
 
 
 def test_html_export_keeps_its_text_ragged_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
