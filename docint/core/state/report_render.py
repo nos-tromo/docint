@@ -1045,7 +1045,8 @@ h2.section.page-start { break-before: page; margin-top: 0; }
    band carries the number and tags (the finding's title bar), the evidence
    follows at full width (fewer wrapped lines than a squeezed column), and
    every remaining field is a muted label/value row with a slim label column.
-   Verbatim evidence text keeps `pre-wrap` — never reflowed. */
+   Verbatim evidence text keeps its line breaks — never reflowed: `pre-wrap`
+   on screen, `pre-line` in the PDF so it can be justified (see the end). */
 /* Fixed layout: auto layout sizes columns by measuring every cell, and text
    that breaks `anywhere` is measured per character (quadratic per cell). */
 table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; table-layout: fixed; }
@@ -1147,6 +1148,19 @@ table.manifest th { font-weight: 600; color: #444; border-bottom: 1px solid #ccc
 table.manifest td.num, table.manifest th.num { text-align: right; }
 table.manifest td.hash { font-family: 'DejaVu Sans Mono', 'Liberation Mono', monospace; color: #666; }
 table.manifest tr { break-inside: avoid; }
+/* The PDF sets running text justified: summaries, chat answers, topic
+   summaries, notes, and a finding's evidence, translation, posting text and
+   details. Headings, labels, captions, source lists and the document overview
+   stay ragged — justified, they would only stretch short lines and narrow
+   columns. WeasyPrint justifies only text whose spaces collapse, so the finding
+   cells trade `pre-wrap` for `pre-line` here: every line break stays, a line
+   ending at one is never stretched, and a run of spaces prints as one. The
+   HTML export keeps both as they are on screen. */
+@media print {
+  .prose p, .prose li, .topic-summary, .item .note,
+  table.finding td.f-text, table.finding td.f-val, .m-text, .m-val { text-align: justify; }
+  table.finding td.f-text, table.finding td.f-val, .m-text, .m-val { white-space: pre-line; }
+}
 """
 
 

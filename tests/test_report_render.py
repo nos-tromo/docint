@@ -14,6 +14,7 @@ from pdf_layout import (
     contents_entries,
     count_min_content_splits,
     hyphenated_text,
+    line_right_gaps,
     pages_showing_a_finding_without_its_band,
     rows_alone_at_page_foot,
     rows_split_across_pages,
@@ -1419,6 +1420,96 @@ def test_pdf_never_hyphenates_a_label_that_fits(monkeypatch: pytest.MonkeyPatch)
     document = html_cls(string=R.render_html(report)).render()
 
     assert hyphenated_text(document, "f-key") == []
+
+
+_PARAGRAPH = (
+    "Harbour traffic grew through the spring as new berths opened along the eastern quay, and the port "
+    "authority published weekly counts of arrivals, departures and the time each ship waited at anchor. "
+    "Crews reported longer waits at weekends, while the pilots asked for a second tug to cover the night "
+    "shift. The notes end with a list of the repairs still planned before the autumn storms."
+)
+
+
+def _running_text_report() -> dict[str, Any]:
+    """A report whose summary, note, topic summary and chat answer each run to several lines."""
+    topics = {
+        "collection": "c",
+        "run_id": "r1",
+        "run_updated_at": "2026-10-28T09:00:00+00:00",
+        "coverage": {"total": 10, "assigned": 8},
+        "topics": [
+            {"id": 0, "label": "Harbour", "keywords": ["ship"], "size": 8, "share": 0.8, "description": _PARAGRAPH}
+        ],
+    }
+    answer = f"{_PARAGRAPH}\n\n* {_PARAGRAPH}"
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "summary",
+                "note": _PARAGRAPH,
+                "snapshot": {"collection": "c", "text": _PARAGRAPH},
+            },
+            {"id": 2, "artifact_type": "topics", "note": None, "snapshot": topics},
+            {
+                "id": 3,
+                "artifact_type": "chat_answer",
+                "note": None,
+                "snapshot": {"user_text": "q", "model_response": answer, "sources": []},
+            },
+        ],
+    }
+
+
+def _inner_gaps(document: Any, css_class: str) -> list[float]:
+    """The gaps of every line in ``css_class`` elements but each block's last (see ``line_right_gaps``)."""
+    return [gap for block in line_right_gaps(document, css_class) for gap in block[:-1]]
+
+
+def test_pdf_justifies_summaries_answers_topic_summaries_and_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every line of running text but a paragraph's last reaches the right edge."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    document = html_cls(string=R.render_html(_running_text_report())).render()
+
+    for css_class in ("prose", "topic-summary", "note"):
+        gaps = _inner_gaps(document, css_class)
+        assert gaps, css_class
+        assert max(gaps) < 0.5, css_class
+
+
+def test_pdf_justifies_a_finding_s_text_and_keeps_its_line_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence and translation are justified; a line ending at a break is not stretched; labels stay ragged."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    evidence = f"A short first line.\n{_PARAGRAPH}"
+    report = _long_finding(evidence, translation={"text": _PARAGRAPH, "target_lang": "en", "model": "m"})
+    document = html_cls(string=R.render_html(report)).render()
+
+    (lines,) = line_right_gaps(document, "f-text")
+    assert lines[0] > 100
+    assert max(lines[1:-1]) < 0.5
+    assert max(_inner_gaps(document, "f-val")) < 0.5
+    assert max(_inner_gaps(document, "f-key")) > 1
+    drawn = {word for page in words_drawn(document) for word in page}
+    assert set(evidence.split()) <= drawn
+
+
+def test_html_export_keeps_its_text_ragged_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Justification is a print rule: the HTML export, read on screen, sets its text as before."""
+    weasyprint_html()
+    from weasyprint import HTML
+
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    running = HTML(string=R.render_html(_running_text_report()), media_type="screen").render()
+    finding = HTML(string=R.render_html(_long_finding(_PARAGRAPH)), media_type="screen").render()
+
+    assert max(_inner_gaps(running, "prose")) > 1
+    assert max(_inner_gaps(finding, "f-text")) > 1
 
 
 # --------------------------------------------------------------------------- #

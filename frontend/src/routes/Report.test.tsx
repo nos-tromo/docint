@@ -223,6 +223,18 @@ describe('Report view', () => {
       expect(JSON.parse(String((patch![1] as RequestInit).body))).toMatchObject({ show_toc: false })
     })
   })
+
+  it('sets the two export options together on a row of their own, contents first', async () => {
+    renderReport()
+    const toc = (await screen.findByRole('checkbox', { name: /contents/i })).closest('label')!
+    const overviewOption = screen.getByRole('checkbox', { name: 'Document overview' }).closest('label')!
+    const row = toc.parentElement!
+
+    expect(overviewOption.parentElement).toBe(row)
+    expect(toc.compareDocumentPosition(overviewOption) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(row).queryByRole('textbox')).toBeNull()
+    expect(screen.getByRole('textbox', { name: 'File reference' }).closest('label')!.parentElement).not.toBe(row)
+  })
 })
 
 describe('Report view — PDF export', () => {

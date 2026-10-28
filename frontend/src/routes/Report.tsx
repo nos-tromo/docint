@@ -599,6 +599,9 @@ export function Report() {
                       aria-label={t('report.reference_label')}
                     />
                   </label>
+                </div>
+                {/* A row of their own, so the two options never part across a wrap. */}
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"

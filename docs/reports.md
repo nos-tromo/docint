@@ -198,7 +198,14 @@ The PDF is rendered server-side by WeasyPrint into a real paginated document: a
 running header carrying the case file (*Aktenzeichen*) in the upper-right
 corner, page numbers (labelled in the report's language) and an "AI-generated —
 verify before further processing" disclaimer in the footer of every page, and
-Noto fonts for multi-script text and color emoji. Findings flow across page
+Noto fonts for multi-script text and color emoji. Running text is justified:
+summaries, chat answers, topic summaries, notes, and a finding's evidence,
+translation, posting text and details. Headings, labels, captions, source lists
+and the document overview stay left-aligned. WeasyPrint justifies only text
+whose spaces collapse, so a finding's text keeps every line break (a line ending
+at one is never stretched) but prints a run of spaces as one; the other exports
+keep the text exactly, and the HTML export stays ragged-right on screen.
+Findings flow across page
 breaks, but a short row never splits — a label stays with its value, a picture
 with the words beside it — a finding's header band (number, category,
 confidence) never ends a page on its own, and a finding that continues overleaf

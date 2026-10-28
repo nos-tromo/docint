@@ -469,7 +469,10 @@ stream reports, which a CLI run is not
 The Report Builder surface. Lists the reports of the active collection, and
 only those (with no collection selected it lists none and offers no new one),
 and, for the active one, shows the picked artifacts grouped by type with per-item notes, reordering, and
-removal, plus the five export formats. Each type is a foldable section whose
+removal, plus the five export formats. Under the report selector, the title,
+operator and file reference fields share a row, and the two export options,
+**Table of contents** and **Document overview** (with the overview's refresh),
+sit together on the row below. Each type is a foldable section whose
 contents peek out while shut; the control is the `@infra/ui`
 `DisclosureButton` at the bar's right edge, not the bar itself. The sections
 run summaries, topics, chat answers, entity findings, hate-speech findings,
