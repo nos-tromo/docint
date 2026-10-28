@@ -1,9 +1,10 @@
 """Topic labels written by the chat model.
 
-One request per topic asks for a short label and a one-sentence description.
-The reply is constrained by a strict JSON schema while the endpoint accepts it
-and is retried unconstrained when it does not. A topic whose label cannot be
-written is named by its leading keywords, so every topic always has a name.
+One request per topic asks for a short label and a summary of four to five
+sentences, the topic's ``description``. The reply is constrained by a strict
+JSON schema while the endpoint accepts it and is retried unconstrained when it
+does not. A topic whose label cannot be written is named by its leading
+keywords, so every topic always has a name.
 """
 
 from __future__ import annotations
@@ -23,22 +24,37 @@ from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.prompt_loader import load_localized_prompt
 
 LABEL_CHARS = 80
-DESCRIPTION_CHARS = 300
-PASSAGES_PER_TOPIC = 5
+#: Room for a summary of four to five sentences; a longer one is cut at a sentence end.
+DESCRIPTION_CHARS = 1500
+#: Enough of the topic's material for a summary of that length.
+PASSAGES_PER_TOPIC = 8
 PASSAGE_CHARS = 800
 MAX_IN_FLIGHT = 4
+#: Output budget of one label request: the summary, the label and the JSON around them, with
+#: room to spare. Sent explicitly because some endpoints cut replies short by default.
+LABEL_MAX_TOKENS = 1024
 
 Complete = Callable[[str, dict[str, Any] | None], str]
 
 DEFAULT_TEMPLATE = (
-    "You name one topic of a collection of passages.\n\n"
+    "You describe one topic of a collection of passages and give it a name.\n\n"
     "Its most characteristic words, strongest first: {keywords}\n\n"
     "Passages from the topic:\n{passages}\n\n"
-    'Reply with a JSON object with two keys: "description", one sentence saying what the passages have in '
-    'common, and "label", a name for the topic of at most six words. Name what the passages share, such as a '
-    "theme, an event, a setting or an argument, never the title or author of the work, document or collection "
-    "they come from. Use the passages' own terms and invent nothing."
+    'Reply with a JSON object with two keys, "description" and "label".\n\n'
+    '"description" summarizes the topic in four to five sentences of plain prose, about 80 to 120 words, '
+    "without lists or headings. Start with what the passages have in common, then cover their main subjects, "
+    "the people, organisations, places or events they name, and the claims, arguments or positions they put "
+    "forward, including where these differ. Write about the topic itself rather than about the passages as "
+    "texts.\n\n"
+    '"label" is a name for the topic of at most six words.\n\n'
+    "Name what the passages share, such as a theme, an event, a setting or an argument, never the title or "
+    "author of the work, document or collection they come from. Use the passages' own terms and invent "
+    "nothing: every statement in the description must be supported by the passages."
 )
+
+# A sentence end: terminal punctuation, any closing quotes or brackets, then a
+# space or the end of the text (whitespace is collapsed before a cut).
+_SENTENCE_END = re.compile(r"[.!?\u2026][\"'\u201d\u2019)\]]*(?= |$)")
 
 
 @dataclass(frozen=True)
@@ -62,7 +78,7 @@ class TopicLabel:
 
     Attributes:
         label (str): The label.
-        description (str): A one-sentence description, empty for a fallback.
+        description (str): A summary of four to five sentences, empty for a fallback.
         written (bool): Whether the model wrote it, as opposed to the keyword fallback.
     """
 
@@ -144,6 +160,29 @@ def _load_object(text: str) -> object:
     return None
 
 
+def cut_description(text: str, limit: int = DESCRIPTION_CHARS) -> str:
+    """Bound a description without ending it mid-sentence.
+
+    Args:
+        text (str): The description, whitespace already collapsed.
+        limit (int): Most characters kept.
+
+    Returns:
+        str: The text when it fits; otherwise everything up to the last sentence
+            end within the limit, or, when that would keep less than a third of it,
+            the words that fit followed by an ellipsis.
+    """
+    if len(text) <= limit:
+        return text
+    ends = [match.end() for match in _SENTENCE_END.finditer(text) if match.end() <= limit]
+    if ends and ends[-1] >= limit // 3:
+        return text[: ends[-1]]
+    head = text[: limit - 1]
+    if text[limit - 1] != " " and " " in head:
+        head = head.rsplit(" ", 1)[0]
+    return head.rstrip(" ,;:-\u2013\u2014") + "\u2026"
+
+
 def parse_label(raw: str) -> tuple[str, str] | None:
     """Read a label and description out of a model reply.
 
@@ -164,7 +203,7 @@ def parse_label(raw: str) -> tuple[str, str] | None:
     label, description = " ".join(label.split()), " ".join(description.split())
     if not label or not description:
         return None
-    return label[:LABEL_CHARS], description[:DESCRIPTION_CHARS]
+    return label[:LABEL_CHARS], cut_description(description)
 
 
 class TopicLabeller:

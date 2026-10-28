@@ -319,6 +319,15 @@ def test_the_topic_label_prompt_forbids_naming_the_source_in_both_locales() -> N
     assert "nie den Titel oder die Urheberschaft des Werks, Dokuments oder der Sammlung" in _prompt("topic_label", "de")
 
 
+def test_the_topic_label_prompt_asks_for_a_summary_of_four_to_five_sentences_in_both_locales() -> None:
+    """Each topic's description is a summary of four to five sentences, not a one-liner."""
+    assert "four to five sentences" in _prompt("topic_label", "en")
+    assert "vier bis fünf Sätzen" in _prompt("topic_label", "de")
+    for code in ("en", "de"):
+        assert "one sentence" not in _prompt("topic_label", code)
+        assert "ein Satz" not in _prompt("topic_label", code)
+
+
 def _system_prompt(code: str, target: str, keyword_fields: Sequence[str] | None = None, *, topics: bool = False) -> str:
     """Render the system prompt of a turn with no history: the target's guide and the assessment rule filled in.
 

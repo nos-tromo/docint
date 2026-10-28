@@ -1,4 +1,5 @@
 import type { HateSpeechRow, NerSourceRow, ReportItemInput, Source } from '@/api/types'
+import type { TopicsOverview } from '@/api/topics'
 import type { TranslationPayload } from '@/hooks/useTranslatable'
 
 /**
@@ -122,6 +123,41 @@ export function summarySnapshot(params: { collection: string; text: string }): R
     artifact_type: 'summary',
     dedupe_key: `summary:${params.collection}`,
     snapshot: { collection: params.collection, text: params.text }
+  }
+}
+
+/** Keywords a topic carries into a report: the ones its row shows. */
+const REPORT_TOPIC_KEYWORDS = 5
+
+/**
+ * The active run's topics as one report item: every topic's label, counts,
+ * leading keywords and summary, largest first, as the Topics tab lists them.
+ * One per report like the summary, so a rebuilt run is added again by
+ * removing the old item first.
+ *
+ * @param params.collection - The logical collection the run belongs to.
+ * @param params.overview - The run as `GET /collections/{name}/topics` returned it.
+ * @returns The report item.
+ */
+export function topicsSnapshot(params: { collection: string; overview: TopicsOverview }): ReportItemInput {
+  const { collection, overview } = params
+  return {
+    artifact_type: 'topics',
+    dedupe_key: `topics:${collection}`,
+    snapshot: {
+      collection,
+      run_id: overview.run_id,
+      run_updated_at: overview.updated_at,
+      coverage: { total: overview.coverage.total, assigned: overview.coverage.assigned },
+      topics: overview.topics.map((topic) => ({
+        id: topic.id,
+        label: topic.label,
+        keywords: topic.keywords.slice(0, REPORT_TOPIC_KEYWORDS).map(([word]) => word),
+        size: topic.size,
+        share: topic.share,
+        description: topic.description
+      }))
+    }
   }
 }
 

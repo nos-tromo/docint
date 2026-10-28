@@ -1,28 +1,19 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { Banner, Button, DownloadButton, NewButton, PlayButton, RefreshButton } from '@infra/ui'
 import { topicValue, type TopicSummary, type TopicsAction } from '@/api/topics'
 import { describeError } from '@/api/errorMessage'
 import { useActiveCollection } from '@/hooks/useActiveCollection'
 import { useStartTopics, useTopicsJob, useTopicsOverview } from '@/hooks/useTopics'
 import { downloadCsv, toCsv } from '@/lib/csv'
+import { topicsSnapshot } from '@/lib/reportSnapshots'
+import { topicsStageText } from '@/lib/topicsStage'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
+import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { TopicRow } from './TopicRow'
 
 type AskInChat = (topic: TopicSummary, runId: string) => void
-
-/** Copy for each stage a topics job reports; a stage the SPA does not know reads as `stage_other`. */
-const STAGE_KEYS = new Map<string, keyof Strings>([
-  ['starting', 'topics.stage_starting'],
-  ['waiting', 'topics.stage_waiting'],
-  ['scanning', 'topics.stage_scanning'],
-  ['sampling', 'topics.stage_sampling'],
-  ['fitting', 'topics.stage_fitting'],
-  ['labelling', 'topics.stage_labelling'],
-  ['assigning', 'topics.stage_assigning'],
-  ['aligning', 'topics.stage_aligning']
-])
 
 /** Copy for each warning code a topics job can carry; the frame's own message is never shown. */
 const WARNING_KEYS = new Map<string, keyof Strings>([
@@ -124,19 +115,27 @@ const TopicList = memo(function TopicList({
   )
 })
 
+interface TopicsPanelProps {
+  onAsk: AskInChat
+  /** The active report's dedupe keys; the report action shows only once they are known. */
+  reportDedupeKeys?: Set<string>
+}
+
 /**
  * The Analysis → Topics tab: the active run's coverage, its topics, and the
- * actions that build, extend and align it.
+ * actions that build, extend and align it, report it and download it.
  *
  * Keyed by the active collection, so a start, an open row or a run's outcome
  * never carries over to another collection.
  */
-export function TopicsPanel({ onAsk }: { onAsk: AskInChat }) {
+export function TopicsPanel({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
   const { collection, owner } = useActiveCollection()
-  return <TopicsPanelBody key={JSON.stringify([collection, owner])} onAsk={onAsk} />
+  return (
+    <TopicsPanelBody key={JSON.stringify([collection, owner])} onAsk={onAsk} reportDedupeKeys={reportDedupeKeys} />
+  )
 }
 
-function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
+function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
   const t = useT()
   const { collection } = useActiveCollection()
   const overview = useTopicsOverview()
@@ -161,14 +160,22 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
   const failed = current && job.error !== null
   const warningTexts = current ? [...new Set(job.warnings.map((w) => warningText(t, w)))] : []
 
+  // One item for the whole run — every topic's label and summary — the way the
+  // Summary tab adds its summary. Built once per read of the run, not per
+  // progress frame.
+  const runData = overview.data
+  const reportItem = useMemo(
+    () => (collection && runData && runData.topics.length > 0 ? topicsSnapshot({ collection, overview: runData }) : null),
+    [collection, runData]
+  )
+  const inReport = reportItem !== null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
+
   const progress = job.running
     ? { stage: job.stage ?? 'starting', done: job.done, total: job.total }
     : awaiting
       ? { stage: 'starting', done: 0, total: 0 }
       : null
-  const stageText = progress
-    ? t(STAGE_KEYS.get(progress.stage) ?? 'topics.stage_other', { done: progress.done, total: progress.total })
-    : null
+  const stageText = progress ? topicsStageText(t, progress.stage, progress.done, progress.total) : null
 
   if (!collection) {
     return <p className="text-sm text-muted-foreground">{t('topics.select_collection')}</p>
@@ -226,6 +233,7 @@ function TopicsPanelBody({ onAsk }: { onAsk: AskInChat }) {
               disabled={busy || coverage.pending === 0}
               onClick={() => start.mutate('align')}
             />
+            {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
             <DownloadButton label={t('topics.download_csv')} onClick={download} />
           </div>
         </div>

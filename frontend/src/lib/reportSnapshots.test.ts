@@ -6,9 +6,11 @@ import {
   hasImageParts,
   hateSpeechSnapshot,
   summarySnapshot,
+  topicsSnapshot,
   translatableTextOf
 } from './reportSnapshots'
 import type { HateSpeechRow, NerSourceRow } from '@/api/types'
+import type { TopicsOverview } from '@/api/topics'
 
 describe('reportSnapshots', () => {
   it('chatAnswerSnapshot builds a type-prefixed dedupe key and freezes sources', () => {
@@ -57,6 +59,59 @@ describe('reportSnapshots', () => {
     expect(input.artifact_type).toBe('summary')
     expect(input.dedupe_key).toBe('summary:docs')
     expect(input.snapshot.text).toBe('overview')
+  })
+
+  it('topicsSnapshot freezes the whole run as one item keyed by collection', () => {
+    const overview: TopicsOverview = {
+      run_id: 'run-1',
+      created_at: '2026-01-01T00:00:00+00:00',
+      updated_at: '2026-01-02T00:00:00+00:00',
+      embed_model: 'embed-small',
+      embed_model_changed: false,
+      coverage: { total: 50, assigned: 40, unassigned: 10, pending: 2 },
+      topics: [
+        {
+          id: 1,
+          label: 'Hives and honey',
+          description: 'Keepers tend hives. Honey is harvested late in summer.',
+          keywords: [
+            ['hive', 0.5],
+            ['honey', 0.4],
+            ['wax', 0.3],
+            ['queen', 0.2],
+            ['swarm', 0.1],
+            ['smoke', 0.05]
+          ],
+          size: 40,
+          share: 0.8,
+          origin: 'build',
+          added_at: '2026-01-01T00:00:00+00:00',
+          first_seen: null,
+          last_seen: null
+        }
+      ]
+    }
+
+    const input = topicsSnapshot({ collection: 'docs', overview })
+
+    expect(input.artifact_type).toBe('topics')
+    expect(input.dedupe_key).toBe('topics:docs')
+    expect(input.snapshot).toEqual({
+      collection: 'docs',
+      run_id: 'run-1',
+      run_updated_at: '2026-01-02T00:00:00+00:00',
+      coverage: { total: 50, assigned: 40 },
+      topics: [
+        {
+          id: 1,
+          label: 'Hives and honey',
+          keywords: ['hive', 'honey', 'wax', 'queen', 'swarm'],
+          size: 40,
+          share: 0.8,
+          description: 'Keepers tend hives. Honey is harvested late in summer.'
+        }
+      ]
+    })
   })
 
   it('the same chunk gets distinct dedupe keys across artifact types', () => {

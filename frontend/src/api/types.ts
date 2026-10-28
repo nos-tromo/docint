@@ -540,7 +540,7 @@ export interface HateSpeechRow {
 }
 
 // --- Report builder ---
-export type ArtifactType = 'chat_answer' | 'entity_finding' | 'hate_speech_finding' | 'summary'
+export type ArtifactType = 'chat_answer' | 'entity_finding' | 'hate_speech_finding' | 'summary' | 'topics'
 
 export type ReportExportFormat = 'md' | 'html' | 'pdf' | 'json' | 'zip'
 

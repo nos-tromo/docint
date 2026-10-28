@@ -14,6 +14,7 @@ from pdf_layout import (
     contents_entries,
     count_min_content_splits,
     hyphenated_text,
+    line_right_gaps,
     pages_showing_a_finding_without_its_band,
     rows_alone_at_page_foot,
     rows_split_across_pages,
@@ -1251,8 +1252,8 @@ def test_image_finding_renders_its_parts_as_labelled_rows(monkeypatch: pytest.Mo
 
     htm = R.render_html(report)
     printed = f'<td class="f-key">Text in the image</td><td class="f-text">{_PRINTED}</td>'
-    described = f'<td class="f-key">Image description</td><td class="f-val">{_DESCRIPTION}</td>'
-    tagged = '<td class="f-key">Tags</td><td class="f-val">poster, crowd</td>'
+    described = f'<td class="f-key">Image description</td><td class="f-val f-prose">{_DESCRIPTION}</td>'
+    tagged = '<td class="f-key">Tags</td><td class="f-val f-prose">poster, crowd</td>'
     assert htm.index(printed) < htm.index(described) < htm.index(tagged)
     assert '<td colspan="2" class="f-text">' not in htm
 
@@ -1273,7 +1274,9 @@ def test_image_finding_translation_sits_under_the_printed_words(monkeypatch: pyt
     )
 
     htm = R.render_html(report)
-    translated = '<td class="f-key">Machine translation (→ English)</td><td class="f-val">TRANSLATED SLOGAN</td>'
+    translated = (
+        '<td class="f-key">Machine translation (→ English)</td><td class="f-val f-prose">TRANSLATED SLOGAN</td>'
+    )
     assert htm.index("Text in the image") < htm.index(translated) < htm.index("Image description")
     assert htm.count("TRANSLATED SLOGAN") == 1
 
@@ -1419,6 +1422,116 @@ def test_pdf_never_hyphenates_a_label_that_fits(monkeypatch: pytest.MonkeyPatch)
     document = html_cls(string=R.render_html(report)).render()
 
     assert hyphenated_text(document, "f-key") == []
+
+
+_PARAGRAPH = (
+    "Harbour traffic grew through the spring as new berths opened along the eastern quay, and the port "
+    "authority published weekly counts of arrivals, departures and the time each ship waited at anchor. "
+    "Crews reported longer waits at weekends, while the pilots asked for a second tug to cover the night "
+    "shift. The notes end with a list of the repairs still planned before the autumn storms."
+)
+
+
+def _running_text_report() -> dict[str, Any]:
+    """A report whose summary, note, topic summary and chat answer each run to several lines."""
+    topics = {
+        "collection": "c",
+        "run_id": "r1",
+        "run_updated_at": "2026-10-28T09:00:00+00:00",
+        "coverage": {"total": 10, "assigned": 8},
+        "topics": [
+            {"id": 0, "label": "Harbour", "keywords": ["ship"], "size": 8, "share": 0.8, "description": _PARAGRAPH}
+        ],
+    }
+    answer = f"{_PARAGRAPH}\n\n* {_PARAGRAPH}"
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "summary",
+                "note": _PARAGRAPH,
+                "snapshot": {"collection": "c", "text": _PARAGRAPH},
+            },
+            {"id": 2, "artifact_type": "topics", "note": None, "snapshot": topics},
+            {
+                "id": 3,
+                "artifact_type": "chat_answer",
+                "note": None,
+                "snapshot": {"user_text": "q", "model_response": answer, "sources": []},
+            },
+        ],
+    }
+
+
+def _inner_gaps(document: Any, css_class: str) -> list[float]:
+    """The gaps of every line in ``css_class`` elements but each block's last (see ``line_right_gaps``)."""
+    return [gap for block in line_right_gaps(document, css_class) for gap in block[:-1]]
+
+
+def test_pdf_justifies_summaries_answers_topic_summaries_and_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every line of running text but a paragraph's last reaches the right edge."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    document = html_cls(string=R.render_html(_running_text_report())).render()
+
+    for css_class in ("prose", "topic-summary", "note"):
+        gaps = _inner_gaps(document, css_class)
+        assert gaps, css_class
+        assert max(gaps) < 0.5, css_class
+
+
+def test_pdf_justifies_a_finding_s_text_and_keeps_its_line_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence and translation are justified; a line ending at a break is not stretched; labels stay ragged."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    evidence = f"A short first line.\n{_PARAGRAPH}"
+    report = _long_finding(evidence, translation={"text": _PARAGRAPH, "target_lang": "en", "model": "m"})
+    document = html_cls(string=R.render_html(report)).render()
+
+    (lines,) = line_right_gaps(document, "f-text")
+    assert lines[0] > 100
+    assert max(lines[1:-1]) < 0.5
+    assert max(_inner_gaps(document, "f-val")) < 0.5
+    assert max(_inner_gaps(document, "f-key")) > 1
+    drawn = {word for page in words_drawn(document) for word in page}
+    assert set(evidence.split()) <= drawn
+
+
+_GERMAN_PARAGRAPH = (
+    "Die ehrenamtlichen Zählteams begingen jeden Monat die nördliche Ästuarroute und hielten die Anzahl der "
+    "Watvögel an jedem der zwölf festen Beobachtungspunkte entlang der Uferbefestigung fest. Ihre Aufzeichnungen "
+    "beschreiben Gezeitenwechsel, Witterungsverhältnisse und die Naturschutzfortbildungsveranstaltungen, die neue "
+    "Ehrenamtliche vor ihrem ersten Einsatz besuchten. Mehrere Einträge vergleichen die Zählergebnisse mit "
+    "früheren Jahren und fragen, ob der Rückgang eine tatsächliche Bestandsveränderung widerspiegelt."
+)
+
+
+def test_pdf_hyphenates_machine_written_text_but_never_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A translation splits words in the report's language; the quoted evidence above it keeps every word whole."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    translation = {"text": _GERMAN_PARAGRAPH, "target_lang": "de", "model": "m"}
+    document = html_cls(string=R.render_html(_long_finding(_GERMAN_PARAGRAPH, translation=translation))).render()
+
+    assert hyphenated_text(document, "f-prose") != []
+    assert hyphenated_text(document, "f-text") == []
+
+
+def test_html_export_keeps_its_text_ragged_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Justification is a print rule: the HTML export, read on screen, sets its text as before."""
+    weasyprint_html()
+    from weasyprint import HTML
+
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    running = HTML(string=R.render_html(_running_text_report()), media_type="screen").render()
+    finding = HTML(string=R.render_html(_long_finding(_PARAGRAPH)), media_type="screen").render()
+
+    assert max(_inner_gaps(running, "prose")) > 1
+    assert max(_inner_gaps(finding, "f-text")) > 1
 
 
 # --------------------------------------------------------------------------- #
@@ -1867,3 +1980,141 @@ def test_assessment_label_renders_as_a_rule_and_bold_heading(monkeypatch: pytest
     assert "<strong>Model assessment</strong>" in htm
     assert not re.search(r"<h2[^>]*>\s*The study reports", htm)
     assert "**Model assessment**" in md
+
+
+def _topics_snapshot() -> dict[str, Any]:
+    """A frozen topics item: two topics, one without a summary."""
+    return {
+        "collection": "c",
+        "run_id": "20261028-100000-abcdef",
+        "run_updated_at": "2026-10-28T09:00:00+00:00",
+        "coverage": {"total": 4000, "assigned": 3400},
+        "topics": [
+            {
+                "id": 3,
+                "label": "Harbour <traffic>",
+                "keywords": ["ship", "port", "quay"],
+                "size": 214,
+                "share": 0.25,
+                "description": "Ships come and go. Ports grow. Quays are rebuilt. Crews change. Trade follows.",
+            },
+            {"id": 7, "label": "=Tide tables", "keywords": [], "size": 12, "share": 0.5, "description": ""},
+        ],
+    }
+
+
+def _topics_report(show_toc: bool = False) -> dict[str, Any]:
+    """A report holding a chat answer, a topics item and a summary, added in that order."""
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "show_toc": show_toc,
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "chat_answer",
+                "note": None,
+                "snapshot": {"user_text": "q", "model_response": "a", "sources": []},
+            },
+            {"id": 2, "artifact_type": "topics", "note": "Read T3 first", "snapshot": _topics_snapshot()},
+            {"id": 3, "artifact_type": "summary", "note": None, "snapshot": {"collection": "c", "text": "s"}},
+        ],
+    }
+
+
+def test_topics_render_right_after_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The topics section follows the summary and precedes the findings, whatever order they were added in."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_topics_report())
+    summaries = md.index(f"## {ui_string('report_section_summaries')}")
+    topics = md.index(f"## {ui_string('report_section_topics')}")
+    chat = md.index(f"## {ui_string('report_section_chat')}")
+    assert summaries < topics < chat
+
+    htm = R.render_html(_topics_report(show_toc=True))
+    assert htm.index('id="sec-summaries"') < htm.index('id="sec-topics"') < htm.index('id="sec-chat"')
+    assert 'href="#sec-topics"' in htm
+
+
+def test_markdown_topics_list_each_topic_with_its_counts_keywords_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every topic gets its heading, a counts line and its summary; one without a summary gets none."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_single_item_report("topics", _topics_snapshot()))
+    assert "Topics: 2  ·  Chunks in a topic: 3400 / 4000  ·  As of: 2026-10-28" in md
+    assert "### T3 · Harbour <traffic>" in md
+    assert "*Chunks: 214  ·  Share: 25.0%  ·  Keywords: ship, port, quay*" in md
+    assert "Ships come and go. Ports grow. Quays are rebuilt. Crews change. Trade follows." in md
+    tide = md.index("### T7 · =Tide tables")
+    assert md[tide:].split("\n\n")[1] == "*Chunks: 12  ·  Share: 50.0%*"
+
+
+def test_html_topics_escape_every_stored_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Labels and summaries are client-sent text: escaped, and a summary is prose, not Markdown."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot = _topics_snapshot()
+    snapshot["topics"][0]["description"] = "**not bold** <script>x</script>"
+    htm = R.render_html(_single_item_report("topics", snapshot))
+    assert "Harbour &lt;traffic&gt;" in htm and "Harbour <traffic>" not in htm
+    assert "**not bold** &lt;script&gt;x&lt;/script&gt;" in htm and "<script>" not in htm
+    assert htm.count('class="topic-summary"') == 1
+    assert 'class="item item-prose"' in htm
+
+
+def test_topics_counts_read_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headings, labels and the decimal comma follow the report's language."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    md = R.render_markdown(_single_item_report("topics", _topics_snapshot()))
+    assert "## Themen" in md
+    assert "Themen: 2  ·  Chunks in einem Thema: 3400 / 4000  ·  Stand: 28.10.2026" in md
+    assert "*Chunks: 214  ·  Anteil: 25,0 %  ·  Schlüsselwörter: ship, port, quay*" in md
+
+
+def test_a_malformed_topics_snapshot_renders_what_it_can(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshot JSON is not trusted: wrong types are skipped instead of failing the export."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot = {
+        "coverage": "all",
+        "topics": [
+            "junk",
+            {"id": "x", "label": None, "keywords": "ship", "size": True, "share": "half", "description": 3},
+            {"id": 2.0, "label": "Kept", "keywords": ["a", 4, " "], "size": float("nan"), "share": 0.1},
+        ],
+    }
+    report = _single_item_report("topics", snapshot)
+    md = R.render_markdown(report)
+    assert "Topics: 2" in md
+    assert "### T2 · Kept" in md and "*Share: 10.0%  ·  Keywords: a*" in md
+    R.render_html(report)
+    rows = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(report))).read("topics.csv").decode("utf-8-sig")
+    assert len(rows.strip().splitlines()) == 3
+
+
+def test_csv_bundle_writes_one_topics_row_per_topic_with_formula_cells_guarded() -> None:
+    """``topics.csv`` carries every topic, its share as stored, and no cell a spreadsheet would evaluate."""
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_topics_report())))
+    assert {"topics.csv", "summaries.csv", "chat-answers.csv"} == set(zf.namelist())
+    lines = zf.read("topics.csv").decode("utf-8-sig").splitlines()
+    assert lines[0] == ",".join(R.TOPICS_COLUMNS)
+    assert lines[1].startswith("c,20261028-100000-abcdef,3,Harbour <traffic>,ship; port; quay,214,0.25,Ships come")
+    assert lines[2] == "c,20261028-100000-abcdef,7,'=Tide tables,,12,0.5,"
+
+
+def test_pdf_draws_every_topic_and_its_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The PDF lays out each topic's title, counts and summary, all within the page."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot = _topics_snapshot()
+    sentence = "Keepers describe how colonies change across the year and what each season asks of them."
+    snapshot["topics"] = [
+        {"id": i, "label": f"Topic{i}", "keywords": ["hive"], "size": 10, "share": 0.01, "description": sentence * 5}
+        for i in range(40)
+    ]
+    document = html_cls(string=R.render_html(_single_item_report("topics", snapshot))).render()
+    drawn = {word for words in words_drawn(document) for word in words}
+    assert {f"Topic{i}" for i in range(40)} <= drawn
+    assert len(document.pages) > 1
+    assert text_beyond_the_page(document) == []

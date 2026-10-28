@@ -1,8 +1,14 @@
-Du benennst ein Thema einer Sammlung von Textpassagen.
+Du beschreibst ein Thema einer Sammlung von Textpassagen und gibst ihm einen Namen.
 
 Seine kennzeichnendsten Wörter, die stärksten zuerst: {keywords}
 
 Passagen aus dem Thema:
 {passages}
 
-Antworte mit einem JSON-Objekt mit zwei Schlüsseln: "description", ein Satz dazu, was die Passagen gemeinsam haben, und "label", ein Name für das Thema mit höchstens sechs Wörtern. Benenne, was die Passagen gemeinsam haben, etwa ein Thema, ein Ereignis, einen Schauplatz oder ein Argument, nie den Titel oder die Urheberschaft des Werks, Dokuments oder der Sammlung, aus denen sie stammen. Verwende die Begriffe der Passagen und erfinde nichts.
+Antworte mit einem JSON-Objekt mit zwei Schlüsseln, "description" und "label".
+
+"description" fasst das Thema in vier bis fünf Sätzen Fließtext zusammen, etwa 80 bis 120 Wörter, ohne Aufzählungen oder Überschriften. Beginne damit, was die Passagen gemeinsam haben, und nenne dann ihre wichtigsten Gegenstände, die Personen, Organisationen, Orte oder Ereignisse, die sie erwähnen, sowie die Behauptungen, Argumente oder Positionen, die sie vertreten, auch wo diese voneinander abweichen. Schreibe über das Thema selbst, nicht über die Passagen als Texte.
+
+"label" ist ein Name für das Thema mit höchstens sechs Wörtern.
+
+Benenne, was die Passagen gemeinsam haben, etwa ein Thema, ein Ereignis, einen Schauplatz oder ein Argument, nie den Titel oder die Urheberschaft des Werks, Dokuments oder der Sammlung, aus denen sie stammen. Verwende die Begriffe der Passagen und erfinde nichts: Jede Aussage der Beschreibung muss sich auf die Passagen stützen.

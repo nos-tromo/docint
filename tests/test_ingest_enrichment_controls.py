@@ -129,12 +129,25 @@ def test_ingest_defaults_endpoint_reflects_env(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setenv("NER_ENABLED", "true")
     monkeypatch.setenv("ENABLE_HATE_SPEECH_DETECTION", "false")
     monkeypatch.setenv("SUMMARY_ON_INGEST", "false")
+    monkeypatch.setenv("TOPICS_ON_INGEST", "false")
     resp = client.get("/config/ingest-defaults")
     assert resp.status_code == 200
-    assert resp.json() == {"ner": True, "hate_speech": False, "summary": False}
+    assert resp.json() == {"ner": True, "hate_speech": False, "summary": False, "topics": False}
 
     monkeypatch.setenv("SUMMARY_ON_INGEST", "true")
     assert client.get("/config/ingest-defaults").json()["summary"] is True
+
+    monkeypatch.setenv("TOPICS_ON_INGEST", "true")
+    assert client.get("/config/ingest-defaults").json()["topics"] is True
+
+
+def test_ingest_defaults_report_topics_off_while_topics_are_disabled(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Topics switched off for the deployment never default a run's Topics option on."""
+    monkeypatch.setenv("TOPICS_ON_INGEST", "true")
+    monkeypatch.setenv("TOPICS_ENABLED", "false")
+    assert client.get("/config/ingest-defaults").json()["topics"] is False
 
 
 def test_ingest_finalize_forwards_flags(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
@@ -417,3 +430,28 @@ def test_ingest_finalize_leaves_summary_unspecified_by_default(
 
     assert _stage_then_finalize(client, "sum-default-col")["status"] == "completed"
     assert recorded == [None]
+
+
+@pytest.mark.parametrize(("extra", "expected"), [({"topics": True}, True), ({"topics": False}, False), ({}, None)])
+def test_ingest_finalize_forwards_the_topics_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    tmp_path: Path,
+    extra: dict[str, Any],
+    expected: bool | None,
+) -> None:
+    """POST /ingest/finalize threads the Topics option onto the job; an absent one stays ``None``.
+
+    ``None`` is what keeps ``TOPICS_ON_INGEST`` in charge.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    recorded: list[bool | None] = []
+    monkeypatch.setattr(
+        api_module,
+        "_run_ingest_job",
+        lambda state, push: (recorded.append(state.topics), {"empty": False, "resolution": None})[1],
+    )
+
+    assert _stage_then_finalize(client, f"topics-flag-{expected}", extra)["status"] == "completed"
+    assert recorded == [expected]

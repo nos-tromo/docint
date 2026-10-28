@@ -146,6 +146,39 @@ def cell_line_counts(document: Any, cell_class: str) -> list[int]:
     return [len(_of_kind(cell, "LineBox")) for page in document.pages for cell in _cells(page, cell_class)]
 
 
+def line_right_gaps(document: Any, css_class: str) -> list[list[float]]:
+    """Return how far each laid-out line stops short of the right edge of the block it sits in.
+
+    Looks inside every element carrying ``css_class`` (a table cell or a block)
+    and at each block there that lays out lines of its own: the element itself,
+    or its paragraphs and list items. A justified line reaches the edge, so its
+    gap is about 0; the last line of a block, and a line ending at a line break,
+    keep theirs.
+
+    Args:
+        document (Any): A rendered ``weasyprint.Document``.
+        css_class (str): The class the elements carry.
+
+    Returns:
+        list[list[float]]: One list per block, its lines' gaps in points, in
+        document order; a block split across pages is one list per page.
+    """
+    from weasyprint.formatting_structure import boxes
+
+    gaps: list[list[float]] = []
+    for page in document.pages:
+        for element in page._page_box.descendants():
+            if css_class not in _classes(element):
+                continue
+            for block in _of_kind(element, "BlockContainerBox"):
+                right = block.content_box_x() + block.width
+                lines = [child for child in block.children if isinstance(child, boxes.LineBox)]
+                ends = [[box.position_x + box.width for box in _of_kind(line, "TextBox")] for line in lines]
+                if ends := [max(end) for end in ends if end]:
+                    gaps.append([right - end for end in ends])
+    return gaps
+
+
 def content_width_share(document: Any, cell_class: str) -> list[float]:
     """Return each ``cell_class`` cell's width as a share of its page's content width.
 

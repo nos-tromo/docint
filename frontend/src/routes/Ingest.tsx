@@ -97,10 +97,11 @@ export function Ingest() {
   const [seeded, setSeeded] = useState(false)
   useEffect(() => {
     if (seeded || !ingestDefaults) return
-    const { setNer, setHate, setSummary } = useIngestRunStore.getState()
+    const { setNer, setHate, setSummary, setTopics } = useIngestRunStore.getState()
     setNer(ingestDefaults.ner)
     setHate(ingestDefaults.hate_speech)
     setSummary(ingestDefaults.summary)
+    if (typeof ingestDefaults.topics === 'boolean') setTopics(ingestDefaults.topics)
     setSeeded(true)
   }, [seeded, ingestDefaults])
 
@@ -215,7 +216,8 @@ export function Ingest() {
               hunted for in checkbox marks. `flex-1` shares the span evenly;
               the minimum width makes them wrap instead of crush on a narrow
               screen or in a long-worded locale. The fieldset carries the one
-              `disabled` for all three. */}
+              `disabled` for all of them. Topics appears only while the
+              deployment has them switched on. */}
           <fieldset className="flex flex-wrap gap-2" disabled={busy}>
             <ToggleButton
               className="min-w-32 flex-1"
@@ -238,6 +240,15 @@ export function Ingest() {
             >
               {t('ingest.opt_summary')}
             </ToggleButton>
+            {config?.topics_enabled && (
+              <ToggleButton
+                className="min-w-32 flex-1"
+                pressed={run.topics}
+                onClick={() => run.setTopics(!run.topics)}
+              >
+                {t('ingest.opt_topics')}
+              </ToggleButton>
+            )}
           </fieldset>
 
           {/* Full width: it is the card's one action, and everything above it —

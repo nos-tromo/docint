@@ -43,6 +43,10 @@ _TEXTS_BYTES_SLACK = 65_536
 _TEXTS_MAX_BYTES = 536_870_912
 _DETAIL_MAX_CHARS = 300
 _UNREACHABLE_REMEDY = "check TOPICS_API_BASE (and TOPICS_TIMEOUT for a timeout)"
+#: Most seconds a fit waits to connect. ``TOPICS_TIMEOUT`` bounds the whole
+#: fit, which can take an hour; an address that drops packets would otherwise
+#: hold every ingest's topics stage for as long before it fails.
+CONNECT_TIMEOUT_S = 30.0
 
 
 def texts_limit(n: int) -> int:
@@ -466,7 +470,8 @@ class TopicsClient:
         }
         headers = {"Authorization": f"Bearer {self._config.api_key}"} if self._config.api_key else {}
         try:
-            with httpx.Client(timeout=self._config.timeout, headers=headers, transport=self._transport) as client:
+            timeout = httpx.Timeout(self._config.timeout, connect=min(self._config.timeout, CONNECT_TIMEOUT_S))
+            with httpx.Client(timeout=timeout, headers=headers, transport=self._transport) as client:
                 response = client.post(self.fit_url, files=files)
         except httpx.HTTPError as exc:
             raise TopicsUnreachable(

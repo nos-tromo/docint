@@ -14,6 +14,11 @@ export interface CreateIngestJobPayload {
    */
   summary?: boolean
   /**
+   * Whether the run builds the collection's topics, or extends them with its
+   * chunks. Omitted means the deployment's own `TOPICS_ON_INGEST` decides.
+   */
+  topics?: boolean
+  /**
    * How long this run spent uploading, in ms. The run starts when the user
    * hits ingest, but the job only exists from here on, so the client reports
    * the leg the server never saw and the backend folds it into the one

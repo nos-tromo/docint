@@ -8,7 +8,8 @@ import {
   useTopicDocuments,
   useTopicEvidence,
   useTopicsJob,
-  useTopicsOverview
+  useTopicsOverview,
+  useTopicsRefreshOnJobEnd
 } from './useTopics'
 import { useDocumentsPages } from './useDocuments'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
@@ -326,6 +327,40 @@ describe('useTopicsJob', () => {
     expect(spy).toHaveBeenCalledTimes(2)
     expect(spy).toHaveBeenCalledWith({ queryKey: ['topics', SCOPE] })
     expect(spy).toHaveBeenCalledWith({ queryKey: ['documents-pages', SCOPE] })
+  })
+
+  it('refreshes the topics once an ingest on the collection ends, since it builds or extends them', () => {
+    const spy = vi.spyOn(client, 'invalidateQueries')
+    deliver('ing-1', 'ingestion_started', { collection: 'docs', total_files: 2 })
+    renderHook(() => useTopicsJob(), { wrapper })
+
+    deliver('ing-1', 'ingestion_progress', { message: 'Fitting topics: 5 s' })
+    expect(spy).not.toHaveBeenCalled()
+    deliver('ing-1', 'ingestion_complete', { collection: 'docs' })
+
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['topics', SCOPE] })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['documents-pages', SCOPE] })
+  })
+
+  it('leaves the topics alone when an ingest on another collection ends', () => {
+    const spy = vi.spyOn(client, 'invalidateQueries')
+    deliver('ing-1', 'ingestion_started', { collection: 'other' })
+    renderHook(() => useTopicsJob(), { wrapper })
+
+    deliver('ing-1', 'ingestion_complete', { collection: 'other' })
+
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the screens that only read the topics when an ingest ends too', () => {
+    const spy = vi.spyOn(client, 'invalidateQueries')
+    deliver('ing-1', 'ingestion_started', { collection: 'docs' })
+    renderHook(() => useTopicsRefreshOnJobEnd(), { wrapper })
+
+    deliver('ing-1', 'ingestion_cancelled', { collection: 'docs' })
+
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['topics', SCOPE] })
   })
 
   it('refetches once for a job that ended while no caller was mounted', () => {

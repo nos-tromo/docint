@@ -321,7 +321,7 @@ export function Analysis() {
         />
       )}
       {activeTab === 'summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
-      {activeTab === 'topics' && <TopicsPanel onAsk={askInChat} />}
+      {activeTab === 'topics' && <TopicsPanel onAsk={askInChat} reportDedupeKeys={reportDedupeKeys} />}
     </div>
   )
 }

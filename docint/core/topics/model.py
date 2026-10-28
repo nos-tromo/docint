@@ -24,7 +24,7 @@ class TopicInfo:
     Attributes:
         id: Topic id, unique within a run.
         label: Short display label.
-        description: One-line description.
+        description: Summary of four to five sentences; empty when no label was written.
         keywords: ``(word, score)`` pairs.
         origin: Whether the build or a later discovery made it.
         added_at: ISO timestamp the topic was added.

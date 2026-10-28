@@ -15,14 +15,22 @@ from docint.utils.env_cfg import (
 )
 
 
-def test_topics_defaults() -> None:
+def test_topics_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every knob has its documented default.
+
+    The suite keeps ``TOPICS_ON_INGEST`` off (``tests/conftest.py``), so it is
+    cleared here to read the real default.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
 
     Returns:
         None.
     """
+    monkeypatch.delenv("TOPICS_ON_INGEST", raising=False)
     assert load_topics_env() == TopicsConfig(
         enabled=True,
+        on_ingest=True,
         align_on_ingest=True,
         labels=True,
         fit_max_points=100000,
@@ -49,6 +57,24 @@ def test_topics_bools_follow_the_true_one_yes_rule(monkeypatch: pytest.MonkeyPat
     """
     monkeypatch.setenv("TOPICS_ENABLED", raw)
     assert load_topics_env().enabled is expected
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True), ("YES", True)])
+def test_topics_on_ingest_follows_the_true_one_yes_rule(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    """``TOPICS_ON_INGEST`` reads like every other topics flag.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        raw: The raw variable value.
+        expected: The parsed flag.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setenv("TOPICS_ON_INGEST", raw)
+    assert load_topics_env().on_ingest is expected
 
 
 @pytest.mark.parametrize(

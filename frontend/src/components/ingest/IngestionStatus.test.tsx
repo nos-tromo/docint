@@ -168,27 +168,45 @@ describe('IngestionStatus task bars', () => {
     expect(screen.queryByText('Summarizing collection')).not.toBeInTheDocument()
   })
 
-  it('labels the topics task', () => {
+  function topicsStatus(task: IngestStatus['tasks'][number]): IngestStatus {
+    return {
+      phase: 'processing',
+      totalFiles: 1,
+      filesSaved: 1,
+      indexed: 0,
+      totalChunks: 0,
+      tasks: [task],
+      warnings: []
+    }
+  }
+
+  it('labels the topics task and names its step in catalog words', () => {
     render(
       <LanguageContext value="de">
         <IngestionStatus
-          status={
-            {
-              phase: 'processing',
-              totalFiles: 1,
-              filesSaved: 1,
-              indexed: 0,
-              totalChunks: 0,
-              tasks: [{ key: 'topics', label: 'Aligning topics', current: 30, total: 400 }],
-              warnings: [],
-            } as IngestStatus
-          }
+          status={topicsStatus({ key: 'topics', label: 'Topics', stage: 'aligning', current: 30, total: 400 })}
         />
       </LanguageContext>
     )
-    expect(screen.getByText('Themen werden zugeordnet')).toBeInTheDocument()
-    expect(screen.getByText('30/400')).toBeInTheDocument()
-    expect(screen.queryByText('Aligning topics')).not.toBeInTheDocument()
+    expect(screen.getByText('Themen')).toBeInTheDocument()
+    expect(screen.getByText('Ausstehende Chunks werden zugeordnet: 30 von 400')).toBeInTheDocument()
+    expect(screen.queryByText('Topics')).not.toBeInTheDocument()
+    expect(screen.queryByText('30/400')).not.toBeInTheDocument()
+  })
+
+  it('pulses the topics bar through a step that cannot count, and fills it once finished', () => {
+    const { container, rerender } = render(
+      <IngestionStatus status={topicsStatus({ key: 'topics', label: 'Topics', stage: 'fitting', current: 35, total: 0 })} />
+    )
+    expect(screen.getByText('Fitting topics: 35 s')).toBeInTheDocument()
+    expect(container.querySelector('[data-indeterminate]')).not.toBeNull()
+
+    rerender(
+      <IngestionStatus status={topicsStatus({ key: 'topics', label: 'Topics', stage: 'finished', current: 0, total: 0 })} />
+    )
+    expect(screen.getByText('Done')).toBeInTheDocument()
+    expect(container.querySelector('[data-indeterminate]')).toBeNull()
+    expect(container.querySelector('[style="width: 100%;"]')).not.toBeNull()
   })
 })
 

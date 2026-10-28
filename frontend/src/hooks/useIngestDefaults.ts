@@ -5,6 +5,8 @@ export interface IngestDefaults {
   ner: boolean
   hate_speech: boolean
   summary: boolean
+  /** `TOPICS_ON_INGEST`, off whenever topics are; absent from an API older than the option. */
+  topics?: boolean
 }
 
 /** Deployment-default enrichment toggles for seeding the ingest toggles. */

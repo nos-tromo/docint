@@ -49,10 +49,12 @@ import { markdownPreview } from '@/lib/markdownPreview'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
-// Summaries lead the document, matching the server renderer's SECTION_ORDER.
+// The summary and the topics lead the document, matching the server
+// renderer's SECTION_ORDER.
 function sections(t: Translate): Array<{ type: ArtifactType; label: string }> {
   return [
     { type: 'summary', label: t('report.section_summaries') },
+    { type: 'topics', label: t('report.section_topics') },
     { type: 'chat_answer', label: t('report.section_chat_answers') },
     { type: 'entity_finding', label: t('report.section_entity_findings') },
     { type: 'hate_speech_finding', label: t('report.section_hate_findings') }
@@ -203,6 +205,20 @@ function truncate(text: string, n = 240): string {
   return t.length > n ? `${t.slice(0, n).trimEnd()} …` : t
 }
 
+/**
+ * The topics a topics item froze, as `T<id> <label>` in their stored order.
+ * Stored JSON, so only entries carrying a string label are trusted.
+ */
+function topicNames(snapshot: Record<string, unknown>): string[] {
+  const topics = Array.isArray(snapshot.topics) ? snapshot.topics : []
+  return topics.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const { id, label } = entry as { id?: unknown; label?: unknown }
+    if (typeof label !== 'string' || !label.trim()) return []
+    return [typeof id === 'number' ? `T${id} ${label.trim()}` : label.trim()]
+  })
+}
+
 function itemTitle(item: ReportItem, t: Translate): string {
   const s = item.snapshot
   switch (item.artifact_type) {
@@ -224,6 +240,10 @@ function itemTitle(item: ReportItem, t: Translate): string {
         t('report.default_hate_finding')
       )
     }
+    case 'topics': {
+      const count = Array.isArray(s.topics) ? s.topics.length : 0
+      return t(count === 1 ? 'report.topics_title_one' : 'report.topics_title_other', { count })
+    }
     default:
       return str(s, 'collection') || t('report.default_summary')
   }
@@ -238,6 +258,8 @@ function itemBody(item: ReportItem): string {
       return truncate(str(s, 'chunk_text'))
     case 'hate_speech_finding':
       return truncate(str(s, 'reason') || str(s, 'chunk_text'))
+    case 'topics':
+      return truncate(topicNames(s).join(' · '))
     default:
       return truncate(markdownPreview(str(s, 'text')))
   }
@@ -577,6 +599,9 @@ export function Report() {
                       aria-label={t('report.reference_label')}
                     />
                   </label>
+                </div>
+                {/* A row of their own, so the two options never part across a wrap. */}
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"

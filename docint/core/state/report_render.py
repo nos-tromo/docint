@@ -17,6 +17,7 @@ from __future__ import annotations
 import html
 import io
 import json
+import math
 import re
 import unicodedata
 import zipfile
@@ -42,11 +43,14 @@ ARTIFACT_CHAT = "chat_answer"
 ARTIFACT_ENTITY = "entity_finding"
 ARTIFACT_HATE = "hate_speech_finding"
 ARTIFACT_SUMMARY = "summary"
+ARTIFACT_TOPICS = "topics"
 
-# Render order: Summaries -> Chat -> Entities -> Hate-speech (summaries lead the
-# document — they set the context for the findings that follow).
+# Render order: Summaries -> Topics -> Chat -> Entities -> Hate-speech (the
+# summary and the topics lead the document — they set the context for the
+# findings that follow).
 SECTION_ORDER: tuple[tuple[str, str], ...] = (
     (ARTIFACT_SUMMARY, "report_section_summaries"),
+    (ARTIFACT_TOPICS, "report_section_topics"),
     (ARTIFACT_CHAT, "report_section_chat"),
     (ARTIFACT_ENTITY, "report_section_entities"),
     (ARTIFACT_HATE, "report_section_hate_speech"),
@@ -56,6 +60,7 @@ SECTION_ORDER: tuple[tuple[str, str], ...] = (
 # table-of-contents links (the targets WeasyPrint resolves page numbers against).
 SECTION_ANCHOR: dict[str, str] = {
     ARTIFACT_SUMMARY: "sec-summaries",
+    ARTIFACT_TOPICS: "sec-topics",
     ARTIFACT_CHAT: "sec-chat",
     ARTIFACT_ENTITY: "sec-entities",
     ARTIFACT_HATE: "sec-hate",
@@ -110,6 +115,7 @@ _CHUNK_MAX_CHARS = 1500
 # reuse the canonical schemas in ``docint.utils.csv_stream``).
 CHAT_ANSWER_COLUMNS: tuple[str, ...] = ("session_id", "turn_idx", "question", "answer", "sources")
 SUMMARY_COLUMNS: tuple[str, ...] = ("collection", "summary")
+TOPICS_COLUMNS: tuple[str, ...] = ("collection", "run_id", "topic", "label", "keywords", "chunks", "share", "summary")
 COLLECTION_OVERVIEW_COLUMNS: tuple[str, ...] = ("filename", "type", "pages", "rows", "nodes", "hash")
 
 
@@ -749,6 +755,101 @@ def _md_summary(snap: dict[str, Any], note: str | None, collection: str) -> list
     return lines
 
 
+def _topic_entries(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """The topics a topics item froze, in their stored order (largest first).
+
+    Snapshots are stored JSON a client sent, so anything that is not an object
+    is skipped rather than trusted.
+    """
+    topics = snap.get("topics")
+    return [topic for topic in topics if isinstance(topic, dict)] if isinstance(topics, list) else []
+
+
+def _whole(value: Any) -> int | None:
+    """A stored count as an int, or ``None`` when it is not a finite number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if math.isfinite(value) else None
+
+
+def _percent(value: Any) -> str:
+    """A stored share (a fraction from 0 to 1) as a percentage in the report's language, or ``""``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return ""
+    text = f"{value * 100:.1f}".replace(".", ui_string("report_decimal_separator"))
+    return ui_string("report_percent_format").format(value=text)
+
+
+def _one_line(value: Any) -> str:
+    """Stored text on one line, so it cannot break a heading or a table row."""
+    return " ".join(str(value if value is not None else "").split())
+
+
+def _topic_keywords(topic: dict[str, Any]) -> list[str]:
+    """A topic's frozen keywords; only non-blank strings are trusted."""
+    keywords = topic.get("keywords")
+    if not isinstance(keywords, list):
+        return []
+    return [word for word in (_one_line(k) for k in keywords if isinstance(k, str)) if word]
+
+
+def _topics_caption(snap: dict[str, Any]) -> str:
+    """The line over a topics item: how many topics, how much of the collection they hold, and as of when."""
+    parts = [f"{ui_string('report_label_topics')}: {len(_topic_entries(snap))}"]
+    coverage = snap.get("coverage")
+    if isinstance(coverage, dict):
+        assigned, total = _whole(coverage.get("assigned")), _whole(coverage.get("total"))
+        if assigned is not None and total is not None:
+            parts.append(f"{ui_string('report_label_topic_chunks')}: {assigned} / {total}")
+    if snap.get("run_updated_at"):
+        parts.append(f"{ui_string('report_label_as_of')}: {_format_date(snap['run_updated_at'])}")
+    return "  ·  ".join(parts)
+
+
+def _topic_heading(topic: dict[str, Any]) -> str:
+    """A topic's heading: its id and its label (the id alone when it has none)."""
+    topic_id = _whole(topic.get("id"))
+    ref = f"T{topic_id}" if topic_id is not None else ""
+    return " · ".join(part for part in (ref, _one_line(topic.get("label"))) if part)
+
+
+def _topic_meta(topic: dict[str, Any]) -> str:
+    """A topic's chunk count, share and keywords, on one line."""
+    parts = []
+    size = _whole(topic.get("size"))
+    if size is not None:
+        parts.append(f"{ui_string('report_label_chunks')}: {size}")
+    share = _percent(topic.get("share"))
+    if share:
+        parts.append(f"{ui_string('report_label_share')}: {share}")
+    keywords = _topic_keywords(topic)
+    if keywords:
+        parts.append(f"{ui_string('report_label_keywords')}: {', '.join(keywords)}")
+    return "  ·  ".join(parts)
+
+
+def _topic_summary(topic: dict[str, Any]) -> str:
+    """A topic's summary as stored, trimmed; ``""`` when it has none."""
+    description = topic.get("description")
+    return description.strip() if isinstance(description, str) else ""
+
+
+def _md_topics(snap: dict[str, Any], note: str | None) -> list[str]:
+    """Markdown for a topics item: a caption, then each topic's heading, meta line and summary."""
+    lines = [_topics_caption(snap), ""]
+    for topic in _topic_entries(snap):
+        lines += [f"### {_topic_heading(topic)}", ""]
+        meta = _topic_meta(topic)
+        if meta:
+            lines += [f"*{meta}*", ""]
+        summary = _topic_summary(topic)
+        if summary:
+            lines += [summary, ""]
+    if note:
+        lines += [f"*{ui_string('report_label_note')}: {note.strip()}*", ""]
+    return lines
+
+
 def _md_collection_overview(overview: dict[str, Any]) -> list[str]:
     """Markdown for the trailing document-overview section (strip + manifest table)."""
     strip = "  ·  ".join(
@@ -814,6 +915,8 @@ def _md_item(artifact_type: str, snap: dict[str, Any], note: str | None, number:
         return _md_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
         return _md_hate(snap, note, number)
+    if artifact_type == ARTIFACT_TOPICS:
+        return _md_topics(snap, note)
     return _md_summary(snap, note, collection)
 
 
@@ -942,7 +1045,8 @@ h2.section.page-start { break-before: page; margin-top: 0; }
    band carries the number and tags (the finding's title bar), the evidence
    follows at full width (fewer wrapped lines than a squeezed column), and
    every remaining field is a muted label/value row with a slim label column.
-   Verbatim evidence text keeps `pre-wrap` — never reflowed. */
+   Verbatim evidence text keeps its line breaks — never reflowed: `pre-wrap`
+   on screen, `pre-line` in the PDF so it can be justified (see the end). */
 /* Fixed layout: auto layout sizes columns by measuring every cell, and text
    that breaks `anywhere` is measured per character (quadratic per cell). */
 table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; table-layout: fixed; }
@@ -1025,6 +1129,14 @@ table.finding figure.evidence { margin: 0; }
 figure.evidence.lead { display: block; width: auto; }
 figure.evidence.lead img { max-width: 62mm; max-height: 90mm; }
 .empty { color: #888; font-style: italic; }
+/* Topics: a caption, then one block per topic — title, a muted line with its
+   counts and keywords, and its summary. The title and that line move with the
+   summary's first lines rather than ending a page on their own. */
+.topics-caption { color: #555; font-size: 9pt; margin: 0 0 8pt; }
+.topic + .topic { margin-top: 9pt; }
+.topic .item-title, .topic-meta { break-after: avoid; }
+.topic-meta { color: #666; font-size: 8.5pt; margin: 0 0 3pt; }
+.topic-summary { margin: 0; orphans: 2; widows: 2; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
 /* Dense on purpose: the manifest lists every document of the collection, often
    hundreds of single-line rows. */
@@ -1036,6 +1148,24 @@ table.manifest th { font-weight: 600; color: #444; border-bottom: 1px solid #ccc
 table.manifest td.num, table.manifest th.num { text-align: right; }
 table.manifest td.hash { font-family: 'DejaVu Sans Mono', 'Liberation Mono', monospace; color: #666; }
 table.manifest tr { break-inside: avoid; }
+/* The PDF sets running text justified: summaries, chat answers, topic
+   summaries, notes, and a finding's evidence, translation, posting text and
+   details. Headings, labels, captions, source lists and the document overview
+   stay ragged — justified, they would only stretch short lines and narrow
+   columns. WeasyPrint justifies only text whose spaces collapse, so the finding
+   cells trade `pre-wrap` for `pre-line` here: every line break stays, a line
+   ending at one is never stretched, and a run of spaces prints as one. The
+   HTML export keeps both as they are on screen.
+   Machine-written text and notes hyphenate in the report's language, which
+   narrows the gaps justification opens. Evidence never does: a hyphen added to
+   quoted text is one the source never had, and its words may not be in the
+   report's language. Neither do names, links or the posting's own text. */
+@media print {
+  .prose p, .prose li, .topic-summary, .item .note,
+  table.finding td.f-text, table.finding td.f-val, .m-text, .m-val { text-align: justify; }
+  table.finding td.f-text, table.finding td.f-val, .m-text, .m-val { white-space: pre-line; }
+  .prose p, .prose li, .topic-summary, .item .note, table.finding td.f-prose, .m-val { hyphens: auto; }
+}
 """
 
 
@@ -1237,7 +1367,7 @@ _VALUE_LINE = (72, 12.0)
 _KEEP_MAX_PT = 150.0
 
 
-def _html_finding_row(label: str, value_html: str, *, keep: bool) -> str:
+def _html_finding_row(label: str, value_html: str, *, keep: bool, prose: bool = False) -> str:
     """One label/value row of a finding table (value passed as ready HTML).
 
     Args:
@@ -1245,22 +1375,26 @@ def _html_finding_row(label: str, value_html: str, *, keep: bool) -> str:
         value_html (str): The value, already escaped.
         keep (bool): Whether the row moves to the next page whole rather than
             splitting.
+        prose (bool): Whether the value is machine-written text or a note, which
+            the PDF may hyphenate — never quoted source text, a name or a link.
 
     Returns:
         str: The row markup.
     """
     row_class = ' class="f-keep"' if keep else ""
-    return f'<tr{row_class}><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
+    value_class = "f-val f-prose" if prose else "f-val"
+    return f'<tr{row_class}><td class="f-key">{_esc(label)}</td><td class="{value_class}">{value_html}</td></tr>'
 
 
-def _html_text_row(label: str, text: str) -> str:
+def _html_text_row(label: str, text: str, *, prose: bool = False) -> str:
     """A label/value row of plain text, kept whole only while it is short (:data:`_KEEP_MAX_PT`).
 
     So a label never ends a page while its value starts the next, and a long
     value — a posting of many lines, its translation — still splits rather than
-    leaving a page half blank.
+    leaving a page half blank. ``prose`` is :func:`_html_finding_row`'s.
     """
-    return _html_finding_row(label, _esc(text), keep=_text_height_pt(text, *_VALUE_LINE) <= _KEEP_MAX_PT)
+    keep = _text_height_pt(text, *_VALUE_LINE) <= _KEEP_MAX_PT
+    return _html_finding_row(label, _esc(text), keep=keep, prose=prose)
 
 
 def _html_evidence_row(label: str, text: str) -> str:
@@ -1303,7 +1437,7 @@ def _translation_part(snap: dict[str, Any]) -> tuple[str, str] | None:
 def _html_translation_row(snap: dict[str, Any]) -> str:
     """Finding-table row for an optional machine-translation, or ''."""
     part = _translation_part(snap)
-    return _html_text_row(*part) if part else ""
+    return _html_text_row(*part, prose=True) if part else ""
 
 
 def _html_image_rows(snap: dict[str, Any]) -> str:
@@ -1320,9 +1454,9 @@ def _html_image_rows(snap: dict[str, Any]) -> str:
         rows.append(_html_evidence_row(ui_string("image_label_text"), printed))
         rows.append(_html_translation_row(snap))
     if description:
-        rows.append(_html_text_row(ui_string("image_label_description"), description))
+        rows.append(_html_text_row(ui_string("image_label_description"), description, prose=True))
     if tags:
-        rows.append(_html_text_row(ui_string("image_label_tags"), tags))
+        rows.append(_html_text_row(ui_string("image_label_tags"), tags, prose=True))
     return "".join(rows)
 
 
@@ -1410,7 +1544,7 @@ def _html_media_rows(snap: dict[str, Any], view: tuple[str, str]) -> list[str]:
     rows = [f'<tr class="f-media"><td colspan="2">{figure}</td></tr>']
     for part_label, text, evidence in parts:
         if not evidence:
-            rows.append(_html_text_row(part_label, text))
+            rows.append(_html_text_row(part_label, text, prose=True))
         elif part_label:
             rows.append(_html_evidence_row(part_label, text))
         else:
@@ -1451,7 +1585,7 @@ def _html_finding_table(snap: dict[str, Any], note: str | None, *, band_html: st
     rows += [*detail_rows, *posting_rows] if _is_image_finding(snap) else [*posting_rows, *detail_rows]
     rows.extend(_html_text_row(label, value) for label, value in _provenance_rows(snap))
     if note:
-        rows.append(_html_text_row(ui_string("report_label_note"), note))
+        rows.append(_html_text_row(ui_string("report_label_note"), note, prose=True))
     return (
         '<table class="finding"><colgroup><col class="f-key"><col></colgroup>'
         f'<thead><tr class="f-head"><td colspan="2">{band_html}</td></tr></thead>'
@@ -1513,7 +1647,7 @@ def _html_hate(snap: dict[str, Any], note: str | None, number: int) -> str:
     )
     detail_rows: list[str] = []
     if snap.get("reason"):
-        detail_rows.append(_html_text_row(ui_string("report_label_reason"), str(snap.get("reason"))))
+        detail_rows.append(_html_text_row(ui_string("report_label_reason"), str(snap.get("reason")), prose=True))
     return _html_finding_table(snap, note, band_html=_html_band(number, tags_html), detail_rows=detail_rows)
 
 
@@ -1524,6 +1658,26 @@ def _html_summary(snap: dict[str, Any], note: str | None, collection: str, table
         f'<div class="prose">{_render_markdown_html(snap.get("text") or "", table_budget)}</div>',
         _html_note(note),
     ]
+    return "".join(parts)
+
+
+def _html_topics(snap: dict[str, Any], note: str | None) -> str:
+    """HTML for a topics item: a caption, then one block per topic.
+
+    A summary is the chat model's plain prose, so it is escaped into a
+    paragraph rather than rendered as Markdown.
+    """
+    parts = [f'<div class="topics-caption">{_esc(_topics_caption(snap))}</div>']
+    for topic in _topic_entries(snap):
+        block = [f'<div class="item-title">{_esc(_topic_heading(topic))}</div>']
+        meta = _topic_meta(topic)
+        if meta:
+            block.append(f'<div class="topic-meta">{_esc(meta)}</div>')
+        summary = _topic_summary(topic)
+        if summary:
+            block.append(f'<p class="topic-summary">{_esc(summary)}</p>')
+        parts.append(f'<div class="topic">{"".join(block)}</div>')
+    parts.append(_html_note(note))
     return "".join(parts)
 
 
@@ -1566,6 +1720,8 @@ def _html_item(
         return _html_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
         return _html_hate(snap, note, number)
+    if artifact_type == ARTIFACT_TOPICS:
+        return _html_topics(snap, note)
     return _html_summary(snap, note, collection, table_budget)
 
 
@@ -1764,6 +1920,36 @@ def _summary_csv_row(snap: dict[str, Any]) -> dict[str, Any]:
     return {"collection": snap.get("collection") or "", "summary": snap.get("text") or ""}
 
 
+#: A text cell a spreadsheet would read as a formula: guarded with a leading quote,
+#: as the Topics tab's own CSV download guards it.
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_text(value: str) -> str:
+    """A text cell a spreadsheet shows as text, never evaluates."""
+    return f"'{value}" if value.startswith(_FORMULA_LEAD) else value
+
+
+def _topics_csv_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """CSV rows for a topics item, one per topic; ``share`` stays the stored fraction."""
+    rows = []
+    for topic in _topic_entries(snap):
+        share = topic.get("share")
+        rows.append(
+            {
+                "collection": _csv_text(_one_line(snap.get("collection"))),
+                "run_id": _csv_text(_one_line(snap.get("run_id"))),
+                "topic": _whole(topic.get("id")),
+                "label": _csv_text(_one_line(topic.get("label"))),
+                "keywords": _csv_text("; ".join(_topic_keywords(topic))),
+                "chunks": _whole(topic.get("size")),
+                "share": share if isinstance(share, (int, float)) and not isinstance(share, bool) else "",
+                "summary": _csv_text(_topic_summary(topic)),
+            }
+        )
+    return rows
+
+
 def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
     """CSV row for one document-overview manifest entry (full, untruncated hash).
 
@@ -1829,6 +2015,11 @@ def report_csv_bundle(report: dict[str, Any]) -> bytes:
         if summaries:
             rows = (_summary_csv_row(i.get("snapshot") or {}) for i in summaries)
             zf.writestr("summaries.csv", b"".join(stream_csv(rows, SUMMARY_COLUMNS)))
+
+        topics = grouped.get(ARTIFACT_TOPICS) or []
+        if topics:
+            topic_rows = (row for i in topics for row in _topics_csv_rows(i.get("snapshot") or {}))
+            zf.writestr("topics.csv", b"".join(stream_csv(topic_rows, TOPICS_COLUMNS)))
 
         overview = _overview_snapshot(report)
         if overview is not None:

@@ -11,7 +11,7 @@ It ships a FastAPI backend, a React SPA served by an nginx sidecar that
 reverse-proxies API requests to the backend on the internal Docker network, and
 pluggable inference via any OpenAI-compatible API or an external routed vLLM
 service. docint runs no models itself — every ML call (chat, embeddings,
-rerank, NER, CLIP, OCR, transcription) leaves over HTTP.
+rerank, NER, CLIP, OCR, transcription, topic fits) leaves over HTTP.
 
 ## What you need
 
@@ -22,7 +22,7 @@ rerank, NER, CLIP, OCR, transcription) leaves over HTTP.
   (`INFERENCE_PROVIDER`, `OPENAI_API_BASE`, `OPENAI_API_KEY`). vLLM is deployed
   separately and consumed through one routed base URL. On a non-CUDA dev host,
   `vllm-service` ships standalone CPU-only profiles (`gliner-only`,
-  `rerank-only`, `clip-only`, `embed-only`) you can point the per-service base
+  `rerank-only`, `clip-only`, `embed-only`, `topics-only`) you can point the per-service base
   URLs at — see
   [configuration.md](docs/configuration.md#dense-embedding-client--embedclientconfig)
   for the per-service defaults and the `EMBED_API_BASE`-vs-`SPARSE_API_BASE`
@@ -61,13 +61,26 @@ cite as one thing with the post. See
 [ingestion.md](docs/ingestion.md) and
 [retrieval-and-agents.md](docs/retrieval-and-agents.md#image-retrieval-lane).
 
+**Topics map what a collection is about.** docint clusters a collection's
+chunks into topics — a topic-model fit over a deterministic sample, run by
+vllm-service's topics service — and the chat model gives each topic a short
+label and a summary of four to five sentences. An ingest builds them (the
+**Topics** toggle, on by default), or, for a collection that has some, sorts
+its new chunks into them and looks for new topics among the ones that fit
+none; that work runs on a thread of its own beside the collection summary,
+with its own progress bar. The Analysis screen's Topics tab lists each topic's
+size, keywords, summary and passages, a topic narrows a chat or a search to
+its chunks, and one click puts every topic's label and summary into a report.
+See [topics.md](docs/topics.md).
+
 **The Report Builder turns findings into a case file.** Collection-wide CSV
 exports are all-or-nothing; a case usually needs a curated document instead. An
 "+ Report" control on every chat answer, entity finding and hate-speech finding
 snapshots that one artifact — image evidence frozen in as a data URI — into a
-report scoped to you and that collection, which you can reorder, annotate, and export as Markdown, HTML,
-JSON, a CSV bundle, or a paginated PDF that references nothing outside itself.
-See [reports.md](docs/reports.md).
+report scoped to you and that collection; the collection summary and its topics
+go in whole, and lead the report. You can reorder, annotate, and export it as
+Markdown, HTML, JSON, a CSV bundle, or a paginated PDF that references nothing
+outside itself. See [reports.md](docs/reports.md).
 
 **Data extracts read the whole collection back out in writing.** A transcript,
 a keyframe description and an image's OCR text live only in the index, so a
@@ -97,13 +110,15 @@ injected by the gateway (`X-Auth-User`); production leaves
 | `make build` · `make up-dev` · `make stop` | Build the images, start with the frontend port published, stop. `make up` is the production shape. |
 | `make health` | Ask the running backend whether Qdrant is reachable. Chain it: `make up health`. |
 | `make resolve COLLECTION=<name>` | Merge duplicate and semantically-similar entities (`USA`/`United States`) into durable canonical records. Re-runnable and idempotent. |
+| `make topics OP=<op> COLLECTION=<name>` | Build, extend (`discover`) or `align` a collection's topics, or show their `status` (the default). The same jobs the Topics tab runs. |
 | `make extract COLLECTION=<name>` | Write the collection's data extract — full transcripts, keyframe descriptions, captions and document text — as a ZIP under `RESULTS_PATH`. Reads Qdrant only. |
 | `make search-index COLLECTION=<name>` · `make search-index-all` | Build the full-text search index for one collection, or backport every collection on the host. Payload-only — no re-embedding, no inference. |
 | `make verify` · `make test` | Pre-push gate (ruff + pyrefly + frontend lint/build), then pytest + vitest. |
 
-The nine console scripts — `docint`, `ingest`, `query`, `query-eval`,
-`resolve`, `search-index`, `search-index-all`, `verify`, `load-models` — are
-documented with their flags in [cli-reference.md](docs/cli-reference.md). Every environment variable, grouped
+The twelve console scripts — `docint`, `ingest`, `query`, `query-eval`,
+`resolve`, `extract`, `topics`, `search-index`, `search-index-all`,
+`retention-report`, `verify`, `load-models` — are documented with their flags
+in [cli-reference.md](docs/cli-reference.md). Every environment variable, grouped
 by the dataclass that reads it, is in
 [configuration.md](docs/configuration.md).
 
@@ -115,12 +130,13 @@ The [`docs/`](docs/README.md) directory is the in-repo reference manual:
 - [Architecture](docs/architecture.md) — runtime components, request flow, multi-tenancy
 - [Configuration](docs/configuration.md) — every env var grouped by dataclass, with defaults
 - [API reference](docs/api-reference.md) — every FastAPI route
-- [CLI reference](docs/cli-reference.md) — the ten console scripts
+- [CLI reference](docs/cli-reference.md) — the console scripts and their flags
 - [Ingestion pipeline](docs/ingestion.md) — readers, chunking, NER, media, social exports
 - [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator, hybrid retrieval, graph-RAG, citations
 - [UI guide](docs/ui-guide.md) — React SPA screens and localization
 - [Reports](docs/reports.md) — the Report Builder and its export formats
 - [Data extracts](docs/extracts.md) — full transcripts, keyframe descriptions and document text as files
+- [Topics](docs/topics.md) — topic modeling: runs, assignment, the ingest stage, the fit service
 - [Deployment](docs/deployment.md) — Docker services, volumes, co-deployment, offline bundles
 - [Migrations](docs/migrations.md) — what existing collections do not pick up on their own
 - [Development](docs/development.md) — dev workflow, pre-commit, pytest layout, CI
@@ -128,7 +144,8 @@ The [`docs/`](docs/README.md) directory is the in-repo reference manual:
 ## Pointers
 
 - [vllm-service](https://github.com/nos-tromo/vllm-service) — the inference
-  router docint calls for chat, embeddings, rerank, NER, CLIP and OCR.
+  router docint calls for chat, embeddings, rerank, NER, CLIP, OCR and topic
+  fits.
 - [nextext](https://github.com/nos-tromo/nextext) — the transcription service
   behind audio and video ingestion.
 - `../data-plane` — owns Qdrant and its volumes; bring it up first.

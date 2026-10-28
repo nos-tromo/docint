@@ -190,7 +190,11 @@ export function TopicRow({ topic, runId, expanded, onToggle, onAsk }: TopicRowPr
       <div id={panelId} hidden={!expanded}>
         {expanded && (
           <div className="space-y-4 border-t border-border bg-muted/30 px-3 py-3 sm:pl-14">
-            {topic.description && <p className="text-sm leading-6">{topic.description}</p>}
+            {topic.description && (
+              <Section title={t('topics.summary')}>
+                <p className="text-sm leading-6">{topic.description}</p>
+              </Section>
+            )}
             <Section title={t('topics.evidence')}>
               {evidence.isPending ? (
                 <Muted>{t('common.loading_ellipsis')}</Muted>

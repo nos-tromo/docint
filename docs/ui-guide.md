@@ -265,13 +265,22 @@ keeps its own warning. A run's warnings always sit inside its card.
 Every request of a run (the staged check, each batch and retry, the finalize)
 goes to the owner the run started under, even if an admin switches to another
 user's collection while it uploads.
-The entity-extraction, hate-speech and collection-summary
+The entity-extraction, hate-speech, collection-summary and topics
 options are `@infra/ui` `ToggleButton`s (lit = on), seeded once per mount
 from `GET /config/ingest-defaults`. **Summary** gates the collection-summary
 rebuild that runs when the ingest finishes; it maps the whole collection, so
 on a long batch it is the longest part of the run and switching it off is
 what makes the job end at the last document. The summary can still be built
-later, on demand, from the Analysis screen's Summary tab.
+later, on demand, from the Analysis screen's Summary tab. **Topics** appears
+only while the deployment has topics switched on (`topics_enabled` on
+`GET /config`): lit, the run builds the collection's topics, or places its
+chunks in the existing ones and looks for new topics among those that fit
+none; unlit, the new chunks are only placed in the existing topics
+([topics.md](topics.md#the-ingest-stage)). The topics work runs beside the
+summary rather than after it, and the run's card gives it one **Topics** bar
+that names the step it is on (reading the sample, fitting, labelling,
+assigning, aligning), pulses through a step without a total, and reads
+**Done** once the step is over while the summary may still be running.
 
 A picked file is not added when a different file in the selection already has
 its name (its path inside a picked folder, or its bare name otherwise), and a
@@ -384,10 +393,13 @@ on what happens to be on screen.
 The **Topics** tab (`src/components/analysis/TopicsPanel.tsx`) shows the active
 collection's topic run ([topics.md](topics.md)). A caption counts its topics
 and its coverage (chunks assigned of the total, unassigned, pending) beside
-four icon actions: **Restart analysis**, which asks first, since chat filters on
+its icon actions: **Restart analysis**, which asks first, since chat filters on
 the current topics stop matching; **Find new topics**, while some chunks are
-unassigned; **Align pending chunks**, while some are pending; and **Download
-CSV**. A collection without a run shows a **Start analysis** button instead.
+unassigned; **Align pending chunks**, while some are pending; the report
+toggle (`AddToReportButton`, as on the Summary tab), which adds the whole run —
+every topic's label, counts, keywords and summary — to the active report as a
+single item, and takes it out again; and **Download CSV**. A collection without
+a run shows a **Start analysis** button instead.
 While a job runs, a line names its stage, with a bar where the stage has a
 total. A banner suggests a rebuild when the collection is now embedded with
 another model than the run was built with.
@@ -395,7 +407,8 @@ another model than the run was built with.
 Each topic is a row (`TopicRow.tsx`), largest first: its number (`T3`), its
 label, its size and share of the collection's chunks, a **New** badge for a
 topic a later discover added, its first five keywords and the dates its chunks
-span. Opening a row, one at a time, shows the topic's description, its
+span. Opening a row, one at a time, shows the topic's **Summary** (four to five
+sentences written when the topic was added), its
 **Evidence** (the five chunks nearest its centre), its **Documents** (the
 source files it draws on, at most 50, each with its chunk count) and **All
 passages**, 50 at a time; the three are read only while the row is open. **Ask
@@ -456,11 +469,17 @@ stream reports, which a CLI run is not
 The Report Builder surface. Lists the reports of the active collection, and
 only those (with no collection selected it lists none and offers no new one),
 and, for the active one, shows the picked artifacts grouped by type with per-item notes, reordering, and
-removal, plus the five export formats. Each type is a foldable section whose
+removal, plus the five export formats. Under the report selector, the title,
+operator and file reference fields share a row, and the two export options,
+**Table of contents** and **Document overview** (with the overview's refresh),
+sit together on the row below. Each type is a foldable section whose
 contents peek out while shut; the control is the `@infra/ui`
-`DisclosureButton` at the bar's right edge, not the bar itself. Artifacts are added from elsewhere in
+`DisclosureButton` at the bar's right edge, not the bar itself. The sections
+run summaries, topics, chat answers, entity findings, hate-speech findings,
+the order the exports use. Artifacts are added from elsewhere in
 the app: an **"+ Report"** control sits on every chat answer, entity finding,
-and hate-speech finding. Switching the active collection releases the active
+and hate-speech finding, and on the Analysis screen's summary and topics; a
+topics item is titled by its topic count and previews the first labels. Switching the active collection releases the active
 report, so a report and its evidence always describe the same collection; every
 report request names the active collection and the server refuses any other, so
 a report kept active from elsewhere (another tab, an earlier session) answers

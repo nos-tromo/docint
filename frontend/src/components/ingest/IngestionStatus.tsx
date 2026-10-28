@@ -5,12 +5,14 @@ import {
   formatBytes,
   formatDuration,
   type IngestPhase,
-  type IngestStatus
+  type IngestStatus,
+  type IngestTask
 } from '@/lib/ingestStatus'
+import { topicsStageText } from '@/lib/topicsStage'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { streamErrorText } from '@/api/errorMessage'
-import { Bar, BarList, preprocessBarItems, type Tone } from './ProgressBars'
+import { Bar, BarList, preprocessBarItems, type BarItem, type Tone } from './ProgressBars'
 
 interface PhaseTheme {
   border: string
@@ -38,7 +40,7 @@ const TASK_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
   'Linking images': 'ingest.task_linking_images',
   Embedding: 'ingest.task_embedding',
   'Summarizing collection': 'ingest.task_summary',
-  'Aligning topics': 'ingest.task_topics'
+  Topics: 'ingest.task_topics'
 }
 
 function stageLabel(raw: string, t: (key: keyof Strings) => string): string {
@@ -49,6 +51,35 @@ function stageLabel(raw: string, t: (key: keyof Strings) => string): string {
 function taskLabel(raw: string, t: (key: keyof Strings) => string): string {
   const key = TASK_LABEL_KEY[raw]
   return key ? t(key) : raw
+}
+
+/**
+ * One task as a bar.
+ *
+ * The topics task is several steps on one bar: its caption names the step in
+ * catalog words, a step that cannot count (the fit) pulses rather than sitting
+ * at 0, and the closing step reads full — the stage often ends while the
+ * summary still runs, and a bar left on its last step would read as stuck.
+ *
+ * @param task - The task as folded from the run's frames.
+ * @param t - The translator.
+ * @returns The bar to draw.
+ */
+function taskBarItem(task: IngestTask, t: ReturnType<typeof useT>): BarItem {
+  const label = taskLabel(task.label, t)
+  if (task.key !== 'topics' || !task.stage) {
+    return { key: task.key, label, current: task.current, total: task.total }
+  }
+  const detail = topicsStageText(t, task.stage, task.current, task.total)
+  if (task.stage === 'finished') return { key: task.key, label, current: 1, total: 1, detail }
+  return {
+    key: task.key,
+    label,
+    current: task.current,
+    total: task.total,
+    detail,
+    indeterminate: task.total === 0
+  }
 }
 
 const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
@@ -351,14 +382,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
 
       {hasTasks && (
         <div className={cn((hasStage || preprocess.length > 0) && 'border-t border-border pt-3')}>
-          <BarList
-            items={status.tasks.map((task) => ({
-              key: task.key,
-              label: taskLabel(task.label, t),
-              current: task.current,
-              total: task.total
-            }))}
-          />
+          <BarList items={status.tasks.map((task) => taskBarItem(task, t))} />
         </div>
       )}
 

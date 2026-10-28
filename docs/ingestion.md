@@ -871,6 +871,7 @@ processed` — and the SPA renders each as its own bar:
 | `Detecting hate speech: n/total chunks processed` | Hate-speech detection. |
 | `Embedding and storing: n/total batches processed` | The persist lane. |
 | `Summarizing collection: n/total units processed` | The post-ingest tree summary: one unit per document (or social author-hour bucket), cache hits included. Its reduce-fold tiers and final synthesis run after `N/N` and are not counted. |
+| `Reading the sample: n/total chunks read` · `Fitting topics: n s` · `Labelling topics: n/total topics labelled` · `Assigning topics: n/total chunks processed` · `Aligning topics: n/total chunks processed` | The topics stage ([topics.md](topics.md#the-ingest-stage)), on a thread of its own beside resolution and the summary. Every step is one **Topics** bar that names it; a step without a total (`Scanning chunks: n chunks scanned`, the fit's elapsed seconds, the opening `Starting topics run` and the closing `Topics finished`) pulses instead of filling. |
 
 The shape is what the SPA parses (`lib/ingestStatus.ts`, `TASK_PATTERNS`),
 so adding a stage is adding a counter on the server and a line there.

@@ -160,7 +160,8 @@ export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobC
           collection,
           ner: run.ner,
           hate_speech: run.hate,
-          summary: run.summary
+          summary: run.summary,
+          topics: run.topics
         },
         owner
       )
