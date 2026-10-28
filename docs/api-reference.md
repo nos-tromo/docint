@@ -123,9 +123,10 @@ client asks `GET /collections/retention` only when it is not `"off"`. While
 
 The deployment's default enrichment toggles, so the ingest screen can seed
 its toggle buttons. Unauthenticated like `/config`. Returns
-`IngestDefaultsOut` — `{"ner": bool, "hate_speech": bool, "summary": bool}`,
-mirroring `NER_ENABLED`, `ENABLE_HATE_SPEECH_DETECTION` and
-`SUMMARY_ON_INGEST`.
+`IngestDefaultsOut` — `{"ner": bool, "hate_speech": bool, "summary": bool,
+"topics": bool}`, mirroring `NER_ENABLED`, `ENABLE_HATE_SPEECH_DETECTION`,
+`SUMMARY_ON_INGEST` and `TOPICS_ON_INGEST` (`topics` is `false` whenever
+`TOPICS_ENABLED` is).
 
 ### `GET /version`
 
@@ -878,7 +879,8 @@ The overview:
              "merge_min_similarity": 0.7},
   "coverage": {"total": 4000, "assigned": 3510, "unassigned": 420, "pending": 70},
   "topics": [
-    {"id": 2, "label": "Alpha and beta", "description": "Passages that name alpha and beta.",
+    {"id": 2, "label": "Alpha and beta",
+     "description": "The passages compare alpha and beta. They name the delta survey and the gamma station. Some treat beta as a variant of alpha. Others hold the two apart. Both readings cite the same field notes.",
      "keywords": [["alpha", 0.0412], ["beta", 0.0377], ["gamma", 0.0201]],
      "size": 640, "share": 0.16, "origin": "build", "added_at": "2026-10-25T10:14:21+00:00",
      "first_seen": "2026-03-02T09:14:00+00:00", "last_seen": "2026-09-30T17:05:00+00:00"}
@@ -891,6 +893,9 @@ The overview:
   run placed in none (`-1`), and `pending` those it has not placed yet.
 - `topics` is ordered by `size`, largest first, then by `id`. `share` is
   `size / total`, a fraction from 0 to 1 rounded to four places.
+- `description` is the topic's summary of four to five sentences, written by
+  the chat model when the topic was added (empty when no label was written; a
+  run built before summaries grew may still carry one sentence).
 - `origin` is `build`, or `discover` for a topic a later discover added.
   `first_seen` and `last_seen` are ISO-8601 UTC, or `null` when no chunk of the
   topic carries a timestamp.
@@ -986,8 +991,12 @@ Recaptures the frozen document-overview snapshot from the collection's
 ### `POST /reports/{report_id}/items`
 
 Adds a snapshotted artifact (`ReportItemIn`: `artifact_type`, `dedupe_key`,
-`snapshot`, optional `note`). Idempotent by `dedupe_key`, so re-adding the same
-chunk returns the existing item. Image-bearing snapshots are enriched with a
+`snapshot`, optional `note`). The renderers know `chat_answer`,
+`entity_finding`, `hate_speech_finding`, `summary` and `topics` (one item for
+a whole topic run: `collection`, `run_id`, `run_updated_at`, `coverage`
+`{total, assigned}` and `topics`, each `{id, label, keywords, size, share,
+description}`, keyed `topics:<collection>`). Idempotent by `dedupe_key`, so
+re-adding the same chunk returns the existing item. Image-bearing snapshots are enriched with a
 frozen thumbnail on the way in, from the report's own collection, which the
 collection check makes the one the artifact was retrieved from.
 
@@ -1042,7 +1051,7 @@ stem derived from the report:
 | `export.md` | `text/markdown; charset=utf-8` | attachment |
 | `export.html` | `text/html; charset=utf-8` | inline (also the PDF source) |
 | `export.json` | `application/json` | attachment |
-| `export.zip` | `application/zip` | attachment — per-type CSVs, reusing the `csv_stream.py` schemas |
+| `export.zip` | `application/zip` | attachment — per-type CSVs, reusing the `csv_stream.py` schemas (`topics.csv`: one row per topic) |
 | `export.pdf` | `application/pdf` | attachment — paginated, rendered by WeasyPrint |
 
 `export.pdf` answers `503` when the PDF engine (WeasyPrint plus its native
@@ -1294,15 +1303,20 @@ Queues an ingest job over a collection's already-staged batches. Returns
 { "job_id": "…" }
 ```
 
-Request (`IngestIn`) carries the logical collection name and the run's
-enrichment options (`hybrid`, `ner`, `hate_speech`, `summary`). Each is a
-tri-state override: omitted (or `null`) keeps the deployment default, so a
-client that says nothing is never read as having asked for a stage off.
-`summary` gates the collection-summary rebuild that tails the job — the
-per-run override of `SUMMARY_ON_INGEST`, and the one stage worth skipping on
-a long batch, since the rebuild maps the whole collection rather than just
-this run's files. Entity resolution runs as a stage *inside* the job, so it
-no longer depends on a client staying attached.
+Request (`IngestFinalizeIn`) carries the logical collection name and the
+run's enrichment options (`hybrid`, `ner`, `hate_speech`, `summary`,
+`topics`). Each is a tri-state override: omitted (or `null`) keeps the
+deployment default, so a client that says nothing is never read as having
+asked for a stage off. `summary` gates the collection-summary rebuild that
+tails the job — the per-run override of `SUMMARY_ON_INGEST`, and the one
+stage worth skipping on a long batch, since the rebuild maps the whole
+collection rather than just this run's files. `topics` is the per-run
+override of `TOPICS_ON_INGEST`: the job builds the collection's topics, or
+extends them with its chunks, on a thread of its own beside resolution and
+the summary ([topics.md](topics.md#the-ingest-stage)); its frames are
+`ingestion_progress` frames carrying a topics `stage`, `done` and `total`.
+Entity resolution runs as a stage *inside* the job, so it no longer depends
+on a client staying attached.
 
 | Status | Meaning |
 |---|---|

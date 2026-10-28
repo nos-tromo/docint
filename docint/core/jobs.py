@@ -250,7 +250,7 @@ class IngestJobState:
     ``kind`` distinguishes an ingest run from a collection-summary rebuild;
     only the four identity fields are required — the ingest-only options
     (``batch_dir``, ``hybrid``, ``ner``, ``hate_speech``, ``summary``,
-    ``resolve``) default to values a summary job can safely omit.
+    ``topics``, ``resolve``) default to values a summary job can safely omit.
     """
 
     job_id: str
@@ -274,6 +274,7 @@ class IngestJobState:
     ner: bool | None = None
     hate_speech: bool | None = None
     summary: bool | None = None
+    topics: bool | None = None
     resolve: bool = False
     status: JobStatus = JobStatus.QUEUED
     #: Set by :meth:`IngestJobManager.request_cancel`. Read by the progress
@@ -526,6 +527,7 @@ class IngestJobManager:
         ner: bool | None = None,
         hate_speech: bool | None = None,
         summary: bool | None = None,
+        topics: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
         target: str | None = None,
@@ -557,6 +559,9 @@ class IngestJobManager:
             summary (bool | None): Per-request override of the collection
                 summary rebuild that tails an ingest; ``None`` keeps
                 ``SUMMARY_ON_INGEST``. Ingest-only.
+            topics (bool | None): Per-request override of the topics stage
+                that builds or extends the collection's topics; ``None``
+                keeps ``TOPICS_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
             kind (str): ``"ingest"``, ``"summary"``, ``"extract"``, ``"report_pdf"`` or ``"topics"``. Selects
@@ -583,6 +588,7 @@ class IngestJobManager:
             ner=ner,
             hate_speech=hate_speech,
             summary=summary,
+            topics=topics,
             resolve=resolve,
             kind=kind,
             target=target,
@@ -607,6 +613,7 @@ class IngestJobManager:
         ner: bool | None = None,
         hate_speech: bool | None = None,
         summary: bool | None = None,
+        topics: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
         target: str | None = None,
@@ -651,6 +658,9 @@ class IngestJobManager:
             summary (bool | None): Per-request override of the collection
                 summary rebuild that tails an ingest; ``None`` keeps
                 ``SUMMARY_ON_INGEST``. Ingest-only.
+            topics (bool | None): Per-request override of the topics stage
+                that builds or extends the collection's topics; ``None``
+                keeps ``TOPICS_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
             kind (str): ``"ingest"``, ``"summary"``, ``"extract"``, ``"report_pdf"`` or ``"topics"``. Selects
@@ -688,6 +698,7 @@ class IngestJobManager:
                 ner=ner,
                 hate_speech=hate_speech,
                 summary=summary,
+                topics=topics,
                 resolve=resolve,
                 kind=kind,
                 target=target,
@@ -711,6 +722,7 @@ class IngestJobManager:
         ner: bool | None = None,
         hate_speech: bool | None = None,
         summary: bool | None = None,
+        topics: bool | None = None,
         resolve: bool = False,
         kind: str = "ingest",
         target: str | None = None,
@@ -736,6 +748,9 @@ class IngestJobManager:
             summary (bool | None): Per-request override of the collection
                 summary rebuild that tails an ingest; ``None`` keeps
                 ``SUMMARY_ON_INGEST``. Ingest-only.
+            topics (bool | None): Per-request override of the topics stage
+                that builds or extends the collection's topics; ``None``
+                keeps ``TOPICS_ON_INGEST``. Ingest-only.
             resolve (bool): Whether entity resolution follows the ingest.
                 Ingest-only.
             kind (str): ``"ingest"``, ``"summary"``, ``"extract"``, ``"report_pdf"`` or ``"topics"``.
@@ -773,6 +788,7 @@ class IngestJobManager:
             ner=ner,
             hate_speech=hate_speech,
             summary=summary,
+            topics=topics,
             resolve=resolve,
             upload_lead_s=_clamp_lead(upload_lead_s),
         )
@@ -1072,7 +1088,7 @@ class IngestJobManager:
 
         logger.info(
             "{} job started | job_id={} collection={!r} files={} bytes={} by_type={} "
-            "hybrid={} ner={} hate_speech={} summary={} resolve={}",
+            "hybrid={} ner={} hate_speech={} summary={} resolve={} topics={}",
             label,
             state.job_id,
             state.logical_name,
@@ -1084,6 +1100,7 @@ class IngestJobManager:
             format_override(state.hate_speech),
             format_override(state.summary),
             str(state.resolve).lower(),
+            format_override(state.topics),
         )
         for index, item in enumerate(inventory.files, start=1):
             logger.info(

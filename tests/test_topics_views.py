@@ -40,6 +40,7 @@ def _cfg() -> TopicsConfig:
     """
     return TopicsConfig(
         enabled=True,
+        on_ingest=True,
         align_on_ingest=True,
         labels=False,
         fit_max_points=100_000,

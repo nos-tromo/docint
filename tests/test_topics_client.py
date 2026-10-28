@@ -508,3 +508,29 @@ def test_a_fit_logs_counts_only(loguru_caplog_info: LogCaptureFixture) -> None:
     _client(lambda request: httpx.Response(200, json=_ok_body())).fit(TEXTS, _vectors(), PARAMS)
     lines = [line for line in loguru_caplog_info.messages if "Topics fit" in line]
     assert lines == ["Topics fit | n=3 dim=4 topics=1 outliers=1 fit_s=1.50"]
+
+
+@pytest.mark.parametrize(("timeout", "connect"), [(3600.0, 30.0), (5.0, 5.0)])
+def test_a_fit_gives_up_connecting_long_before_its_answer_is_due(timeout: float, connect: float) -> None:
+    """Only the answer may take ``TOPICS_TIMEOUT``; connecting is capped, so a dead address fails fast.
+
+    Every ingest with topics requested fits, so an address that drops packets
+    would otherwise hold each one for the whole fit timeout.
+
+    Args:
+        timeout: The configured ``TOPICS_TIMEOUT``.
+        connect: The connect timeout the request carries.
+    """
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.extensions["timeout"]))
+        return httpx.Response(500)
+
+    client = TopicsClient(
+        TopicsClientConfig("http://topics.test", None, timeout), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(TopicsEndpointError):
+        client.fit(TEXTS, _vectors(), PARAMS)
+    assert seen == [{"connect": connect, "read": timeout, "write": timeout, "pool": timeout}]
+    assert topics_client.CONNECT_TIMEOUT_S == 30.0

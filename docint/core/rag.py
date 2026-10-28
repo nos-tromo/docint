@@ -268,7 +268,7 @@ from docint.core.topics.gather import (
     topic_counts,
 )
 from docint.core.topics.gather import count as count_points
-from docint.core.topics.labels import TopicLabeller
+from docint.core.topics.labels import LABEL_MAX_TOKENS, TopicLabeller
 from docint.core.topics.service import TopicsDeps, TopicsService
 from docint.core.topics.stopwords import load_stop_words, stop_words_digest
 from docint.core.topics.store import TopicRun, TopicStore
@@ -11234,9 +11234,9 @@ class RAG:
             str: The reply text.
         """
         if response_format is not None:
-            response = self.text_model.complete(prompt, response_format=response_format)
+            response = self.text_model.complete(prompt, response_format=response_format, max_tokens=LABEL_MAX_TOKENS)
         else:
-            response = self.text_model.complete(prompt)
+            response = self.text_model.complete(prompt, max_tokens=LABEL_MAX_TOKENS)
         return str(response.text or "")
 
     def _active_topic_run(self, physical: str) -> TopicRun | None:

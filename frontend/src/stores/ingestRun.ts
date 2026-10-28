@@ -15,6 +15,7 @@ interface PersistedIngestRun {
   ner: boolean
   hate: boolean
   summary: boolean
+  topics: boolean
   trackedJobs: TrackedJob[]
   handledJobIds: string[]
 }
@@ -121,6 +122,12 @@ export interface IngestRunState {
    */
   summary: boolean
   /**
+   * Whether this run builds the collection's topics, or extends them with its
+   * chunks when the collection has some. Ignored by a deployment with topics
+   * switched off, whose screen shows no toggle for it.
+   */
+  topics: boolean
+  /**
    * Jobs this browser queued, newest first. Persisted, and kept even after a
    * job finishes: it is the only way to tell a job the server has forgotten
    * (an interrupted run, worth offering a re-run for) from one that never
@@ -167,6 +174,7 @@ export interface IngestRunState {
   setNer: (v: boolean) => void
   setHate: (v: boolean) => void
   setSummary: (v: boolean) => void
+  setTopics: (v: boolean) => void
   /**
    * Add picked files to the selection (see {@link mergeSelection}).
    *
@@ -236,6 +244,8 @@ export const useIngestRunStore = create<IngestRunState>()(
       // `/config/ingest-defaults` overwrites it, and a failed defaults fetch
       // must not silently drop a stage the deployment asked for.
       summary: true,
+      // On for the same reason, matching TOPICS_ON_INGEST's default.
+      topics: true,
       trackedJobs: [],
       handledJobIds: [],
       uploadStatusByJob: {},
@@ -244,6 +254,7 @@ export const useIngestRunStore = create<IngestRunState>()(
       setNer: (ner) => set({ ner }),
       setHate: (hate) => set({ hate }),
       setSummary: (summary) => set({ summary }),
+      setTopics: (topics) => set({ topics }),
       addFiles: (v) => {
         const { files, refused } = mergeSelection(get().files, v)
         set({ files })
@@ -282,13 +293,14 @@ export const useIngestRunStore = create<IngestRunState>()(
           ner: false,
           hate: false,
           summary: true,
+          topics: true,
           trackedJobs: [],
           handledJobIds: [],
           uploadStatusByJob: {},
           ...transient
         }),
       start: async (limitBytes, t) => {
-        const { collection, files, ner, hate, summary, uploading } = get()
+        const { collection, files, ner, hate, summary, topics, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
         // Read once: every request of the run goes to the namespace it started
         // in, even if an admin switches to another user's collection meanwhile.
@@ -329,7 +341,8 @@ export const useIngestRunStore = create<IngestRunState>()(
                 collection,
                 ner,
                 hate_speech: hate,
-                summary
+                summary,
+                topics
               },
               owner
             )
@@ -403,6 +416,7 @@ export const useIngestRunStore = create<IngestRunState>()(
               ner,
               hate_speech: hate,
               summary,
+              topics,
               upload_elapsed_ms:
                 runStartedAt === undefined ? undefined : Date.now() - runStartedAt
             },
@@ -437,6 +451,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         ner: s.ner,
         hate: s.hate,
         summary: s.summary,
+        topics: s.topics,
         trackedJobs: s.trackedJobs,
         handledJobIds: s.handledJobIds
       }),
@@ -444,7 +459,9 @@ export const useIngestRunStore = create<IngestRunState>()(
       // v1 tracked exactly one job in three scalars. Carry it over so a reload
       // across the upgrade still re-attaches to the run that was in flight.
       // v1 and v2 recorded no owner; `null`, the caller's own namespace, is
-      // the only one a non-admin's job can have.
+      // the only one a non-admin's job can have. Nothing before `topics`
+      // recorded it: the initial state's value fills in on hydration (and the
+      // deployment defaults reseed every toggle on mount anyway).
       migrate: (persisted, version): PersistedIngestRun => {
         if (version >= 3) return persisted as PersistedIngestRun
         if (version === 2) {
@@ -464,6 +481,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           ner: old.ner === true,
           hate: old.hate === true,
           summary: true,
+          topics: true,
           trackedJobs: jobId ? [{ job_id: jobId, collection: jobCollection, owner: null }] : [],
           handledJobIds: handled
         }

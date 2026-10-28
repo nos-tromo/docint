@@ -203,6 +203,7 @@ def _cfg(**overrides: Any) -> TopicsConfig:
     """
     base = TopicsConfig(
         enabled=True,
+        on_ingest=True,
         align_on_ingest=True,
         labels=True,
         fit_max_points=100_000,
@@ -1748,6 +1749,157 @@ def test_align_on_ingest_defers_when_the_lock_is_held(client: QdrantClient, root
     assert done is not None and not done.deferred and done.assigned == len(fresh)
     assert frames == [(len(fresh), len(fresh))]
     assert count(client, COLL, pending_filter(built.run_id)) == 0
+
+
+def _on_ingest(svc: TopicsService, frames: Frames | None = None) -> TopicsOutcome:
+    """Run the ingest stage that builds or extends the topics.
+
+    Args:
+        svc: The service.
+        frames: Frame recorder; a fresh one when omitted.
+
+    Returns:
+        The outcome.
+    """
+    rec = frames or Frames()
+    return svc.run_on_ingest(
+        COLL, logical="coll", owner_created_at=lambda: CREATED, progress=rec.progress, warn=rec.warn
+    )
+
+
+def test_run_on_ingest_builds_a_collection_without_topics(client: QdrantClient, root: Path) -> None:
+    """With no run the ingest stage builds one, reporting every build stage.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    frames = Frames()
+    outcome = _on_ingest(_service(client, root), frames)
+    assert outcome.action == "build" and outcome.added == 3 and not outcome.deferred
+    assert TopicStore(root).active_id(COLL) == outcome.run_id
+    assert {"sampling", "fitting", "labelling", "assigning"} <= set(frames.stages())
+    assert frames.warnings == []
+
+
+def test_run_on_ingest_places_a_small_ingest_without_another_fit(client: QdrantClient, root: Path) -> None:
+    """New chunks that join existing topics are aligned, and no fit runs.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    built = _run(_service(client, root), "build")
+    assert built.run_id is not None
+    fresh = _add_blobs(client, per=2, offset=800, noise=0.0)
+    fit = FakeFit(BLOBS)
+    frames = Frames()
+    outcome = _on_ingest(_service(client, root, fit), frames)
+    assert outcome.action == "align" and outcome.run_id == built.run_id
+    assert outcome.assigned == len(fresh)
+    assert fit.requests == []
+    assert frames.stages() == ["aligning"]
+    assert count(client, COLL, pending_filter(built.run_id)) == 0
+
+
+def test_run_on_ingest_looks_for_new_topics_once_an_ingest_leaves_a_topic_s_worth_unplaced(
+    client: QdrantClient, root: Path
+) -> None:
+    """New chunks no topic admits, at least a minimum topic's worth, are fitted into a new topic.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60, blobs=BLOBS[:2])
+    built = _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    fresh = _add_blobs(client, per=12, offset=900, seed=3, blobs=BLOBS[2:])
+    frames = Frames()
+    outcome = _on_ingest(_service(client, root, FakeFit(BLOBS), labeller=_labeller("Appended")), frames)
+    assert outcome.action == "discover" and outcome.run_id == built.run_id
+    assert outcome.added == 1 and outcome.topics == 3
+    topics = _topics(client)
+    assert all(topics[pid] == 2 for pid in fresh)
+    assert frames.stages()[0] == "aligning" and "fitting" in frames.stages()
+
+
+def test_run_on_ingest_leaves_too_few_unplaced_chunks_for_a_later_discover(client: QdrantClient, root: Path) -> None:
+    """Fewer unplaced chunks than the run's minimum topic size never start a fit.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60, blobs=BLOBS[:2])
+    built = _run(_service(client, root, FakeFit(BLOBS[:2])), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and run.record["params"]["min_topic_size"] == 4
+    fresh = _add_blobs(client, per=3, offset=900, seed=3, blobs=BLOBS[2:])
+    fit = FakeFit(BLOBS)
+    outcome = _on_ingest(_service(client, root, fit))
+    assert outcome.action == "align" and outcome.run_id == built.run_id
+    assert fit.requests == []
+    assert [_topics(client)[pid] for pid in fresh] == [-1] * 3
+
+
+def test_run_on_ingest_keeps_a_discover_that_finds_nothing_new_quiet(client: QdrantClient, root: Path) -> None:
+    """A discover finding only repeats is the normal outcome of an ingest and warns nothing.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60)
+    cfg = _cfg(admit_percentile=80.0)
+    built = _run(_service(client, root, cfg=cfg), "build")
+    _add_blobs(client, per=20, offset=900, seed=5)
+    fit = FakeFit(BLOBS)
+    frames = Frames()
+    outcome = _on_ingest(_service(client, root, fit, cfg=cfg), frames)
+    assert len(fit.requests) == 1
+    assert outcome.action == "discover" and outcome.added == 0 and outcome.run_id == built.run_id
+    assert frames.warnings == []
+
+
+def test_run_on_ingest_defers_when_the_lock_is_held(client: QdrantClient, root: Path) -> None:
+    """A held lock defers the stage without reading or writing anything.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    held = TopicStore(root).try_lock(COLL)
+    assert held is not None
+    recording = RecordingClient(client)
+    frames = Frames()
+    try:
+        outcome = _on_ingest(_service(recording, root), frames)
+    finally:
+        held.release()
+    assert outcome.deferred and outcome.run_id is None
+    assert frames.frames == [] and recording.calls == []
+
+
+def test_run_on_ingest_refuses_a_collection_too_small_to_fit_and_frees_the_lock(
+    client: QdrantClient, root: Path
+) -> None:
+    """Too small a collection is refused with its counts, and the lock is released.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=2)
+    with pytest.raises(TopicsRefused) as caught:
+        _on_ingest(_service(client, root))
+    assert caught.value.code == "too_few_chunks"
+    assert caught.value.counts() == {"found": 6, "needed": 8}
+    lock = TopicStore(root).try_lock(COLL)
+    assert lock is not None
+    lock.release()
 
 
 # Order, seen ranges, logs, imports

@@ -684,6 +684,55 @@ def test_add_summary_item_is_never_enriched(client: TestClient, monkeypatch: pyt
     assert fake.scrolled_collections == []
 
 
+def test_a_topics_item_is_added_once_and_exported_after_the_summary(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Topics tab's one item carries every topic's label and summary into each export.
+
+    Like a summary it carries no visual evidence, and re-adding it is a no-op.
+    """
+    fake = _wire_images(monkeypatch, {})
+    rid = _create(client)["id"]
+    item = {
+        "artifact_type": "topics",
+        "dedupe_key": "topics:docs",
+        "snapshot": {
+            "collection": "docs",
+            "run_id": "20261028-100000-abcdef",
+            "run_updated_at": "2026-10-28T09:00:00+00:00",
+            "coverage": {"total": 40, "assigned": 30},
+            "topics": [
+                {
+                    "id": 0,
+                    "label": "Hives and honey",
+                    "keywords": ["hive", "honey"],
+                    "size": 30,
+                    "share": 0.75,
+                    "description": "Keepers tend hives. Honey is harvested in late summer.",
+                }
+            ],
+        },
+    }
+    summary = {
+        "artifact_type": "summary",
+        "dedupe_key": "summary:docs",
+        "snapshot": {"collection": "docs", "text": "S."},
+    }
+
+    first = client.post(f"/reports/{rid}/items", json=item)
+    again = client.post(f"/reports/{rid}/items", json=item)
+    client.post(f"/reports/{rid}/items", json=summary)
+
+    assert first.status_code == 200 and again.json()["id"] == first.json()["id"]
+    assert fake.scrolled_collections == []
+    assert client.get(f"/reports/{rid}").json()["item_count"] == 2
+    md = client.get(f"/reports/{rid}/export.md").text
+    assert md.index("## Summaries") < md.index("## Topics") < md.index("### T0 · Hives and honey")
+    assert "Honey is harvested in late summer." in md
+    names = zipfile.ZipFile(io.BytesIO(client.get(f"/reports/{rid}/export.zip").content)).namelist()
+    assert "topics.csv" in names
+
+
 # ---------------------------------------------------------------------------
 # Batch add — POST /reports/{id}/items/batch ("Add all" in an Analysis section)
 # ---------------------------------------------------------------------------

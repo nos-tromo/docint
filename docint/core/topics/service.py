@@ -586,6 +586,126 @@ class TopicsService:
         _log_outcome(outcome)
         return outcome
 
+    def run_on_ingest(
+        self,
+        physical: str,
+        *,
+        logical: str,
+        owner_created_at: Callable[[], str | None],
+        progress: Progress,
+        warn: Warn,
+    ) -> TopicsOutcome:
+        """Build or extend a collection's topics as a stage of an ingest, without waiting.
+
+        With no active run the collection's topics are built. With one, the
+        pending points, the ingest's new ones among them, are aligned first,
+        and the unassigned pool is searched for new topics only when that
+        align left at least the run's minimum topic size of them unassigned:
+        fewer cannot make a topic of their own, and refitting the whole pool
+        after every small ingest would mostly find nothing. Finding no new
+        topic, or too small a pool, is the normal outcome there and warns
+        nothing.
+
+        Args:
+            physical: Physical collection name.
+            logical: Logical collection name, for the refusal log line.
+            owner_created_at: Reads the ownership row's ``created_at`` now.
+            progress: Receives ``(stage, done, total)``; a raise stops the stage.
+            warn: Receives ``(code, message)`` for a build whose fit finds nothing.
+
+        Returns:
+            The outcome; a deferred one when another job holds the lock.
+
+        Raises:
+            TopicsRefused: When the collection cannot be built or extended as it is.
+        """
+        lock = self._deps.store.try_lock(physical)
+        if lock is None:
+            outcome = TopicsOutcome("ingest", None, 0, 0, 0, empty=True, deferred=True)
+            _log_outcome(outcome)
+            return outcome
+        job = _Job()
+        try:
+            outcome = self._on_ingest_locked(physical, logical, owner_created_at, progress, warn, job)
+        except TopicsRefused as exc:
+            counts = "".join(f" {key}={value}" for key, value in exc.counts().items())
+            logger.info("Topics on ingest refused for '{}' | code={}{}", logical, exc.code, counts)
+            raise
+        finally:
+            # Writes from a cancelled or failed stage are announced too.
+            try:
+                self._announce(physical, job)
+            finally:
+                lock.release()
+        _log_outcome(outcome)
+        return outcome
+
+    def _on_ingest_locked(
+        self,
+        physical: str,
+        logical: str,
+        owner_created_at: Callable[[], str | None],
+        progress: Progress,
+        warn: Warn,
+        job: _Job,
+    ) -> TopicsOutcome:
+        """Build, or align and maybe discover, once the lock is held.
+
+        Args:
+            physical: Physical collection name.
+            logical: Logical collection name, for the log line of a discover passed over.
+            owner_created_at: Reads the ownership row's ``created_at`` now.
+            progress: The progress channel.
+            warn: The warning channel.
+            job: What the stage has written.
+
+        Returns:
+            The outcome: a build's, an align's, or the align and discover together.
+
+        Raises:
+            TopicsRefused: ``too_few_chunks`` for a build, ``dimension_changed`` for an
+                existing run, ``collection_changed`` once the collection is replaced.
+        """
+        store, client = self._deps.store, self._deps.client
+        created = owner_created_at()
+        job.guard = partial(_refuse_if_replaced, owner_created_at, created)
+        progress = _guarded(progress, job.guard)
+        store.discard_stale(physical, owner_created_at=created)
+        ensure_topic_indexes(client, physical)
+        dense = dense_vector(client, physical)
+        run = store.active(physical, owner_created_at=created)
+        if run is None:
+            return self._build(physical, dense, created, owner_created_at, progress, warn, job)
+        if dense.dim != run.table.dim:
+            raise TopicsRefused("dimension_changed")
+        pending = count(client, physical, pending_filter(run.run_id))
+        aligned = self._align(physical, dense, run, created, owner_created_at, progress, job)
+        if pending - aligned.assigned < _built_topic_size(run):
+            return aligned
+        current = store.active(physical, owner_created_at=created)
+        if current is None:
+            return aligned
+
+        def quiet(code: str, message: str) -> None:
+            """Pass a warning on, except the one a discover finding nothing new gives.
+
+            Args:
+                code: The warning code.
+                message: Its static message.
+            """
+            if code != "none_new":
+                warn(code, message)
+
+        try:
+            found = self._discover(physical, dense, current, created, owner_created_at, progress, quiet, job)
+        except TopicsRefused as exc:
+            if exc.code != "too_few_unassigned":
+                raise
+            counts = "".join(f" {key}={value}" for key, value in exc.counts().items())
+            logger.info("Topics discover on ingest passed over for '{}' | code={}{}", logical, exc.code, counts)
+            return aligned
+        return replace(found, assigned=found.assigned + aligned.assigned)
+
     def _announce(self, physical: str, job: _Job) -> None:
         """Tell ``on_written`` about a job's writes, never failing the job over it.
 

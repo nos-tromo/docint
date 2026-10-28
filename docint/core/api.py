@@ -11,6 +11,7 @@ import threading
 import time
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -1725,6 +1726,7 @@ class IngestDefaultsOut(BaseModel):
     ner: bool
     hate_speech: bool
     summary: bool
+    topics: bool
 
 
 class IngestIn(BaseModel):
@@ -1735,6 +1737,7 @@ class IngestIn(BaseModel):
     ner: bool | None = None
     hate_speech: bool | None = None
     summary: bool | None = None
+    topics: bool | None = None
 
 
 class IngestFinalizeIn(IngestIn):
@@ -2068,16 +2071,19 @@ def get_ingest_defaults() -> dict[str, bool]:
 
     Served without a principal dependency (like ``/config``) so the SPA can
     seed its toggles; the values mirror ``NER_ENABLED``,
-    ``ENABLE_HATE_SPEECH_DETECTION`` and ``SUMMARY_ON_INGEST``.
+    ``ENABLE_HATE_SPEECH_DETECTION``, ``SUMMARY_ON_INGEST`` and
+    ``TOPICS_ON_INGEST`` (off whenever ``TOPICS_ENABLED`` is).
 
     Returns:
-        dict[str, bool]: ``ner``, ``hate_speech`` and ``summary`` deployment
-        defaults.
+        dict[str, bool]: ``ner``, ``hate_speech``, ``summary`` and ``topics``
+        deployment defaults.
     """
+    topics = load_topics_env()
     return {
         "ner": load_ner_env().enabled,
         "hate_speech": load_hate_speech_env().enabled,
         "summary": load_summary_env().on_ingest,
+        "topics": topics.enabled and topics.on_ingest,
     }
 
 
@@ -5415,14 +5421,15 @@ def _summary_progress_payload(mapped: int, total: int) -> dict[str, Any]:
 
 
 def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
-    """Execute one ingest job: pipeline, then optional entity resolution.
+    """Execute one ingest job: pipeline, then resolution, topics and the summary.
 
     Injected into :class:`IngestJobManager` so ``core/jobs.py`` stays free of
     docint domain imports. Runs on a worker thread; ``push`` is thread-safe.
 
     Resolution runs *here*, inside the job, rather than in a request handler —
     which is the fix for it being silently skipped whenever the client had
-    disconnected.
+    disconnected. The topics stage runs on a second thread beside resolution
+    and the summary, and the job waits for it before it ends.
 
     Args:
         state (IngestJobState): The job being executed.
@@ -5482,67 +5489,42 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         push("warning", {"message": f"No ingestable files found for '{state.logical_name}'."})
         return {"empty": True, "resolution": None}
 
-    resolution: dict[str, Any] | None = None
-    if state.resolve:
-        push("ingestion_progress", {"message": "Resolving entities..."})
-        try:
-            with rag.collection_scope(state.physical):
-                summary = rag.resolve_entities()
-        except Exception:
-            logger.exception("Auto-resolution after ingest failed for '{}'", state.logical_name)
-            push("warning", {"message": "Entity resolution failed."})
-        else:
-            resolution = {
-                "processed": summary.processed,
-                "minted": summary.minted,
-                "attached": summary.attached,
-                "skipped": summary.skipped,
-                "entities_touched": summary.entities_touched,
-            }
+    # The topics stage reads the chunks this run wrote and writes only their
+    # topic keys, which nothing below reads, so it runs on a thread of its own
+    # beside resolution and the summary, each with its own bar on the card.
+    # Those two stay in order here: resolution bumps the summary revision when
+    # it ends, and a summary built across that bump is not cached.
+    mode = _topics_stage_mode(state)
+    stopping = threading.Event()
 
-    topics_cfg = load_topics_env()
-    if topics_cfg.enabled and topics_cfg.align_on_ingest:
+    def topics_push(event: str, payload: dict[str, Any]) -> None:
+        """Publish for the topics stage, which stops once the job is ending.
+
+        Args:
+            event (str): The event name.
+            payload (dict[str, Any]): The event payload.
+
+        Raises:
+            JobCancelled: Once the job's own thread ended in a raise, or the job is cancelled.
+        """
+        if stopping.is_set():
+            raise JobCancelled(state.job_id)
+        push(event, payload)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="ingest-topics") as pool:
+        topics_stage = pool.submit(_ingest_topics_stage, state, topics_push, mode) if mode is not None else None
         try:
-            outcome = rag.topics_service().align_on_ingest(
-                state.physical,
-                owner_created_at=lambda: rag.collection_created_at(state.physical),
-                progress=lambda done, total: push("ingestion_progress", progress_payload("aligning", done, total)),
-            )
-        except JobCancelled:
+            resolution = _resolve_after_ingest(state, push)
+            _summarize_after_ingest(state, push)
+        except BaseException:
+            # The job ends with this raise. The topics stage stops at its next
+            # frame, and leaving the block waits for it, so nothing it does can
+            # land after the job's terminal frame.
+            stopping.set()
             raise
-        except Exception:
-            logger.exception("Topic alignment after ingest failed for '{}'", state.logical_name)
-            push("warning", {"message": "Topic alignment failed.", "code": "topics_align_failed"})
-        else:
-            if outcome is not None and outcome.deferred:
-                push(
-                    "warning",
-                    {
-                        "message": "Topic alignment was deferred: another topics run holds this collection.",
-                        "code": "topics_deferred",
-                    },
-                )
-
-    # A per-request override of ``SUMMARY_ON_INGEST``: the rebuild maps the
-    # whole collection, not just this run's files, so it is the longest tail
-    # of a run and the one stage worth skipping for a batch nobody will
-    # summarize. ``None`` keeps the deployment default.
-    summary_requested = load_summary_env().on_ingest if state.summary is None else state.summary
-    if summary_requested:
-        push("ingestion_progress", {"message": "Building collection summary..."})
-        try:
-            with rag.collection_scope(state.physical):
-                rag.build_tree_summary(
-                    progress=lambda mapped, total: push("ingestion_progress", _summary_progress_payload(mapped, total))
-                )
-        except Exception:
-            logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
-            push("warning", {"message": "Collection summary generation failed."})
-    else:
-        # Said out loud: a skipped summary and one that silently vanished
-        # leave an identical run otherwise, and the collection's cached
-        # summary is stale either way (ingest_docs bumped its revision).
-        push("ingestion_progress", {"message": "Collection summary skipped."})
+        if topics_stage is not None:
+            # A cancel that reached the topics stage first cancels the job.
+            topics_stage.result()
 
     # ``stats`` rides the result dict as a plain mapping of ints so
     # ``core/jobs.py`` can render it on the run-summary line without
@@ -5553,6 +5535,203 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         "resolution": resolution,
         "stats": asdict(stats) if stats is not None else None,
     }
+
+
+def _resolve_after_ingest(state: IngestJobState, push: PushEvent) -> dict[str, Any] | None:
+    """Resolve the collection's entities once an ingest has written its chunks.
+
+    Args:
+        state (IngestJobState): The ingest job.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any] | None: The resolution counts, ``None`` when the run asked for
+            none or it failed (which is a warning, not a failure).
+    """
+    if not state.resolve:
+        return None
+    push("ingestion_progress", {"message": "Resolving entities..."})
+    try:
+        with rag.collection_scope(state.physical):
+            summary = rag.resolve_entities()
+    except Exception:
+        logger.exception("Auto-resolution after ingest failed for '{}'", state.logical_name)
+        push("warning", {"message": "Entity resolution failed."})
+        return None
+    return {
+        "processed": summary.processed,
+        "minted": summary.minted,
+        "attached": summary.attached,
+        "skipped": summary.skipped,
+        "entities_touched": summary.entities_touched,
+    }
+
+
+def _summarize_after_ingest(state: IngestJobState, push: PushEvent) -> None:
+    """Rebuild the collection summary as the last stage of an ingest, or say it was skipped.
+
+    Args:
+        state (IngestJobState): The ingest job.
+        push (PushEvent): Thread-safe event publisher.
+    """
+    # A per-request override of ``SUMMARY_ON_INGEST``: the rebuild maps the
+    # whole collection, not just this run's files, so it is the longest tail
+    # of a run and the one stage worth skipping for a batch nobody will
+    # summarize. ``None`` keeps the deployment default.
+    summary_requested = load_summary_env().on_ingest if state.summary is None else state.summary
+    if not summary_requested:
+        # Said out loud: a skipped summary and one that silently vanished
+        # leave an identical run otherwise, and the collection's cached
+        # summary is stale either way (ingest_docs bumped its revision).
+        push("ingestion_progress", {"message": "Collection summary skipped."})
+        return
+    push("ingestion_progress", {"message": "Building collection summary..."})
+    try:
+        with rag.collection_scope(state.physical):
+            rag.build_tree_summary(
+                progress=lambda mapped, total: push("ingestion_progress", _summary_progress_payload(mapped, total))
+            )
+    except Exception:
+        logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
+        push("warning", {"message": "Collection summary generation failed."})
+
+
+#: The frame that closes an ingest's topics run, whatever its outcome, so the
+#: card's Topics bar never stays on a stage that ended without a frame of its
+#: own (a fit that found nothing, a refusal, a deferral).
+_TOPICS_FINISHED_FRAME: dict[str, Any] = {"message": "Topics finished", "stage": "finished", "done": 0, "total": 0}
+
+
+def _topics_stage_mode(state: IngestJobState) -> Literal["run", "align"] | None:
+    """Decide what an ingest's topics stage does.
+
+    Args:
+        state (IngestJobState): The ingest job.
+
+    Returns:
+        Literal["run", "align"] | None: ``run`` builds the collection's topics or
+            extends them (the run's Topics option, else ``TOPICS_ON_INGEST``);
+            ``align`` only places the new chunks in the active run
+            (``TOPICS_ALIGN_ON_INGEST``); ``None`` skips the stage, as does
+            ``TOPICS_ENABLED=false``.
+    """
+    cfg = load_topics_env()
+    if not cfg.enabled:
+        return None
+    if cfg.on_ingest if state.topics is None else state.topics:
+        return "run"
+    return "align" if cfg.align_on_ingest else None
+
+
+def _ingest_topics_stage(state: IngestJobState, push: PushEvent, mode: Literal["run", "align"]) -> None:
+    """Run an ingest's topics stage; on the stage's own thread.
+
+    Args:
+        state (IngestJobState): The ingest job.
+        push (PushEvent): Thread-safe event publisher for the stage.
+        mode (Literal["run", "align"]): What the stage does (:func:`_topics_stage_mode`).
+
+    Raises:
+        JobCancelled: When the job is cancelled or ends during the stage.
+    """
+    if mode == "run":
+        _run_topics_after_ingest(state, push)
+    else:
+        _align_topics_after_ingest(state, push)
+
+
+def _run_topics_after_ingest(state: IngestJobState, push: PushEvent) -> None:
+    """Build the collection's topics, or extend them with this run's chunks.
+
+    Opens with a ``starting`` frame and closes with :data:`_TOPICS_FINISHED_FRAME`.
+    Anything short of a cancel is a warning at most, so the ingest completes.
+
+    Args:
+        state (IngestJobState): The ingest job.
+        push (PushEvent): Thread-safe event publisher for the stage.
+
+    Raises:
+        JobCancelled: When the job is cancelled or ends during the stage.
+    """
+
+    def _progress(stage: str, done: int, total: int) -> None:
+        """Publish one progress frame.
+
+        Args:
+            stage (str): The stage.
+            done (int): Units done.
+            total (int): Units in all, 0 when unknown.
+        """
+        push("ingestion_progress", progress_payload(stage, done, total))
+
+    def _warn(code: str, message: str) -> None:
+        """Publish one coded warning.
+
+        Args:
+            code (str): The warning code.
+            message (str): Its static message.
+        """
+        push("warning", {"message": message, "code": code})
+
+    _progress("starting", 0, 0)
+    try:
+        outcome = rag.topics_service().run_on_ingest(
+            state.physical,
+            logical=state.logical_name,
+            owner_created_at=lambda: rag.collection_created_at(state.physical),
+            progress=_progress,
+            warn=_warn,
+        )
+    except JobCancelled:
+        raise
+    except TopicsRefused as exc:
+        # A collection replaced mid-run has nothing left to report on.
+        if exc.code != "collection_changed":
+            push("warning", {"message": exc.describe(), "code": exc.code, **exc.counts()})
+    except TopicsEndpointError as exc:
+        # The error's own text names the fit URL and the setting to check; the
+        # warning a client sees stays static.
+        logger.warning("Topic modeling after ingest failed for '{}': {}", state.logical_name, exc)
+        _warn(exc.code, _TOPICS_ENDPOINT_MESSAGES.get(exc.code, "Topic modeling failed."))
+    except Exception:
+        logger.exception("Topic modeling after ingest failed for '{}'", state.logical_name)
+        _warn("topics_failed", "Topic modeling failed.")
+    else:
+        if outcome.deferred:
+            _warn("topics_deferred", "Topic modeling was deferred: another topics run holds this collection.")
+    push("ingestion_progress", dict(_TOPICS_FINISHED_FRAME))
+
+
+def _align_topics_after_ingest(state: IngestJobState, push: PushEvent) -> None:
+    """Place this run's chunks in the collection's active topic run, if it has one.
+
+    Args:
+        state (IngestJobState): The ingest job.
+        push (PushEvent): Thread-safe event publisher for the stage.
+
+    Raises:
+        JobCancelled: When the job is cancelled or ends during the stage.
+    """
+    try:
+        outcome = rag.topics_service().align_on_ingest(
+            state.physical,
+            owner_created_at=lambda: rag.collection_created_at(state.physical),
+            progress=lambda done, total: push("ingestion_progress", progress_payload("aligning", done, total)),
+        )
+    except JobCancelled:
+        raise
+    except Exception:
+        logger.exception("Topic alignment after ingest failed for '{}'", state.logical_name)
+        push("warning", {"message": "Topic alignment failed.", "code": "topics_align_failed"})
+    else:
+        if outcome is not None and outcome.deferred:
+            push(
+                "warning",
+                {
+                    "message": "Topic alignment was deferred: another topics run holds this collection.",
+                    "code": "topics_deferred",
+                },
+            )
 
 
 def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
@@ -6281,6 +6460,7 @@ async def ingest_finalize(
         ner=payload.ner,
         hate_speech=payload.hate_speech,
         summary=payload.summary,
+        topics=payload.topics,
         resolve=_auto_resolve_requested(payload.ner),
         upload_lead_s=(payload.upload_elapsed_ms or 0.0) / 1000.0,
     )

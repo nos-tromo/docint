@@ -13,6 +13,13 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   hate-speech finding. Clicking it snapshots that one artifact into the active
   report (auto-creating an "Untitled report" the first time). Re-adding the same
   chunk is a no-op — findings are deduped by `chunk_id`.
+- **The summary and the topics go in whole.** The Analysis screen's Summary and
+  Topics tabs each carry one report toggle. The Topics one adds the active topic
+  run as a single item — every topic's label, chunk count, share, leading
+  keywords and summary, largest topic first — not one item per topic. Like the
+  summary there is one per report (keyed `topics:<collection>`): after the
+  topics are rebuilt or extended, take the item out and add it again to freeze
+  the new run.
 - **"Add all" takes a whole section at once.** The Entities and Hate speech
   headers carry a second control beside their CSV download that adds *every*
   finding in the open section to the active report in one action — the whole
@@ -134,8 +141,8 @@ curl -OJ "http://localhost:8000/reports/1/export.json?collection=mydocs"  # stru
 curl -OJ "http://localhost:8000/reports/1/export.zip?collection=mydocs"   # per-type CSV bundle (reuses csv_stream.py schemas)
 ```
 
-Every export leads with the **summaries**, then chat answers, entity findings,
-and hate-speech findings; entity and hate-speech findings carry their source
+Every export leads with the **summaries**, then the **topics**, then chat
+answers, entity findings, and hate-speech findings; entity and hate-speech findings carry their source
 **reference metadata** (network, author, timestamp, …) alongside the chunk. The
 report name is the single headline and the subheader stays on one line
 (collection · creation date · operator).
@@ -159,6 +166,13 @@ In the Markdown, HTML and PDF exports:
   to another zone. A value that is not an ISO timestamp prints verbatim.
 - A summary is not titled with its collection's name when the subheader already
   names it.
+- **Topics** open with a line counting them and the chunks they hold
+  ("Topics: 12 · Chunks in a topic: 3400 / 4000 · As of: …"), then give each
+  topic its own heading (`T3 · <label>`), a muted line with its chunk count,
+  share and keywords, and its summary as plain prose. The CSV bundle writes
+  them to `topics.csv`, one row per topic (`collection, run_id, topic, label,
+  keywords, chunks, share, summary`, `share` as a fraction), with a text cell
+  that starts like a formula written with a leading apostrophe.
 - **Chat answers and summaries keep their Markdown.** HTML and PDF render it as
   the chat does (CommonMark plus GFM tables and strikethrough; raw HTML is
   escaped), and the Markdown export starts the answer on its own line below its

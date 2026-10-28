@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TopicsPanel } from './TopicsPanel'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
+import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { LanguageContext } from '@/i18n/LanguageContext'
 import type { IngestEvent } from '@/api/types'
@@ -143,11 +144,11 @@ function deliver(jobId: string, event: IngestEvent['event'], data: Record<string
   )
 }
 
-function renderPanel(lang: 'en' | 'de' = 'en', onAsk = vi.fn()) {
+function renderPanel(lang: 'en' | 'de' = 'en', onAsk = vi.fn(), reportDedupeKeys?: Set<string>) {
   return render(
     <QueryClientProvider client={client}>
       <LanguageContext value={lang}>
-        <TopicsPanel onAsk={onAsk} />
+        <TopicsPanel onAsk={onAsk} reportDedupeKeys={reportDedupeKeys} />
       </LanguageContext>
     </QueryClientProvider>
   )
@@ -164,6 +165,7 @@ beforeEach(() => {
   clock = 0
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   useIngestJobsStore.getState().clear()
+  useReportStore.setState({ activeReportId: null })
   useUiStore.setState({ selectedCollection: COLLECTION, selectedOwner: null })
   vi.stubGlobal('confirm', vi.fn(() => true))
 })
@@ -269,6 +271,65 @@ describe('TopicsPanel', () => {
       'Align pending chunks',
       'Download CSV'
     ])
+  })
+
+  it('puts the report action before the download once the active report is known', async () => {
+    stubApi()
+    renderPanel('en', vi.fn(), new Set())
+    await screen.findByText(/3 topics/)
+
+    const toolbar = header.rebuild().parentElement as HTMLElement
+    expect(within(toolbar).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Restart analysis',
+      'Find new topics',
+      'Align pending chunks',
+      'Add to report',
+      'Download CSV'
+    ])
+  })
+
+  it('adds every topic\'s label and summary to the report as one item', async () => {
+    const summary = 'Comets cross the orbits of planets. Telescopes follow them. Their tails point away from the star.'
+    const overview = { ...OVERVIEW, topics: [{ ...TOPICS[0], description: summary }, ...TOPICS.slice(1)] }
+    const fetchMock = stubApi({ overview })
+    useReportStore.setState({ activeReportId: 1 })
+    renderPanel('en', vi.fn(), new Set())
+    await screen.findByText(/3 topics/)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add to report' }))
+
+    const added = () => posts(fetchMock).filter((post) => post.path === '/reports/1/items')
+    await waitFor(() => expect(added()).toHaveLength(1))
+    expect(added()[0].body).toEqual({
+      artifact_type: 'topics',
+      dedupe_key: `topics:${COLLECTION}`,
+      snapshot: {
+        collection: COLLECTION,
+        run_id: RUN_ID,
+        run_updated_at: OVERVIEW.updated_at,
+        coverage: { total: 120, assigned: 100 },
+        topics: [
+          {
+            id: 2,
+            label: 'Orbits and comets',
+            keywords: ['orbit', 'comet', 'telescope', 'planet', 'star'],
+            size: 60,
+            share: 0.5,
+            description: summary
+          },
+          { id: 0, label: 'Bread, pastry and ovens', keywords: ['dough', 'oven'], size: 30, share: 0.25, description: '' },
+          { id: 5, label: 'Knots and sails', keywords: ['knot'], size: 10, share: 0.0833, description: '' }
+        ]
+      }
+    })
+  })
+
+  it('shows the run as in the report once the report holds it', async () => {
+    stubApi()
+    renderPanel('en', vi.fn(), new Set([`topics:${COLLECTION}`]))
+    await screen.findByText(/3 topics/)
+
+    expect(screen.getByRole('button', { name: 'In report' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('asks before a rebuild', async () => {

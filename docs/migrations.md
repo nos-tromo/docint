@@ -50,6 +50,20 @@ data as dossiers instead.
 `SOCIAL_TIMESTAMP_LINK_ENABLED` and `SOCIAL_TEXT_LINK_ENABLED` are gone and can
 be removed from `.env`.
 
+## Topic summaries of four to five sentences
+
+**Affects:** collections whose topics were built before the change.
+
+Each topic's `description` is now a summary of four to five sentences instead
+of one. It is written once, when its topic is added, so an existing run keeps
+its one-sentence descriptions — and a later discover, from the Topics tab or an
+ingest with **Topics** on, writes the new length for the topics it adds only.
+
+**Fix:** **Restart analysis** in the Analysis → Topics tab (or
+`make topics OP=build COLLECTION=<name>`). A rebuild replaces every topic, so
+a chat focused on one of the old topics stops matching, as any rebuild does;
+see [topics.md](topics.md#build).
+
 ## Payload fields added after a collection was ingested
 
 These are ordinary re-ingests — no deletion needed — but they *do* need one,

@@ -277,7 +277,7 @@ async def test_run_banner_names_every_staged_file_with_size_and_type(
     combined = "\n".join(loguru_caplog_info.messages)
     assert f"Ingest job started | job_id={state.job_id} collection='field-notes' files=2" in combined
     assert "bytes=2.5 KB" in combined
-    assert "hybrid=true ner=true hate_speech=false summary=default resolve=true" in combined
+    assert "hybrid=true ner=true hate_speech=false summary=default resolve=true topics=default" in combined
     assert "file='annual-report.pdf' type=pdf bytes=2.0 KB" in combined
     assert "file='meeting-notes.docx' type=docx bytes=512 B" in combined
     await manager.stop()
@@ -307,11 +307,12 @@ async def test_run_banner_distinguishes_an_off_summary_from_an_unspecified_one(
         physical="u000000000000__field-notes",
         batch_dir=tmp_path,
         summary=False,
+        topics=True,
     )
     await _drain(manager, state)
 
     combined = "\n".join(loguru_caplog_info.messages)
-    assert "hybrid=default ner=default hate_speech=default summary=false resolve=false" in combined
+    assert "hybrid=default ner=default hate_speech=default summary=false resolve=false topics=true" in combined
     await manager.stop()
 
 

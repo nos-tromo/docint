@@ -380,6 +380,37 @@ describe('useIngestRunStore — tracking several jobs', () => {
     // v1 predates the summary toggle; it carries over as on, the same value
     // a fresh store starts at, never as an accidental opt-out.
     expect(useIngestRunStore.getState().summary).toBe(true)
+    expect(useIngestRunStore.getState().topics).toBe(true)
+  })
+
+  it('hydrates a v3 state saved before the topics toggle with the toggle on', () => {
+    // A fresh page: the store holds its initial state when the saved one is read.
+    useIngestRunStore.getState().reset()
+    localStorage.setItem(
+      'docint-ingest-run',
+      JSON.stringify({
+        version: 3,
+        state: {
+          collection: 'mydocs',
+          ner: false,
+          hate: true,
+          summary: false,
+          trackedJobs: [],
+          handledJobIds: []
+        }
+      })
+    )
+    useIngestRunStore.persist.rehydrate()
+
+    expect(useIngestRunStore.getState().topics).toBe(true)
+    expect(useIngestRunStore.getState().hate).toBe(true)
+    expect(useIngestRunStore.getState().summary).toBe(false)
+  })
+
+  it('persists the topics toggle', () => {
+    useIngestRunStore.getState().setTopics(false)
+    const saved = JSON.parse(localStorage.getItem('docint-ingest-run') ?? '{}') as { state?: { topics?: boolean } }
+    expect(saved.state?.topics).toBe(false)
   })
 
   it('gives v2 tracked jobs no owner on migration, the only one a non-admin has', () => {
@@ -452,7 +483,8 @@ describe('useIngestRunStore — finishing an interrupted upload', () => {
         collection: 'mydocs',
         ner: false,
         hate_speech: false,
-        summary: true
+        summary: true,
+        topics: true
       },
       null
     )

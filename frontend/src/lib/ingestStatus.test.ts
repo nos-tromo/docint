@@ -105,12 +105,13 @@ describe('parseProgressMessage', () => {
     })
   })
 
-  it('parses the aligning-topics stage into a task bar', () => {
+  it('parses the aligning-topics stage into the topics task bar', () => {
     // The ingest run aligns each batch's chunks to the collection's topics.
     expect(parseProgressMessage('Aligning topics: 120/4000 chunks processed')).toEqual({
       kind: 'task',
       taskKey: 'topics',
-      label: 'Aligning topics',
+      label: 'Topics',
+      stage: 'aligning',
       current: 120,
       total: 4000
     })
@@ -118,7 +119,33 @@ describe('parseProgressMessage', () => {
       progress('Aligning topics: 120/4000 chunks processed'),
       progress('Aligning topics: 400/4000 chunks processed')
     ])
-    expect(status.tasks).toEqual([{ key: 'topics', label: 'Aligning topics', current: 400, total: 4000 }])
+    expect(status.tasks).toEqual([{ key: 'topics', label: 'Topics', stage: 'aligning', current: 400, total: 4000 }])
+  })
+
+  it('folds every step of a topics build into one task that names its step', () => {
+    // The topics service's own copy, plus the ingest's closing frame. A step
+    // without a total reports 0 rather than inventing one.
+    const steps: [string, string, number, number][] = [
+      ['Starting topics run', 'starting', 0, 0],
+      ['Scanning chunks: 900 chunks scanned', 'scanning', 900, 0],
+      ['Reading the sample: 40/900 chunks read', 'sampling', 40, 900],
+      ['Fitting topics: 35 s', 'fitting', 35, 0],
+      ['Labelling topics: 3/12 topics labelled', 'labelling', 3, 12],
+      ['Assigning topics: 50/900 chunks processed', 'assigning', 50, 900],
+      ['Topics finished', 'finished', 0, 0]
+    ]
+    for (const [message, stage, current, total] of steps) {
+      expect(parseProgressMessage(message)).toEqual({
+        kind: 'task',
+        taskKey: 'topics',
+        label: 'Topics',
+        stage,
+        current,
+        total
+      })
+    }
+    const status = deriveIngestStatus(steps.slice(0, 5).map(([message]) => progress(message)))
+    expect(status.tasks).toEqual([{ key: 'topics', label: 'Topics', stage: 'labelling', current: 3, total: 12 }])
   })
 
   it('returns kind=unknown for unparseable input without throwing', () => {
@@ -136,6 +163,26 @@ describe('parseProgressMessage', () => {
 })
 
 describe('appendCollapsedEvent', () => {
+  it('keeps the topics and summary counters at one entry each while they interleave', () => {
+    // The topics stage runs on its own thread beside the summary, so their
+    // frames alternate for the length of both; neither may grow the log.
+    let log: IngestEvent[] = [{ event: 'ingestion_started', data: { job_id: 'j1' } }]
+    log = appendCollapsedEvent(log, progress('Starting topics run'))
+    for (let i = 1; i <= 50; i += 1) {
+      log = appendCollapsedEvent(log, progress(`Summarizing collection: ${i}/50 units processed`))
+      log = appendCollapsedEvent(log, progress(`Fitting topics: ${i * 5} s`))
+    }
+    log = appendCollapsedEvent(log, progress('Labelling topics: 1/4 topics labelled'))
+    log = appendCollapsedEvent(log, progress('Labelling topics: 4/4 topics labelled'))
+    expect(log.map((e) => (e.data as { message?: string }).message ?? e.event)).toEqual([
+      'ingestion_started',
+      'Starting topics run',
+      'Summarizing collection: 50/50 units processed',
+      'Fitting topics: 250 s',
+      'Labelling topics: 4/4 topics labelled'
+    ])
+  })
+
   it('collapses a report PDF’s per-page frames into one entry', () => {
     // One frame per laid-out page: a long report would otherwise append one
     // entry per page, and every append re-scans the whole log.

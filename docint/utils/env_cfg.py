@@ -2905,6 +2905,8 @@ class TopicsConfig:
 
     Attributes:
         enabled (bool): Whether topics can be built at all.
+        on_ingest (bool): Whether an ingest builds or extends the topics by default; the
+            ingest screen's Topics toggle overrides it per run.
         align_on_ingest (bool): Whether ingest assigns new chunks to the active run.
         labels (bool): Whether topics get a short generated label.
         fit_max_points (int): Most chunks sampled into one fit.
@@ -2917,6 +2919,7 @@ class TopicsConfig:
     """
 
     enabled: bool
+    on_ingest: bool
     align_on_ingest: bool
     labels: bool
     fit_max_points: int
@@ -2998,6 +3001,7 @@ def load_topics_env() -> TopicsConfig:
         min_topic_size = 2
     return TopicsConfig(
         enabled=flag("TOPICS_ENABLED"),
+        on_ingest=flag("TOPICS_ON_INGEST"),
         align_on_ingest=flag("TOPICS_ALIGN_ON_INGEST"),
         labels=flag("TOPICS_LABELS"),
         fit_max_points=_topics_bounded_int("TOPICS_FIT_MAX_POINTS", 100_000, minimum=1),

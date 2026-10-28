@@ -21,6 +21,12 @@ export interface IngestTask {
   label: string
   current: number
   total: number
+  /**
+   * The step a multi-step task is on — the topics task's `fitting`,
+   * `labelling` and so on. Its counts are that step's, and a step with no
+   * total (a fit's elapsed seconds) reports `total: 0`.
+   */
+  stage?: string
 }
 
 export interface IngestStageInfo {
@@ -113,6 +119,8 @@ export interface ParsedProgress {
   total?: number
   item?: string
   taskKey?: string
+  /** The step of a multi-step task (see `IngestTask.stage`). */
+  stage?: string
 }
 
 /** Warnings kept per run, matching `MAX_RETAINED_WARNINGS` in `core/jobs.py`. */
@@ -141,18 +149,40 @@ const TASK_PATTERNS: readonly { re: RegExp; key: string; label: string }[] = [
     re: /^Summarizing collection:\s*(\d+)\/(\d+) units processed$/,
     key: 'summary',
     label: 'Summarizing collection'
-  },
-  { re: /^Aligning topics:\s*(\d+)\/(\d+) chunks processed$/, key: 'topics', label: 'Aligning topics' }
+  }
+]
+
+/**
+ * The steps of an ingest's topics stage, all one task with one bar.
+ *
+ * The messages are the topics service's own (`_PROGRESS_COPY` in
+ * `core/topics/service.py`) plus the ingest's closing `Topics finished`. They
+ * run on a thread of their own beside the summary, so every one must parse as
+ * a counter: anything else would break the collapse of the two interleaving
+ * counters (`appendCollapsedEvent`). A step without a total — a scan, a fit's
+ * elapsed seconds, the opening and closing frames — reports `total: 0`.
+ */
+const TOPICS_PATTERNS: readonly { re: RegExp; stage: string }[] = [
+  { re: /^Starting topics run$/, stage: 'starting' },
+  { re: /^Waiting for another topics run on this collection:\s*(\d+) s$/, stage: 'waiting' },
+  { re: /^Scanning chunks:\s*(\d+) chunks scanned$/, stage: 'scanning' },
+  { re: /^Reading the sample:\s*(\d+)\/(\d+) chunks read$/, stage: 'sampling' },
+  { re: /^Fitting topics:\s*(\d+) s$/, stage: 'fitting' },
+  { re: /^Labelling topics:\s*(\d+)\/(\d+) topics labelled$/, stage: 'labelling' },
+  { re: /^Assigning topics:\s*(\d+)\/(\d+) chunks processed$/, stage: 'assigning' },
+  { re: /^Aligning topics:\s*(\d+)\/(\d+) chunks processed$/, stage: 'aligning' },
+  { re: /^Topics finished$/, stage: 'finished' }
 ]
 
 /**
  * Parse a free-form `ingestion_progress.message` payload into a structured
  * progress descriptor.
  *
- * The backend emits human-readable status strings; we recognise the four
- * known formats (`Core pipeline processing PDF`, `Core pipeline indexed`,
- * `Extracting entities`, `Detecting hate speech`) and return `kind: 'unknown'`
- * for anything else so the UI can show a generic "Working…" indicator.
+ * The backend emits human-readable status strings; we recognise the per-PDF
+ * and per-file formats (`Core pipeline processing PDF`, `Core pipeline
+ * indexed`), every counted stage (`TASK_PATTERNS`) and every step of the
+ * topics stage (`TOPICS_PATTERNS`), and return `kind: 'unknown'` for anything
+ * else so the UI can show a generic "Working…" indicator.
  *
  * Args:
  *   message: Raw status string from the SSE stream.
@@ -193,6 +223,20 @@ export function parseProgressMessage(message: string): ParsedProgress {
         label,
         current: Number(counter[1]),
         total: Number(counter[2])
+      }
+    }
+  }
+
+  for (const { re, stage } of TOPICS_PATTERNS) {
+    const step = trimmed.match(re)
+    if (step) {
+      return {
+        kind: 'task',
+        taskKey: 'topics',
+        label: 'Topics',
+        stage,
+        current: Number(step[1] ?? 0),
+        total: Number(step[2] ?? 0)
       }
     }
   }
@@ -453,7 +497,8 @@ export function deriveIngestStatus(
             key,
             label: parsed.label ?? key,
             current: parsed.current ?? 0,
-            total: parsed.total ?? 0
+            total: parsed.total ?? 0,
+            ...(parsed.stage ? { stage: parsed.stage } : {})
           }
           const idx = status.tasks.findIndex((t) => t.key === key)
           if (idx === -1) {

@@ -72,12 +72,17 @@ function topicReads(fetchMock: ReturnType<typeof stubApi>) {
     .map((url) => `${url.pathname.split('/topics/')[1]}${url.searchParams.get('cursor') ? `?cursor=${url.searchParams.get('cursor')}` : ''}`)
 }
 
-function renderRow(props: { expanded: boolean; onToggle?: () => void; onAsk?: () => void }) {
-  const { onToggle = vi.fn(), onAsk = vi.fn() } = props
+function renderRow(props: {
+  expanded: boolean
+  onToggle?: () => void
+  onAsk?: () => void
+  topic?: TopicSummary
+}) {
+  const { onToggle = vi.fn(), onAsk = vi.fn(), topic = TOPIC } = props
   const ui = (expanded: boolean) => (
     <QueryClientProvider client={client}>
       <ul>
-        <TopicRow topic={TOPIC} runId={RUN_ID} expanded={expanded} onToggle={onToggle} onAsk={onAsk} />
+        <TopicRow topic={topic} runId={RUN_ID} expanded={expanded} onToggle={onToggle} onAsk={onAsk} />
       </ul>
     </QueryClientProvider>
   )
@@ -105,7 +110,8 @@ describe('TopicRow', () => {
 
     setExpanded(true)
 
-    expect(screen.getByText('Keeping bees through the seasons.')).toBeInTheDocument()
+    const summary = screen.getByRole('region', { name: 'Summary' })
+    expect(within(summary).getByText('Keeping bees through the seasons.')).toBeInTheDocument()
     const evidence = screen.getByRole('region', { name: 'Evidence' })
     expect(await within(evidence).findByText('The colony swarmed in late spring.')).toBeInTheDocument()
     expect(within(evidence).getByText('field-notes.txt · page 2')).toBeInTheDocument()
@@ -122,6 +128,14 @@ describe('TopicRow', () => {
     await waitFor(() => expect(within(passages).queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument())
 
     expect(topicReads(fetchMock).sort()).toEqual(['4/chunks', '4/chunks?cursor=n1', '4/documents', '4/evidence'])
+  })
+
+  it('shows no summary section for a topic without one', () => {
+    stubApi()
+    renderRow({ expanded: true, topic: { ...TOPIC, description: '' } })
+
+    expect(screen.queryByRole('region', { name: 'Summary' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Evidence' })).toBeInTheDocument()
   })
 
   it('names the disclosure after the topic and what the next click does', () => {

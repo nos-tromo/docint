@@ -142,6 +142,50 @@ describe('Report view', () => {
     expect(html).toHaveAttribute('rel', 'noreferrer')
   })
 
+  it('lists the topics right after the summary, titled by their count and showing their labels', async () => {
+    mockFetch({
+      ...reportDetail,
+      item_count: 3,
+      items: [
+        reportDetail.items[0],
+        {
+          id: 12,
+          artifact_type: 'topics',
+          dedupe_key: 'topics:docs',
+          position: 1,
+          note: null,
+          snapshot: {
+            collection: 'docs',
+            run_id: 'run-1',
+            coverage: { total: 50, assigned: 40 },
+            topics: [
+              { id: 2, label: 'Hives and honey', keywords: ['hive'], size: 30, share: 0.6, description: 'Keepers tend hives.' },
+              { id: 0, label: 'Bread and ovens', keywords: [], size: 10, share: 0.2, description: '' }
+            ]
+          },
+          created_at: null
+        },
+        {
+          id: 13,
+          artifact_type: 'summary',
+          dedupe_key: 'summary:docs',
+          position: 2,
+          note: null,
+          snapshot: { collection: 'docs', text: 'The collection in brief.' },
+          created_at: null
+        }
+      ]
+    })
+    renderReport()
+
+    expect(await screen.findByText('2 topics')).toBeInTheDocument()
+    expect(screen.getByText('T2 Hives and honey · T0 Bread and ovens')).toBeInTheDocument()
+    const headings = screen
+      .getAllByText(/^(Summaries|Topics|Entity findings)$/)
+      .map((element) => element.textContent)
+    expect(headings).toEqual(['Summaries', 'Topics', 'Entity findings'])
+  })
+
   it('prompts to select a report when none is active', async () => {
     useReportStore.setState({ activeReportId: null })
     renderReport()

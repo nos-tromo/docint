@@ -1867,3 +1867,141 @@ def test_assessment_label_renders_as_a_rule_and_bold_heading(monkeypatch: pytest
     assert "<strong>Model assessment</strong>" in htm
     assert not re.search(r"<h2[^>]*>\s*The study reports", htm)
     assert "**Model assessment**" in md
+
+
+def _topics_snapshot() -> dict[str, Any]:
+    """A frozen topics item: two topics, one without a summary."""
+    return {
+        "collection": "c",
+        "run_id": "20261028-100000-abcdef",
+        "run_updated_at": "2026-10-28T09:00:00+00:00",
+        "coverage": {"total": 4000, "assigned": 3400},
+        "topics": [
+            {
+                "id": 3,
+                "label": "Harbour <traffic>",
+                "keywords": ["ship", "port", "quay"],
+                "size": 214,
+                "share": 0.25,
+                "description": "Ships come and go. Ports grow. Quays are rebuilt. Crews change. Trade follows.",
+            },
+            {"id": 7, "label": "=Tide tables", "keywords": [], "size": 12, "share": 0.5, "description": ""},
+        ],
+    }
+
+
+def _topics_report(show_toc: bool = False) -> dict[str, Any]:
+    """A report holding a chat answer, a topics item and a summary, added in that order."""
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "show_toc": show_toc,
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "chat_answer",
+                "note": None,
+                "snapshot": {"user_text": "q", "model_response": "a", "sources": []},
+            },
+            {"id": 2, "artifact_type": "topics", "note": "Read T3 first", "snapshot": _topics_snapshot()},
+            {"id": 3, "artifact_type": "summary", "note": None, "snapshot": {"collection": "c", "text": "s"}},
+        ],
+    }
+
+
+def test_topics_render_right_after_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The topics section follows the summary and precedes the findings, whatever order they were added in."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_topics_report())
+    summaries = md.index(f"## {ui_string('report_section_summaries')}")
+    topics = md.index(f"## {ui_string('report_section_topics')}")
+    chat = md.index(f"## {ui_string('report_section_chat')}")
+    assert summaries < topics < chat
+
+    htm = R.render_html(_topics_report(show_toc=True))
+    assert htm.index('id="sec-summaries"') < htm.index('id="sec-topics"') < htm.index('id="sec-chat"')
+    assert 'href="#sec-topics"' in htm
+
+
+def test_markdown_topics_list_each_topic_with_its_counts_keywords_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every topic gets its heading, a counts line and its summary; one without a summary gets none."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_single_item_report("topics", _topics_snapshot()))
+    assert "Topics: 2  ·  Chunks in a topic: 3400 / 4000  ·  As of: 2026-10-28" in md
+    assert "### T3 · Harbour <traffic>" in md
+    assert "*Chunks: 214  ·  Share: 25.0%  ·  Keywords: ship, port, quay*" in md
+    assert "Ships come and go. Ports grow. Quays are rebuilt. Crews change. Trade follows." in md
+    tide = md.index("### T7 · =Tide tables")
+    assert md[tide:].split("\n\n")[1] == "*Chunks: 12  ·  Share: 50.0%*"
+
+
+def test_html_topics_escape_every_stored_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Labels and summaries are client-sent text: escaped, and a summary is prose, not Markdown."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot = _topics_snapshot()
+    snapshot["topics"][0]["description"] = "**not bold** <script>x</script>"
+    htm = R.render_html(_single_item_report("topics", snapshot))
+    assert "Harbour &lt;traffic&gt;" in htm and "Harbour <traffic>" not in htm
+    assert "**not bold** &lt;script&gt;x&lt;/script&gt;" in htm and "<script>" not in htm
+    assert htm.count('class="topic-summary"') == 1
+    assert 'class="item item-prose"' in htm
+
+
+def test_topics_counts_read_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headings, labels and the decimal comma follow the report's language."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    md = R.render_markdown(_single_item_report("topics", _topics_snapshot()))
+    assert "## Themen" in md
+    assert "Themen: 2  ·  Chunks in einem Thema: 3400 / 4000  ·  Stand: 28.10.2026" in md
+    assert "*Chunks: 214  ·  Anteil: 25,0 %  ·  Schlüsselwörter: ship, port, quay*" in md
+
+
+def test_a_malformed_topics_snapshot_renders_what_it_can(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshot JSON is not trusted: wrong types are skipped instead of failing the export."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot = {
+        "coverage": "all",
+        "topics": [
+            "junk",
+            {"id": "x", "label": None, "keywords": "ship", "size": True, "share": "half", "description": 3},
+            {"id": 2.0, "label": "Kept", "keywords": ["a", 4, " "], "size": float("nan"), "share": 0.1},
+        ],
+    }
+    report = _single_item_report("topics", snapshot)
+    md = R.render_markdown(report)
+    assert "Topics: 2" in md
+    assert "### T2 · Kept" in md and "*Share: 10.0%  ·  Keywords: a*" in md
+    R.render_html(report)
+    rows = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(report))).read("topics.csv").decode("utf-8-sig")
+    assert len(rows.strip().splitlines()) == 3
+
+
+def test_csv_bundle_writes_one_topics_row_per_topic_with_formula_cells_guarded() -> None:
+    """``topics.csv`` carries every topic, its share as stored, and no cell a spreadsheet would evaluate."""
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_topics_report())))
+    assert {"topics.csv", "summaries.csv", "chat-answers.csv"} == set(zf.namelist())
+    lines = zf.read("topics.csv").decode("utf-8-sig").splitlines()
+    assert lines[0] == ",".join(R.TOPICS_COLUMNS)
+    assert lines[1].startswith("c,20261028-100000-abcdef,3,Harbour <traffic>,ship; port; quay,214,0.25,Ships come")
+    assert lines[2] == "c,20261028-100000-abcdef,7,'=Tide tables,,12,0.5,"
+
+
+def test_pdf_draws_every_topic_and_its_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The PDF lays out each topic's title, counts and summary, all within the page."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot = _topics_snapshot()
+    sentence = "Keepers describe how colonies change across the year and what each season asks of them."
+    snapshot["topics"] = [
+        {"id": i, "label": f"Topic{i}", "keywords": ["hive"], "size": 10, "share": 0.01, "description": sentence * 5}
+        for i in range(40)
+    ]
+    document = html_cls(string=R.render_html(_single_item_report("topics", snapshot))).render()
+    drawn = {word for words in words_drawn(document) for word in words}
+    assert {f"Topic{i}" for i in range(40)} <= drawn
+    assert len(document.pages) > 1
+    assert text_beyond_the_page(document) == []

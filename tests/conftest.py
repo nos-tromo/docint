@@ -202,8 +202,10 @@ def _hermetic_topics_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[N
     """Keep a developer ``.env`` out of the topics settings, and give each test a store root.
 
     ``TOPICS_DIR`` points at a fresh directory so nothing writes under the home directory, and
-    every other ``TOPICS_*`` knob is cleared so the defaults apply. A private ``MonkeyPatch``
-    for the reason :func:`_hermetic_hybrid_env` gives.
+    every other ``TOPICS_*`` knob is cleared so the defaults apply — except ``TOPICS_ON_INGEST``,
+    which is kept off the way agent turns are: on by default, every ingest a test runs would
+    start a topic build against its test collection. Tests of that stage set it themselves. A
+    private ``MonkeyPatch`` for the reason :func:`_hermetic_hybrid_env` gives.
 
     Args:
         tmp_path_factory: Pytest's session temp-directory factory.
@@ -214,6 +216,7 @@ def _hermetic_topics_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[N
     mp = pytest.MonkeyPatch()
     for name in (
         "TOPICS_ENABLED",
+        "TOPICS_ON_INGEST",
         "TOPICS_ALIGN_ON_INGEST",
         "TOPICS_LABELS",
         "TOPICS_FIT_MAX_POINTS",
@@ -229,6 +232,7 @@ def _hermetic_topics_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[N
         "DOCINT_TOPICS_CONCURRENCY",
     ):
         mp.delenv(name, raising=False)
+    mp.setenv("TOPICS_ON_INGEST", "false")
     mp.setenv("TOPICS_DIR", str(tmp_path_factory.mktemp("topics")))
     yield
     mp.undo()

@@ -359,6 +359,7 @@ export const de: Strings = {
   'ingest.opt_ner': 'Entitäten',
   'ingest.opt_hate': 'Hatespeech',
   'ingest.opt_summary': 'Zusammenfassung',
+  'ingest.opt_topics': 'Themen',
 
   // inspector orphans
   'inspector.file_types': 'Dateitypen',
@@ -496,6 +497,7 @@ export const de: Strings = {
   'topics.stage_assigning': 'Chunks werden zugeordnet: {done} von {total}',
   'topics.stage_aligning': 'Ausstehende Chunks werden zugeordnet: {done} von {total}',
   'topics.stage_other': 'Themen werden bearbeitet…',
+  'topics.stage_finished': 'Fertig',
   'topics.warning_none_found':
     'Die Berechnung hat keine Themen gefunden; die Sammlung behält ihre bisherigen Themen.',
   'topics.warning_none_new':
@@ -524,6 +526,7 @@ export const de: Strings = {
   'topics.show': '{label} anzeigen',
   'topics.hide': '{label} ausblenden',
   'topics.ask_in_chat': 'Im Chat fragen',
+  'topics.summary': 'Zusammenfassung',
   'topics.evidence': 'Belege',
   'topics.documents': 'Dokumente',
   'topics.documents_more': 'Weitere Dokumente sind nicht aufgeführt.',
@@ -577,10 +580,11 @@ export const de: Strings = {
   'report.pdf_finishing': 'PDF wird fertiggestellt…',
   'report.pdf_failed': 'Das PDF konnte nicht erstellt werden.',
   'report.empty_report_hint':
-    'Dieser Bericht ist leer. Verwenden Sie das Berichtssymbol bei einer Chat-Antwort, einem Entitätsfund oder einem Hatespeech-Fund, um sie hier hinzuzufügen.',
+    'Dieser Bericht ist leer. Verwenden Sie das Berichtssymbol bei einer Chat-Antwort, einem Entitäts- oder Hatespeech-Fund oder bei Zusammenfassung und Themen in der Analyse, um sie hier hinzuzufügen.',
   'report.section_show': '{title} anzeigen',
   'report.section_hide': '{title} ausblenden',
   'report.section_summaries': 'Zusammenfassungen',
+  'report.section_topics': 'Themen',
   'report.section_chat_answers': 'Chat-Antworten',
   'report.section_entity_findings': 'Entitätsfunde',
   'report.section_hate_findings': 'Hatespeech-Funde',
@@ -589,6 +593,8 @@ export const de: Strings = {
   'report.default_entity_finding': 'Entitätsfund',
   'report.default_hate_finding': 'Hatespeech-Fund',
   'report.default_summary': 'Zusammenfassung',
+  'report.topics_title_one': '{count} Thema',
+  'report.topics_title_other': '{count} Themen',
   'report.move_up_aria': 'Nach oben verschieben',
   'report.move_down_aria': 'Nach unten verschieben',
   'report.remove_item_aria': 'Eintrag entfernen',
@@ -723,7 +729,7 @@ export const de: Strings = {
   'ingest.task_linking_images': 'Bilder werden Postings zugeordnet',
   'ingest.task_embedding': 'Embeddings und Speicherung',
   'ingest.task_summary': 'Zusammenfassung',
-  'ingest.task_topics': 'Themen werden zugeordnet',
+  'ingest.task_topics': 'Themen',
   'ingest.stage_progress': '{current} von {total}',
   'ingest.preprocess_pdf': 'PDFs werden gelesen',
   'ingest.preprocess_ocr_pages': 'Gescannte Seiten werden erkannt',

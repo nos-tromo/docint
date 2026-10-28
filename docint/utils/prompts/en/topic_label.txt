@@ -1,8 +1,14 @@
-You name one topic of a collection of passages.
+You describe one topic of a collection of passages and give it a name.
 
 Its most characteristic words, strongest first: {keywords}
 
 Passages from the topic:
 {passages}
 
-Reply with a JSON object with two keys: "description", one sentence saying what the passages have in common, and "label", a name for the topic of at most six words. Name what the passages share, such as a theme, an event, a setting or an argument, never the title or author of the work, document or collection they come from. Use the passages' own terms and invent nothing.
+Reply with a JSON object with two keys, "description" and "label".
+
+"description" summarizes the topic in four to five sentences of plain prose, about 80 to 120 words, without lists or headings. Start with what the passages have in common, then cover their main subjects, the people, organisations, places or events they name, and the claims, arguments or positions they put forward, including where these differ. Write about the topic itself rather than about the passages as texts.
+
+"label" is a name for the topic of at most six words.
+
+Name what the passages share, such as a theme, an event, a setting or an argument, never the title or author of the work, document or collection they come from. Use the passages' own terms and invent nothing: every statement in the description must be supported by the passages.

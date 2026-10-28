@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from agent_fakes import KeywordClient, ready_schema
 from fastapi.testclient import TestClient
+from typing_extensions import override
 
 from docint.core import api as api_module
 from docint.core import collection_writes
@@ -23,6 +24,7 @@ from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.ingest.preprocess import PreprocessPool, StageProgress
 from docint.core.jobs import IngestJobManager, IngestJobState, JobCancelled, JobRunner
 from docint.core.rag import RAG, IngestStats
+from docint.utils.topics_client import TopicsUnreachable
 
 
 def _default_runner(state: Any, push: Any) -> dict[str, Any]:
@@ -881,6 +883,7 @@ class _AlignService:
         self.error = error
         self.ticks = ticks
         self.calls: list[str] = []
+        self.threads: list[str] = []
 
     def align_on_ingest(self, physical: str, *, owner_created_at: Any, progress: Any) -> Any:
         """Record the call, report progress, then answer.
@@ -897,6 +900,7 @@ class _AlignService:
             Exception: The scripted error.
         """
         self.calls.append(physical)
+        self.threads.append(threading.current_thread().name)
         for done in range(1, self.ticks + 1):
             progress(done, self.ticks)
         if self.error is not None:
@@ -925,8 +929,8 @@ def _run_with_align(
     return result, pushed
 
 
-def test_ingest_aligns_topics_after_resolution_and_before_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The alignment stage reports its counter between the resolution and the summary stages.
+def test_ingest_aligns_topics_beside_resolution_and_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The align stage reports its counter on its own thread; resolution still precedes the summary.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -948,8 +952,9 @@ def test_ingest_aligns_topics_after_resolution_and_before_the_summary(monkeypatc
 
     messages = [p["message"] for ev, p in pushed if ev == "ingestion_progress"]
     assert service.calls == ["u0123456789ab__mydocs"]
-    assert messages.index("Resolving entities...") < messages.index("Aligning topics: 1/2 chunks processed")
-    assert messages.index("Aligning topics: 2/2 chunks processed") < messages.index("Building collection summary...")
+    assert service.threads and all(name.startswith("ingest-topics") for name in service.threads)
+    assert {"Aligning topics: 1/2 chunks processed", "Aligning topics: 2/2 chunks processed"} <= set(messages)
+    assert messages.index("Resolving entities...") < messages.index("Building collection summary...")
 
 
 def test_ingest_topics_stage_is_silent_without_a_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1018,3 +1023,387 @@ def test_topics_align_on_ingest_false_skips_the_stage(monkeypatch: pytest.Monkey
 
     assert service.calls == []
     assert not [ev for ev, _ in pushed if ev == "warning"]
+
+
+class _RunService:
+    """A topics service whose ``run_on_ingest`` is scripted."""
+
+    def __init__(
+        self,
+        outcome: Any = None,
+        error: BaseException | None = None,
+        frames: tuple[tuple[str, int, int], ...] = (("labelling", 1, 2), ("labelling", 2, 2)),
+        warnings: tuple[tuple[str, str], ...] = (),
+        before: Callable[[], None] | None = None,
+    ) -> None:
+        """Script the answer.
+
+        Args:
+            outcome (Any): What the stage returns; a non-deferred outcome when ``None``.
+            error (BaseException | None): Raised after the frames instead of returning.
+            frames (tuple[tuple[str, int, int], ...]): Progress frames reported first.
+            warnings (tuple[tuple[str, str], ...]): Warnings reported after the frames.
+            before (Callable[[], None] | None): Called before anything is reported.
+        """
+        self.outcome = outcome if outcome is not None else SimpleNamespace(deferred=False)
+        self.error = error
+        self.frames = frames
+        self.warnings = warnings
+        self.before = before
+        self.calls: list[dict[str, Any]] = []
+        self.threads: list[threading.Thread] = []
+
+    def run_on_ingest(self, physical: str, *, logical: str, owner_created_at: Any, progress: Any, warn: Any) -> Any:
+        """Record the call, report, then answer.
+
+        Args:
+            physical (str): Physical collection name.
+            logical (str): Logical collection name.
+            owner_created_at (Any): Reads the ownership time.
+            progress (Any): Receives ``(stage, done, total)``.
+            warn (Any): Receives ``(code, message)``.
+
+        Returns:
+            Any: The scripted outcome.
+
+        Raises:
+            BaseException: The scripted error.
+        """
+        self.calls.append({"physical": physical, "logical": logical})
+        self.threads.append(threading.current_thread())
+        if self.before is not None:
+            self.before()
+        for stage, done, total in self.frames:
+            progress(stage, done, total)
+        for code, message in self.warnings:
+            warn(code, message)
+        if self.error is not None:
+            raise self.error
+        return self.outcome
+
+    def align_on_ingest(self, physical: str, *, owner_created_at: Any, progress: Any) -> Any:
+        """Fail: a run with topics requested never only aligns.
+
+        Args:
+            physical (str): Physical collection name.
+            owner_created_at (Any): Reads the ownership time.
+            progress (Any): Receives ``(done, total)``.
+
+        Raises:
+            AssertionError: Always.
+        """
+        raise AssertionError("align_on_ingest called while topics were requested")
+
+
+def _run_with_topics(
+    monkeypatch: pytest.MonkeyPatch,
+    service: Any,
+    *,
+    topics: bool | None = True,
+    summary: Callable[..., Any] | None = None,
+) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+    """Run an ingest job with topics requested and a scripted topics service.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        service (Any): The scripted service.
+        topics (bool | None): The job's Topics option.
+        summary (Callable[..., Any] | None): The summary build; none runs when omitted.
+
+    Returns:
+        tuple[dict[str, Any], list[tuple[str, dict[str, Any]]]]: The result and the pushed events.
+    """
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "true" if summary is not None else "false")
+    if summary is not None:
+        monkeypatch.setattr(api_module.rag, "build_tree_summary", summary)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setattr(api_module.rag, "topics_service", lambda: service)
+    monkeypatch.setattr(api_module.rag, "collection_created_at", lambda physical: None)
+    pushed: list[tuple[str, dict[str, Any]]] = []
+    lock = threading.Lock()
+
+    def push(event: str, payload: dict[str, Any]) -> None:
+        with lock:
+            pushed.append((event, payload))
+
+    state = _make_state(kind="ingest")
+    state.topics = topics
+    result = api_module._run_ingest_job(state, push)
+    return result, pushed
+
+
+def _topics_frames(pushed: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    """List the stages of the topics frames an ingest pushed.
+
+    Args:
+        pushed (list[tuple[str, dict[str, Any]]]): The pushed events.
+
+    Returns:
+        list[str]: The ``stage`` of every progress frame that carries one.
+    """
+    return [p["stage"] for ev, p in pushed if ev == "ingestion_progress" and "stage" in p]
+
+
+def test_requested_topics_are_modelled_on_their_own_thread_beside_the_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The topics stage and the summary run at the same time, each on its own thread.
+
+    Each side waits for the other to have started, so the test only passes when
+    the two overlap; a failed wait shows up as a warning.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    topics_started = threading.Event()
+    summary_started = threading.Event()
+    summary_threads: list[str] = []
+
+    def summary(progress: Any = None) -> dict[str, Any]:
+        summary_threads.append(threading.current_thread().name)
+        summary_started.set()
+        if not topics_started.wait(10):
+            raise AssertionError("the topics stage never ran beside the summary")
+        return {}
+
+    def before() -> None:
+        topics_started.set()
+        if not summary_started.wait(10):
+            raise AssertionError("the summary never ran beside the topics stage")
+
+    service = _RunService(before=before)
+    result, pushed = _run_with_topics(monkeypatch, service, summary=summary)
+
+    assert result["empty"] is False
+    assert [p for ev, p in pushed if ev == "warning"] == []
+    assert service.calls == [{"physical": "u0123456789ab__mydocs", "logical": "mydocs"}]
+    assert service.threads[0].name.startswith("ingest-topics")
+    assert summary_threads and summary_threads[0] != service.threads[0].name
+    assert _topics_frames(pushed) == ["starting", "labelling", "labelling", "finished"]
+
+
+def test_the_topics_stage_opens_and_closes_with_frames_the_card_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stage starts with a ``starting`` frame and ends with ``finished`` in the service's own copy.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _, pushed = _run_with_topics(monkeypatch, _RunService(frames=(("fitting", 5, 0),)))
+
+    frames = [p for ev, p in pushed if ev == "ingestion_progress" and "stage" in p]
+    assert frames[0] == {"message": "Starting topics run", "stage": "starting", "done": 0, "total": 0}
+    assert frames[1] == {"message": "Fitting topics: 5 s", "stage": "fitting", "done": 5, "total": 0}
+    assert frames[-1] == {"message": "Topics finished", "stage": "finished", "done": 0, "total": 0}
+
+
+def test_topics_follow_topics_on_ingest_when_the_run_names_no_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absent option follows ``TOPICS_ON_INGEST``; an explicit one wins over it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("TOPICS_ON_INGEST", "true")
+    service = _RunService()
+    _run_with_topics(monkeypatch, service, topics=None)
+    assert len(service.calls) == 1
+
+    monkeypatch.setenv("TOPICS_ON_INGEST", "false")
+    align = _AlignService()
+    _run_with_topics(monkeypatch, align, topics=None)
+    assert align.calls == ["u0123456789ab__mydocs"]
+
+    service = _RunService()
+    _run_with_topics(monkeypatch, service, topics=True)
+    assert len(service.calls) == 1
+
+
+def test_topics_off_only_aligns_and_topics_disabled_skips_the_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the option off the stage only aligns; with topics switched off it does nothing.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    align = _AlignService()
+    _run_with_topics(monkeypatch, align, topics=False)
+    assert align.calls == ["u0123456789ab__mydocs"]
+
+    monkeypatch.setenv("TOPICS_ENABLED", "false")
+    service = _RunService()
+    _, pushed = _run_with_topics(monkeypatch, service, topics=True)
+    assert service.calls == []
+    assert _topics_frames(pushed) == []
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "extra"),
+    [
+        (
+            api_module.TopicsRefused("too_few_chunks", found=5, needed=8),
+            "too_few_chunks",
+            {"found": 5, "needed": 8},
+        ),
+        (api_module.TopicsRefused("dimension_changed"), "dimension_changed", {}),
+    ],
+)
+def test_a_refused_topics_stage_is_a_coded_warning(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, code: str, extra: dict[str, int]
+) -> None:
+    """A refusal reaches the card as a warning with its code and counts; the ingest completes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        error (Exception): The refusal.
+        code (str): Its code.
+        extra (dict[str, int]): The counts it carries.
+    """
+    result, pushed = _run_with_topics(monkeypatch, _RunService(error=error))
+
+    warnings = [p for ev, p in pushed if ev == "warning"]
+    assert result["empty"] is False
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == code
+    assert {key: warnings[0][key] for key in extra} == extra
+    assert _topics_frames(pushed)[-1] == "finished"
+
+
+def test_a_collection_replaced_mid_stage_warns_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A collection replaced while its topics were modelled has nothing left to report on.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    _, pushed = _run_with_topics(monkeypatch, _RunService(error=api_module.TopicsRefused("collection_changed")))
+
+    assert [ev for ev, _ in pushed if ev == "warning"] == []
+
+
+def test_an_endpoint_fault_is_a_static_coded_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fit-service fault warns with its code and static copy, never the error's own text.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    error = TopicsUnreachable("http://topics.internal:8000/topics/fit could not be reached; check TOPICS_API_BASE")
+    result, pushed = _run_with_topics(monkeypatch, _RunService(error=error))
+
+    warnings = [p for ev, p in pushed if ev == "warning"]
+    assert result["empty"] is False
+    assert warnings == [
+        {"message": "The topics service could not be reached.", "code": "topics_unreachable"},
+    ]
+    assert "topics.internal" not in str(pushed)
+
+
+def test_any_other_topics_fault_is_a_warning_and_the_ingest_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unexpected failure warns ``topics_failed`` without its text, and the run completes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    result, pushed = _run_with_topics(monkeypatch, _RunService(error=RuntimeError("SECRETBOOM")))
+
+    assert result["empty"] is False
+    assert [(p["code"], p["message"]) for ev, p in pushed if ev == "warning"] == [
+        ("topics_failed", "Topic modeling failed.")
+    ]
+    assert "SECRETBOOM" not in str(pushed)
+
+
+def test_a_deferred_topics_stage_warns_and_service_warnings_pass_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another job holding the collection defers the stage; the service's own warnings reach the card.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    service = _RunService(
+        outcome=SimpleNamespace(deferred=True),
+        warnings=(("none_found", "The fit found no topics; the collection keeps its current topics."),),
+    )
+    _, pushed = _run_with_topics(monkeypatch, service)
+
+    assert [p["code"] for ev, p in pushed if ev == "warning"] == ["none_found", "topics_deferred"]
+
+
+def test_a_cancel_reaching_the_topics_stage_cancels_the_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel raised inside the topics stage is not swallowed, and the stage has ended by then.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    service = _RunService(error=JobCancelled("test-job-id"))
+    with pytest.raises(JobCancelled):
+        _run_with_topics(monkeypatch, service)
+    assert service.threads and not service.threads[0].is_alive()
+
+
+def test_a_cancel_on_the_job_thread_stops_the_topics_stage_before_the_job_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel landing in the summary ends the job only once the topics stage has stopped.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    started = threading.Event()
+    pushes_after: list[int] = []
+
+    class _Endless(_RunService):
+        """Reports frames until its push refuses one."""
+
+        @override
+        def run_on_ingest(self, physical: str, *, logical: str, owner_created_at: Any, progress: Any, warn: Any) -> Any:
+            """Report fitting heartbeats until stopped.
+
+            Args:
+                physical (str): Physical collection name.
+                logical (str): Logical collection name.
+                owner_created_at (Any): Reads the ownership time.
+                progress (Any): Receives ``(stage, done, total)``.
+                warn (Any): Receives ``(code, message)``.
+
+            Returns:
+                Any: Never returns normally.
+            """
+            self.threads.append(threading.current_thread())
+            seconds = 0
+            while True:
+                progress("fitting", seconds, 0)
+                started.set()
+                seconds += 1
+                time.sleep(0.01)
+
+    cancelled = threading.Event()
+
+    def summary(progress: Any = None) -> dict[str, Any]:
+        assert started.wait(10)
+        # As the job manager cancels: the next frame on either thread raises.
+        cancelled.set()
+        progress(1, 2)
+        return {}
+
+    service = _Endless()
+    pushed: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setenv("SUMMARY_ON_INGEST", "true")
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setattr(api_module.rag, "build_tree_summary", summary)
+    monkeypatch.setattr(api_module.rag, "topics_service", lambda: service)
+    monkeypatch.setattr(api_module.rag, "collection_created_at", lambda physical: None)
+    lock = threading.Lock()
+
+    def push(event: str, payload: dict[str, Any]) -> None:
+        if cancelled.is_set():
+            raise JobCancelled("test-job-id")
+        with lock:
+            pushed.append((event, payload))
+
+    state = _make_state(kind="ingest")
+    state.topics = True
+    with pytest.raises(JobCancelled):
+        api_module._run_ingest_job(state, push)
+    pushes_after.append(len(pushed))
+    time.sleep(0.05)
+    pushes_after.append(len(pushed))
+
+    assert not service.threads[0].is_alive()
+    assert pushes_after[0] == pushes_after[1]
+    assert "finished" not in _topics_frames(pushed)

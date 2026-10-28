@@ -36,6 +36,9 @@ function renderIn(ui: ReactElement) {
 }
 
 let stagedFiles = 0
+/** Whether `/config` reports topics on, and what `/config/ingest-defaults` says of them (absent when undefined). */
+let topicsEnabled = false
+let topicsDefault: boolean | undefined
 let stagedStages: unknown[] = []
 let fetchMock: ReturnType<typeof vi.fn>
 /** Job ids the mocked `/ingest/jobs/{id}` endpoint currently reports as
@@ -101,6 +104,8 @@ beforeEach(() => {
   useIngestJobsStore.getState().clear()
   useUiStore.setState({ selectedCollection: null, selectedOwner: null })
   stagedFiles = 0
+  topicsEnabled = false
+  topicsDefault = undefined
   stagedStages = []
   knownJobIds = new Set()
   jobOwners = {}
@@ -113,7 +118,12 @@ beforeEach(() => {
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
     if (u.includes('/collections/list')) return jsonRes([])
     if (u.includes('/config/ingest-defaults'))
-      return jsonRes({ ner: false, hate_speech: false, summary: true })
+      return jsonRes({
+        ner: false,
+        hate_speech: false,
+        summary: true,
+        ...(topicsDefault === undefined ? {} : { topics: topicsDefault })
+      })
     if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
     if (u.includes('/ingest/staged'))
       return jsonRes({
@@ -150,7 +160,8 @@ beforeEach(() => {
         graph_max_top_k: 0,
         collection_timeout: 0,
         max_upload_bytes: 1024 * 1024,
-        language: 'en'
+        language: 'en',
+        topics_enabled: topicsEnabled
       })
     return jsonRes(null)
   })
@@ -199,6 +210,29 @@ describe('Ingest', () => {
     summary.click()
     await waitFor(() => expect(summary).toHaveAttribute('aria-pressed', 'false'))
     expect(useIngestRunStore.getState().summary).toBe(false)
+  })
+
+  it('offers no Topics toggle while the deployment has topics switched off', async () => {
+    renderIn(<Ingest />)
+    await screen.findByRole('button', { name: 'Entities' })
+    await waitFor(() => expect(callsMatching('/config')).toBeGreaterThan(0))
+    expect(screen.queryByRole('button', { name: 'Topics' })).not.toBeInTheDocument()
+  })
+
+  it('renders a Topics toggle seeded from the deployment default that flips the run store', async () => {
+    topicsEnabled = true
+    topicsDefault = false
+    renderIn(<Ingest />)
+
+    const topics = await screen.findByRole('button', { name: 'Topics' })
+    await waitFor(() => expect(topics).toHaveAttribute('aria-pressed', 'false'))
+    expect(useIngestRunStore.getState().topics).toBe(false)
+
+    topics.click()
+    await waitFor(() => expect(topics).toHaveAttribute('aria-pressed', 'true'))
+    expect(useIngestRunStore.getState().topics).toBe(true)
+    // The other options are untouched — the toggle owns exactly one flag.
+    expect(useIngestRunStore.getState().summary).toBe(true)
   })
 
   it('renders live progress for the active job and never flashes the interrupted banner', async () => {
@@ -776,7 +810,8 @@ describe('Ingest — interrupted run', () => {
       collection: 'mydocs',
       ner: true,
       hate_speech: false,
-      summary: true
+      summary: true,
+      topics: true
     })
   })
 

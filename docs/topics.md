@@ -63,13 +63,18 @@ cannot stay pending forever.
    single words, at most 10 per topic, each found in at least two texts, stop
    words left out (see [The fit service](#the-fit-service)). With
    `TOPICS_LABELS` on, the chat model (`TEXT_MODEL`) writes each topic a label
-   of at most 80 characters and a one-sentence description, from its keywords
-   and the first 800 characters of its five fit members nearest the centre,
-   four topics at a time. The label names what the passages share, never the
-   title or author of the work they come from. The prompt is
+   of at most 80 characters and a summary of four to five sentences (the
+   topic's `description`), from its keywords and the first 800 characters of
+   its eight fit members nearest the centre. Each topic is one request, four
+   run at a time, and each may answer in up to 1,024 tokens. The summary says
+   what the passages have in common, then their main subjects, the people,
+   places or events they name and the positions they take, in the passages'
+   own terms; a summary longer than 1,500 characters is cut at its last
+   sentence end within them. The label names what the passages share, never
+   the title or author of the work they come from. The prompt is
    `docint/utils/prompts/{en,de}/topic_label.txt`, and the reply is constrained
    by a JSON schema while the endpoint accepts one. A topic whose label cannot
-   be written is named by its first four keywords.
+   be written is named by its first four keywords and has no summary.
 6. **Assign.** If the collection's ownership row still has the creation time
    it had when the build started, the run is saved, then every eligible chunk
    is written (see [Assignment](#assignment)).
@@ -293,7 +298,9 @@ valid: a build then warns `none_found`, a discover `none_new`.
 fit as busy. docint sends a fit that was answered busy again, ten attempts in
 all, each after the wait the service asks for (30 s when it names none), and
 then fails the job with `topics_busy`. A request waits up to `TOPICS_TIMEOUT`
-(default 3600 s) for its answer, which arrives only when the fit is done. The
+(default 3600 s) for its answer, which arrives only when the fit is done;
+connecting gives up after 30 s, so an address nothing answers on fails fast
+rather than holding an ingest for the whole timeout. The
 call runs on a background thread while the job reports the `fitting` stage
 every 5 s. A job cancelled during the fit abandons the call; the service
 finishes that fit before it takes another.
@@ -407,24 +414,52 @@ never chunk text, labels, keywords or vectors.
 
 ## The ingest stage
 
-With `TOPICS_ENABLED` and `TOPICS_ALIGN_ON_INGEST` on (both default), every
-ingest job runs an align as one of its last stages, after entity resolution
-and before the collection summary: it places the collection's pending chunks,
-the job's new ones among them, in the active run. It reports
-`ingestion_progress` frames of the form
-`Aligning topics: {done}/{total} chunks processed`, which the ingest card shows
-as an **Aligning topics** bar. It never waits for the lock:
+With `TOPICS_ENABLED` on, every ingest job has a topics stage. It starts as
+soon as the job's chunks are written and runs on a thread of its own, beside
+entity resolution and the collection summary (which stay in order on the job's
+own thread); the job ends once both threads have. What the stage does is the
+run's **Topics** option — the ingest screen's toggle, `topics` on
+`POST /ingest/finalize` — or, when the run names none, `TOPICS_ON_INGEST`
+(default on):
+
+- **On, and the collection has no run.** The stage builds one, as a `build`
+  job does ([Build](#build)).
+- **On, and the collection has a run.** The stage aligns the pending chunks,
+  the job's new ones among them. When that align leaves at least the run's
+  minimum topic size of them unassigned, it then looks for new topics among
+  the unassigned pool, as a `discover` job does ([Discover](#discover));
+  fewer cannot make a topic of their own, so a small ingest never refits the
+  pool. Existing topics, their ids and every topic focus stay as they were. A
+  pool too small to fit (`too_few_unassigned`) or a fit that finds nothing new
+  (`none_new`) is the normal outcome here and warns nothing; **Find new
+  topics** in the Topics tab still searches the whole pool on demand.
+- **Off.** With `TOPICS_ALIGN_ON_INGEST` on (default), the stage only aligns
+  the pending chunks in the active run — no model call — and does nothing when
+  there is none.
+
+It reports `ingestion_progress` frames carrying a topics job's own `stage`,
+`done`, `total` and message, opened by `starting` and, when it builds or
+extends, closed by `{"message": "Topics finished", "stage": "finished"}`. The
+ingest card draws them as one **Topics** bar that names the step it is on, and
+pulses through a step that has no total (scanning, fitting). It never waits
+for the lock:
 
 - **Another topics job holds the collection.** The stage is skipped with the
   warning `topics_deferred`, and the new chunks stay pending until the next
   align.
-- **The stage fails.** The warning `topics_align_failed`; the ingest still
-  completes.
-- **No active run, or the dense vectors changed size.** The stage does
-  nothing; the second case logs `code=dimension_changed`.
+- **The build is refused** (`too_few_chunks`, with `found` and `needed`), **the
+  fit finds no topics** (`none_found`) or **the dense vectors changed size**
+  (`dimension_changed`): a coded warning; the ingest still completes.
+- **The fit service fails.** A warning with the endpoint fault's code and
+  static message ([The fit service](#the-fit-service)); any other fault warns
+  `topics_failed` (`topics_align_failed` for an align). The ingest still
+  completes, and the backend log names the fault.
 
 Its warnings show on the ingest job's card, like the ingest's own. A cancelled
-ingest stops in this stage as in any other.
+ingest stops this stage at its next frame (within a fit's 5 s heartbeat, or
+once the label calls in flight return), and the job ends only after it has.
+The stage runs inside the ingest job's worker slot, not a
+`DOCINT_TOPICS_CONCURRENCY` one.
 
 ## In the app
 
@@ -432,10 +467,15 @@ The **Topics** tab, the chat's topic focus and the Inspector's **Topics**
 column appear only while `GET /config` reports `topics_enabled`. Each screen is
 described in [ui-guide.md](ui-guide.md).
 
+- **The ingest screen's Topics toggle** sets a run's Topics option, seeded from
+  `TOPICS_ON_INGEST` (see [The ingest stage](#the-ingest-stage)).
 - **The Topics tab** (Analysis) shows the active run's coverage, its topics
   largest first, and the actions that build, extend and align it, plus a CSV
-  download. Which job outcome it shows, and how its CSV keeps a spreadsheet
-  from reading a cell as a formula, are in
+  download. An opened topic starts with its summary. One report action adds
+  the whole run — every topic's label, counts, keywords and summary — to the
+  active report as a single item, rendered right after the collection summary
+  ([reports.md](reports.md)). Which job outcome it shows, and how its CSV keeps
+  a spreadsheet from reading a cell as a formula, are in
   [ui-guide.md](ui-guide.md#analysis-srcroutesanalysistsx).
 - **The topic focus** narrows the chat and the search panel to one topic. A
   topic row's **Ask in chat** opens a new chat with it, and the chat's first
@@ -466,8 +506,9 @@ validator as topic checks, as keyword counts do. See
 | Variable | Default | Effect |
 |---|---|---|
 | `TOPICS_ENABLED` | `true` | Topics routes, jobs, the ingest stage, the agent tool and the SPA's topics screens. |
-| `TOPICS_ALIGN_ON_INGEST` | `true` | Run the ingest stage. |
-| `TOPICS_LABELS` | `true` | Have the chat model label each topic. |
+| `TOPICS_ON_INGEST` | `true` | Default of a run's Topics option: build or extend the topics as an ingest stage. |
+| `TOPICS_ALIGN_ON_INGEST` | `true` | With the option off, still align the new chunks as an ingest stage. |
+| `TOPICS_LABELS` | `true` | Have the chat model write each topic's label and summary. |
 | `TOPICS_FIT_MAX_POINTS` | `100000` | Most chunks one fit samples. |
 | `TOPICS_MIN_TEXT_CHARS` | `40` | Shortest prepared text that joins a fit. |
 | `TOPICS_SEED` | `42` | Sampling and fit seed. |
@@ -513,3 +554,7 @@ with its compose value, in its Paths table.
 - **Unassigned chunks are counted, not listed.** Topic `-1` has no evidence,
   documents or chunks route (404). The overview counts the unassigned and the
   pending chunks.
+- **A summary is written once, when its topic is added.** A run built before
+  summaries grew to four or five sentences keeps its one-sentence descriptions
+  until it is rebuilt; a discover writes the new length for the topics it
+  adds only.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import html
 import io
 import json
+import math
 import re
 import unicodedata
 import zipfile
@@ -42,11 +43,14 @@ ARTIFACT_CHAT = "chat_answer"
 ARTIFACT_ENTITY = "entity_finding"
 ARTIFACT_HATE = "hate_speech_finding"
 ARTIFACT_SUMMARY = "summary"
+ARTIFACT_TOPICS = "topics"
 
-# Render order: Summaries -> Chat -> Entities -> Hate-speech (summaries lead the
-# document — they set the context for the findings that follow).
+# Render order: Summaries -> Topics -> Chat -> Entities -> Hate-speech (the
+# summary and the topics lead the document — they set the context for the
+# findings that follow).
 SECTION_ORDER: tuple[tuple[str, str], ...] = (
     (ARTIFACT_SUMMARY, "report_section_summaries"),
+    (ARTIFACT_TOPICS, "report_section_topics"),
     (ARTIFACT_CHAT, "report_section_chat"),
     (ARTIFACT_ENTITY, "report_section_entities"),
     (ARTIFACT_HATE, "report_section_hate_speech"),
@@ -56,6 +60,7 @@ SECTION_ORDER: tuple[tuple[str, str], ...] = (
 # table-of-contents links (the targets WeasyPrint resolves page numbers against).
 SECTION_ANCHOR: dict[str, str] = {
     ARTIFACT_SUMMARY: "sec-summaries",
+    ARTIFACT_TOPICS: "sec-topics",
     ARTIFACT_CHAT: "sec-chat",
     ARTIFACT_ENTITY: "sec-entities",
     ARTIFACT_HATE: "sec-hate",
@@ -110,6 +115,7 @@ _CHUNK_MAX_CHARS = 1500
 # reuse the canonical schemas in ``docint.utils.csv_stream``).
 CHAT_ANSWER_COLUMNS: tuple[str, ...] = ("session_id", "turn_idx", "question", "answer", "sources")
 SUMMARY_COLUMNS: tuple[str, ...] = ("collection", "summary")
+TOPICS_COLUMNS: tuple[str, ...] = ("collection", "run_id", "topic", "label", "keywords", "chunks", "share", "summary")
 COLLECTION_OVERVIEW_COLUMNS: tuple[str, ...] = ("filename", "type", "pages", "rows", "nodes", "hash")
 
 
@@ -749,6 +755,101 @@ def _md_summary(snap: dict[str, Any], note: str | None, collection: str) -> list
     return lines
 
 
+def _topic_entries(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """The topics a topics item froze, in their stored order (largest first).
+
+    Snapshots are stored JSON a client sent, so anything that is not an object
+    is skipped rather than trusted.
+    """
+    topics = snap.get("topics")
+    return [topic for topic in topics if isinstance(topic, dict)] if isinstance(topics, list) else []
+
+
+def _whole(value: Any) -> int | None:
+    """A stored count as an int, or ``None`` when it is not a finite number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if math.isfinite(value) else None
+
+
+def _percent(value: Any) -> str:
+    """A stored share (a fraction from 0 to 1) as a percentage in the report's language, or ``""``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return ""
+    text = f"{value * 100:.1f}".replace(".", ui_string("report_decimal_separator"))
+    return ui_string("report_percent_format").format(value=text)
+
+
+def _one_line(value: Any) -> str:
+    """Stored text on one line, so it cannot break a heading or a table row."""
+    return " ".join(str(value if value is not None else "").split())
+
+
+def _topic_keywords(topic: dict[str, Any]) -> list[str]:
+    """A topic's frozen keywords; only non-blank strings are trusted."""
+    keywords = topic.get("keywords")
+    if not isinstance(keywords, list):
+        return []
+    return [word for word in (_one_line(k) for k in keywords if isinstance(k, str)) if word]
+
+
+def _topics_caption(snap: dict[str, Any]) -> str:
+    """The line over a topics item: how many topics, how much of the collection they hold, and as of when."""
+    parts = [f"{ui_string('report_label_topics')}: {len(_topic_entries(snap))}"]
+    coverage = snap.get("coverage")
+    if isinstance(coverage, dict):
+        assigned, total = _whole(coverage.get("assigned")), _whole(coverage.get("total"))
+        if assigned is not None and total is not None:
+            parts.append(f"{ui_string('report_label_topic_chunks')}: {assigned} / {total}")
+    if snap.get("run_updated_at"):
+        parts.append(f"{ui_string('report_label_as_of')}: {_format_date(snap['run_updated_at'])}")
+    return "  ·  ".join(parts)
+
+
+def _topic_heading(topic: dict[str, Any]) -> str:
+    """A topic's heading: its id and its label (the id alone when it has none)."""
+    topic_id = _whole(topic.get("id"))
+    ref = f"T{topic_id}" if topic_id is not None else ""
+    return " · ".join(part for part in (ref, _one_line(topic.get("label"))) if part)
+
+
+def _topic_meta(topic: dict[str, Any]) -> str:
+    """A topic's chunk count, share and keywords, on one line."""
+    parts = []
+    size = _whole(topic.get("size"))
+    if size is not None:
+        parts.append(f"{ui_string('report_label_chunks')}: {size}")
+    share = _percent(topic.get("share"))
+    if share:
+        parts.append(f"{ui_string('report_label_share')}: {share}")
+    keywords = _topic_keywords(topic)
+    if keywords:
+        parts.append(f"{ui_string('report_label_keywords')}: {', '.join(keywords)}")
+    return "  ·  ".join(parts)
+
+
+def _topic_summary(topic: dict[str, Any]) -> str:
+    """A topic's summary as stored, trimmed; ``""`` when it has none."""
+    description = topic.get("description")
+    return description.strip() if isinstance(description, str) else ""
+
+
+def _md_topics(snap: dict[str, Any], note: str | None) -> list[str]:
+    """Markdown for a topics item: a caption, then each topic's heading, meta line and summary."""
+    lines = [_topics_caption(snap), ""]
+    for topic in _topic_entries(snap):
+        lines += [f"### {_topic_heading(topic)}", ""]
+        meta = _topic_meta(topic)
+        if meta:
+            lines += [f"*{meta}*", ""]
+        summary = _topic_summary(topic)
+        if summary:
+            lines += [summary, ""]
+    if note:
+        lines += [f"*{ui_string('report_label_note')}: {note.strip()}*", ""]
+    return lines
+
+
 def _md_collection_overview(overview: dict[str, Any]) -> list[str]:
     """Markdown for the trailing document-overview section (strip + manifest table)."""
     strip = "  ·  ".join(
@@ -814,6 +915,8 @@ def _md_item(artifact_type: str, snap: dict[str, Any], note: str | None, number:
         return _md_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
         return _md_hate(snap, note, number)
+    if artifact_type == ARTIFACT_TOPICS:
+        return _md_topics(snap, note)
     return _md_summary(snap, note, collection)
 
 
@@ -1025,6 +1128,14 @@ table.finding figure.evidence { margin: 0; }
 figure.evidence.lead { display: block; width: auto; }
 figure.evidence.lead img { max-width: 62mm; max-height: 90mm; }
 .empty { color: #888; font-style: italic; }
+/* Topics: a caption, then one block per topic — title, a muted line with its
+   counts and keywords, and its summary. The title and that line move with the
+   summary's first lines rather than ending a page on their own. */
+.topics-caption { color: #555; font-size: 9pt; margin: 0 0 8pt; }
+.topic + .topic { margin-top: 9pt; }
+.topic .item-title, .topic-meta { break-after: avoid; }
+.topic-meta { color: #666; font-size: 8.5pt; margin: 0 0 3pt; }
+.topic-summary { margin: 0; orphans: 2; widows: 2; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
 /* Dense on purpose: the manifest lists every document of the collection, often
    hundreds of single-line rows. */
@@ -1527,6 +1638,26 @@ def _html_summary(snap: dict[str, Any], note: str | None, collection: str, table
     return "".join(parts)
 
 
+def _html_topics(snap: dict[str, Any], note: str | None) -> str:
+    """HTML for a topics item: a caption, then one block per topic.
+
+    A summary is the chat model's plain prose, so it is escaped into a
+    paragraph rather than rendered as Markdown.
+    """
+    parts = [f'<div class="topics-caption">{_esc(_topics_caption(snap))}</div>']
+    for topic in _topic_entries(snap):
+        block = [f'<div class="item-title">{_esc(_topic_heading(topic))}</div>']
+        meta = _topic_meta(topic)
+        if meta:
+            block.append(f'<div class="topic-meta">{_esc(meta)}</div>')
+        summary = _topic_summary(topic)
+        if summary:
+            block.append(f'<p class="topic-summary">{_esc(summary)}</p>')
+        parts.append(f'<div class="topic">{"".join(block)}</div>')
+    parts.append(_html_note(note))
+    return "".join(parts)
+
+
 def _html_collection_overview(overview: dict[str, Any]) -> str:
     """HTML for the trailing document-overview section (strip + manifest table)."""
     strip_items = [
@@ -1566,6 +1697,8 @@ def _html_item(
         return _html_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
         return _html_hate(snap, note, number)
+    if artifact_type == ARTIFACT_TOPICS:
+        return _html_topics(snap, note)
     return _html_summary(snap, note, collection, table_budget)
 
 
@@ -1764,6 +1897,36 @@ def _summary_csv_row(snap: dict[str, Any]) -> dict[str, Any]:
     return {"collection": snap.get("collection") or "", "summary": snap.get("text") or ""}
 
 
+#: A text cell a spreadsheet would read as a formula: guarded with a leading quote,
+#: as the Topics tab's own CSV download guards it.
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_text(value: str) -> str:
+    """A text cell a spreadsheet shows as text, never evaluates."""
+    return f"'{value}" if value.startswith(_FORMULA_LEAD) else value
+
+
+def _topics_csv_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """CSV rows for a topics item, one per topic; ``share`` stays the stored fraction."""
+    rows = []
+    for topic in _topic_entries(snap):
+        share = topic.get("share")
+        rows.append(
+            {
+                "collection": _csv_text(_one_line(snap.get("collection"))),
+                "run_id": _csv_text(_one_line(snap.get("run_id"))),
+                "topic": _whole(topic.get("id")),
+                "label": _csv_text(_one_line(topic.get("label"))),
+                "keywords": _csv_text("; ".join(_topic_keywords(topic))),
+                "chunks": _whole(topic.get("size")),
+                "share": share if isinstance(share, (int, float)) and not isinstance(share, bool) else "",
+                "summary": _csv_text(_topic_summary(topic)),
+            }
+        )
+    return rows
+
+
 def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
     """CSV row for one document-overview manifest entry (full, untruncated hash).
 
@@ -1829,6 +1992,11 @@ def report_csv_bundle(report: dict[str, Any]) -> bytes:
         if summaries:
             rows = (_summary_csv_row(i.get("snapshot") or {}) for i in summaries)
             zf.writestr("summaries.csv", b"".join(stream_csv(rows, SUMMARY_COLUMNS)))
+
+        topics = grouped.get(ARTIFACT_TOPICS) or []
+        if topics:
+            topic_rows = (row for i in topics for row in _topics_csv_rows(i.get("snapshot") or {}))
+            zf.writestr("topics.csv", b"".join(stream_csv(topic_rows, TOPICS_COLUMNS)))
 
         overview = _overview_snapshot(report)
         if overview is not None:

@@ -764,9 +764,10 @@ exceptions are noted in the table.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TOPICS_ENABLED` | `true` | Switch topics on. Off, every topics route answers 404, `GET /config` reports `topics_enabled: false` and the SPA hides its topics screens, agent turns offer no `topics` tool, ingest jobs skip the align stage, and the `topics` CLI exits with code 2. On without a reachable fit service, a build fails with a coded warning ([topics.md](topics.md#the-fit-service)). |
-| `TOPICS_ALIGN_ON_INGEST` | `true` | Run an align as a stage of every ingest job, placing the collection's pending chunks, the job's new ones among them, in the active run ([topics.md](topics.md#the-ingest-stage)). Off, they stay pending until an align job places them. |
-| `TOPICS_LABELS` | `true` | Have the chat model (`TEXT_MODEL`) write each new topic's label and one-sentence description. Off, a topic is named by its first four keywords. |
+| `TOPICS_ENABLED` | `true` | Switch topics on. Off, every topics route answers 404, `GET /config` reports `topics_enabled: false` and the SPA hides its topics screens (the ingest screen's **Topics** toggle among them), agent turns offer no `topics` tool, ingest jobs skip the topics stage, and the `topics` CLI exits with code 2. On without a reachable fit service, a build fails with a coded warning ([topics.md](topics.md#the-fit-service)). |
+| `TOPICS_ON_INGEST` | `true` | Default of the ingest screen's **Topics** toggle (`topics` on `POST /ingest/finalize` overrides it per run, and `GET /config/ingest-defaults` reports it, off whenever `TOPICS_ENABLED` is). On, an ingest builds the collection's topics, or, when it has some, places the new chunks and looks for new topics among them ([topics.md](topics.md#the-ingest-stage)). The stage runs on a thread of its own beside entity resolution and the summary, with its own bar on the ingest card. |
+| `TOPICS_ALIGN_ON_INGEST` | `true` | With a run's Topics option off, still place the collection's pending chunks, the job's new ones among them, in the active run as a stage of the ingest — no model call ([topics.md](topics.md#the-ingest-stage)). Off too, they stay pending until a topics job places them. |
+| `TOPICS_LABELS` | `true` | Have the chat model (`TEXT_MODEL`) write each new topic's label and a summary of four to five sentences. Off, a topic is named by its first four keywords and has no summary. |
 | `TOPICS_FIT_MAX_POINTS` | `100000` | Most chunks one fit samples; at least `1`. A fit never exceeds what the service accepts at its default limit either: 150,000 points of up to 1,024 dimensions, proportionally fewer for wider vectors. |
 | `TOPICS_MIN_TEXT_CHARS` | `40` | Shortest prepared chunk text, in characters, that may join a fit. Shorter chunks are still assigned. A negative value clamps to `0`. |
 | `TOPICS_SEED` | `42` | Sampling seed and the fit's random seed, `0` to `2³² − 1`. |
@@ -783,7 +784,7 @@ one knob of their own, read by `load_topics_concurrency()`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `DOCINT_TOPICS_CONCURRENCY` | `1` | Topics jobs allowed to run at once, process-wide, bounded apart from ingest, summary and extract jobs. A build holds its sample's vectors in memory while the service fits them. Unparseable values fall back to `1`; values below `1` clamp to `1`. |
+| `DOCINT_TOPICS_CONCURRENCY` | `1` | Topics jobs allowed to run at once, process-wide, bounded apart from ingest, summary and extract jobs. A build holds its sample's vectors in memory while the service fits them. An ingest's topics stage runs inside its ingest job's slot, not one of these, so it can overlap a topics job on another collection; the fit service runs one fit at a time and answers the other as busy, which is retried. Unparseable values fall back to `1`; values below `1` clamp to `1`. |
 
 ### Topics endpoint — `TopicsClientConfig`
 
@@ -797,7 +798,7 @@ these do **not** inherit `OPENAI_API_BASE`, `OPENAI_API_KEY` or
 |---|---|---|
 | `TOPICS_API_BASE` | `http://vllm-router:4000` | Base URL of the fit service, with no path: docint appends `/topics/fit` and drops a trailing slash. For the `topics-only` deployment shape (no router), set `http://topics-only:8000`. |
 | `TOPICS_API_KEY` | *unset* | Sent as `Authorization: Bearer …` when set. The router enforces auth (use the master key); the `topics-only` shape has none, so leave it unset there. |
-| `TOPICS_TIMEOUT` | `3600` | Per-request HTTP timeout in seconds. One request holds for the whole fit, which takes seconds to minutes. A value that is not a positive, finite number keeps the default and logs a warning. |
+| `TOPICS_TIMEOUT` | `3600` | Per-request HTTP timeout in seconds. One request holds for the whole fit, which takes seconds to minutes. Connecting gives up after 30 s (or this timeout, if shorter), so an unreachable address fails fast. A value that is not a positive, finite number keeps the default and logs a warning. |
 
 What docint sends, the limits it obeys and how an endpoint fault is reported
 are in [topics.md](topics.md#the-fit-service).

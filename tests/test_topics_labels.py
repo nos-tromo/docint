@@ -13,16 +13,20 @@ import pytest
 from loguru import logger
 
 from docint.core.topics.labels import (
+    DEFAULT_TEMPLATE,
     DESCRIPTION_CHARS,
     LABEL_CHARS,
     PASSAGE_CHARS,
+    PASSAGES_PER_TOPIC,
     LabelRequest,
     TopicLabeller,
+    cut_description,
     fallback_label,
     label_response_format,
     parse_label,
     render_prompt,
 )
+from docint.utils.prompt_loader import load_localized_prompt
 
 TEMPLATE = "K: {keywords}\n{passages}"
 
@@ -77,7 +81,7 @@ def test_render_prompt_fills_keywords_and_numbered_passages_and_leaves_braces_al
 
 def test_parse_label_reads_json_strips_reasoning_and_cuts_long_values() -> None:
     """Reasoning and prose around the object are ignored and long values are cut."""
-    raw = "<think>hmm {x}</think>Sure: " + _reply("  Spaced \n out " + "l" * 200, "d" * 500) + " done"
+    raw = "<think>hmm {x}</think>Sure: " + _reply("  Spaced \n out " + "l" * 200, "d" * 2000) + " done"
 
     parsed = parse_label(raw)
 
@@ -86,6 +90,39 @@ def test_parse_label_reads_json_strips_reasoning_and_cuts_long_values() -> None:
     assert label.startswith("Spaced out ")
     assert len(label) == LABEL_CHARS
     assert len(description) == DESCRIPTION_CHARS
+    assert description.endswith("\u2026")
+
+
+def test_a_summary_of_four_to_five_sentences_fits_whole() -> None:
+    """The description keeps a summary of four to five full sentences, line breaks folded."""
+    sentence = "Keepers describe how colonies change across the year and what each season asks of them."
+    summary = "\n".join([sentence] * 5)
+
+    parsed = parse_label(_reply("Seasons of a hive", summary))
+
+    assert parsed is not None
+    assert parsed[1] == " ".join([sentence] * 5)
+    assert DESCRIPTION_CHARS >= 1200
+    assert PASSAGES_PER_TOPIC == 8  # material enough for five sentences
+
+
+def test_a_long_description_is_cut_at_its_last_sentence_end_within_the_limit() -> None:
+    """An over-long description ends at a full sentence, closing quotes included."""
+    text = 'One "first." Two second. ' + "x" * 40
+
+    assert cut_description(text, 30) == 'One "first." Two second.'
+    assert cut_description("Short. Fits.", 30) == "Short. Fits."
+
+
+def test_a_description_without_a_usable_sentence_end_is_cut_at_a_word() -> None:
+    """With no sentence end in the last two thirds the cut falls on a word, marked with an ellipsis."""
+    assert cut_description("Ab. " + "word " * 20, 30) == "Ab. word word word word word\u2026"
+    assert cut_description("x" * 40, 30) == "x" * 29 + "\u2026"
+
+
+def test_the_default_template_is_the_english_prompt() -> None:
+    """The built-in fallback says exactly what the shipped English prompt says."""
+    assert load_localized_prompt("topic_label", default="", required=True, lang="en") == DEFAULT_TEMPLATE
 
 
 @pytest.mark.parametrize(
@@ -235,3 +272,42 @@ def test_labels_log_counts_only() -> None:
     assert "Topic labels | written=1 fallback=0" in joined
     for leaked in ("secretword", "secretpassage", "Secretlabel", "Secretdesc"):
         assert leaked not in joined
+
+
+def test_a_label_request_carries_an_output_budget_for_its_summary() -> None:
+    """Both the constrained and the unconstrained request name an output budget.
+
+    Some endpoints cut a reply short by default, which would leave a summary of
+    several sentences as unparseable JSON.
+    """
+    from types import SimpleNamespace
+
+    from docint.core.rag import RAG
+    from docint.core.topics.labels import LABEL_MAX_TOKENS
+
+    calls: list[dict[str, Any]] = []
+
+    class _Model:
+        """Records each completion's keyword arguments."""
+
+        def complete(self, prompt: str, **kwargs: Any) -> Any:
+            """Record and answer.
+
+            Args:
+                prompt (str): The prompt.
+                **kwargs (Any): The request options.
+
+            Returns:
+                Any: A reply with text.
+            """
+            calls.append(kwargs)
+            return SimpleNamespace(text=_reply())
+
+    rag = RAG.__new__(RAG)
+    rag._text_model = _Model()  # type: ignore[assignment]  # duck-typed chat model
+
+    assert rag._topic_label_complete("p", label_response_format()) == _reply()
+    assert rag._topic_label_complete("p", None) == _reply()
+    assert calls[0] == {"response_format": label_response_format(), "max_tokens": LABEL_MAX_TOKENS}
+    assert calls[1] == {"max_tokens": LABEL_MAX_TOKENS}
+    assert LABEL_MAX_TOKENS >= 512

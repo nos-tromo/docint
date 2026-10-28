@@ -216,7 +216,7 @@ function isTopicsAction(value: unknown): value is TopicsAction {
 }
 
 /**
- * Find the newest topics job on a collection among the job logs.
+ * Find the newest job of one kind on a collection among the job logs.
  *
  * Only a job's started frame names its collection, so that frame decides both
  * which collection a job belongs to and how new it is. The stream replays jobs
@@ -224,14 +224,19 @@ function isTopicsAction(value: unknown): value is TopicsAction {
  *
  * @param events - Every job's log, by job id.
  * @param collection - The logical collection name, or null for none.
- * @returns The job id, or null when the collection has no topics job.
+ * @param startedEvent - The started frame of the kind: `topics_started` or `ingestion_started`.
+ * @returns The job id, or null when the collection has no such job.
  */
-function newestTopicsJob(events: Record<string, IngestEvent[]>, collection: string | null): string | null {
+function newestJobOn(
+  events: Record<string, IngestEvent[]>,
+  collection: string | null,
+  startedEvent: 'topics_started' | 'ingestion_started'
+): string | null {
   if (!collection) return null
   let newest: string | null = null
   let newestAt = -Infinity
   for (const [jobId, frames] of Object.entries(events)) {
-    const started = frames.find((frame) => frame.event === 'topics_started')
+    const started = frames.find((frame) => frame.event === startedEvent)
     if (!started || (started.data ?? {}).collection !== collection) continue
     const at = started.receivedAt ?? 0
     if (at >= newestAt) {
@@ -240,6 +245,17 @@ function newestTopicsJob(events: Record<string, IngestEvent[]>, collection: stri
     }
   }
   return newest
+}
+
+/**
+ * The newest topics job on a collection.
+ *
+ * @param events - Every job's log, by job id.
+ * @param collection - The logical collection name, or null for none.
+ * @returns The job id, or null when the collection has no topics job.
+ */
+function newestTopicsJob(events: Record<string, IngestEvent[]>, collection: string | null): string | null {
+  return newestJobOn(events, collection, 'topics_started')
 }
 
 /** Fold one job's frames into its state. */
@@ -323,6 +339,22 @@ export function useTopicsRefreshOnJobEnd(): void {
   const jobId = useIngestJobsStore((s) => newestTopicsJob(s.events, scope.collection))
   const ended = useIngestJobsStore((s) => (jobId ? s.terminal[jobId] === true : false))
   useRefreshOnJobEnd(scope, jobId, ended)
+  useRefreshOnIngestEnd(scope)
+}
+
+/**
+ * Refetch the topics once the active collection's newest ingest ends.
+ *
+ * An ingest builds or extends the collection's topics (its Topics option) or
+ * places its new chunks in them, so its end changes what a topics screen shows
+ * as surely as a topics job's does — whichever screen was open when it ended.
+ *
+ * @param scope - The active collection and its owner.
+ */
+function useRefreshOnIngestEnd(scope: CollectionScope): void {
+  const jobId = useIngestJobsStore((s) => newestJobOn(s.events, scope.collection, 'ingestion_started'))
+  const ended = useIngestJobsStore((s) => (jobId ? s.terminal[jobId] === true : false))
+  useRefreshOnJobEnd(scope, jobId, ended)
 }
 
 /**
@@ -343,5 +375,6 @@ export function useTopicsJob(): TopicsJobState {
   const live = useIngestJobsStore((s) => (jobId ? s.liveJobs[jobId] === true : false))
   const job = useMemo(() => (jobId ? readJob(jobId, frames, live) : NO_JOB), [jobId, frames, live])
   useRefreshOnJobEnd(scope, jobId, job.finished || job.error !== null)
+  useRefreshOnIngestEnd(scope)
   return job
 }
