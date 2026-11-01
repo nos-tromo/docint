@@ -1,6 +1,6 @@
 [project]
 name = "docint"
-version = "2.7.0"
+version = "2.7.1"
 description = "Document Intelligence — document ingestion, retrieval and agentic chat RAG over Qdrant (FastAPI + React)"
 authors = [
   { name = "nos-tromo" }
@@ -73,7 +73,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=84.0.0", "wheel"]
+requires = ["setuptools>=84.1.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
