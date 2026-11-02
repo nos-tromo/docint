@@ -254,6 +254,47 @@ def test_proxied_responses_never_spill_to_tmp() -> None:
     assert conf.count("proxy_max_temp_file_size") == 1
 
 
+def test_access_log_format_carries_no_query_string_or_client_identity() -> None:
+    """The frontend logs the path, never the query string, referer or client.
+
+    The image's default ``main`` format logs ``$request`` — the whole request
+    line, query included — plus the referer and client address, and docint's
+    query parameters carry search terms and entity names.
+    """
+    match = re.search(r"^log_format scrubbed ((?:'[^']*'\s*)+);", _nginx_conf(), re.M)
+    assert match is not None, "scrubbed log_format not found at http level"
+    variables = set(re.findall(r"\$(\w+)", match.group(1)))
+
+    assert "uri" in variables
+    leaky = {
+        "request",
+        "request_uri",
+        "args",
+        "query_string",
+        "http_referer",
+        "remote_addr",
+        "remote_user",
+        "http_x_forwarded_for",
+    }
+    assert not variables & leaky
+    assert not any(name.startswith("arg_") for name in variables)
+
+
+def test_server_logs_with_the_scrubbed_format_only() -> None:
+    """Set at server level, so it replaces the image's ``main`` log.
+
+    An ``access_log`` at http level would sit beside the image's own, and
+    every request would be logged twice, once with its query string.
+    """
+    conf = _nginx_conf()
+    server_head = conf[conf.index("server {") : conf.index("\n    location ")]
+    directives = re.findall(r"^\s*access_log\s+([^;]+);", conf, re.M)
+
+    assert "access_log /var/log/nginx/access.log scrubbed;" in server_head
+    assert directives.count("/var/log/nginx/access.log scrubbed") == 1
+    assert set(directives) <= {"/var/log/nginx/access.log scrubbed", "off"}
+
+
 def test_frontend_image_defaults_api_body_limit() -> None:
     """The image must default DOCINT_API_MAX_BODY_SIZE.
 

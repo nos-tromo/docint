@@ -65,6 +65,43 @@ class _InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
+class _QueryStringAccessFilter(logging.Filter):
+    """Cut the query string off the path an access-log record shows.
+
+    uvicorn logs ``path?query``, and docint's query parameters carry what
+    a user searched for or opened — ``/collections/ner/search?q=…``,
+    ``/collections/ner/sources?entity_text=…`` — so every such request put
+    a search term or an entity name in the operational log. The route and
+    the status are what an access line is for; neither needs the
+    parameters.
+
+    The filter rewrites and never drops: it always returns ``True``.
+    """
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Replace the record's ``path?query`` argument with the bare path.
+
+        uvicorn percent-encodes the path before appending the query, so a
+        ``?`` inside the path itself arrives as ``%3F`` and the first
+        literal ``?`` is always where the query starts.
+
+        Args:
+            record (logging.LogRecord): A ``uvicorn.access`` record, whose
+                ``args`` uvicorn populates as
+                ``(client_addr, method, full_path, http_version, status)``.
+
+        Returns:
+            bool: Always ``True``; the record is kept, rewritten in place.
+        """
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            full_path = args[2]
+            if isinstance(full_path, str) and "?" in full_path:
+                record.args = (*args[:2], full_path.partition("?")[0], *args[3:])
+        return True
+
+
 class _HealthcheckAccessFilter(logging.Filter):
     """Drop the container healthcheck's own access-log records.
 
@@ -113,19 +150,25 @@ def _install_stdlib_bridge(level: str) -> None:
     ``init_logger`` is called once per CLI entry point *and* at
     ``docint.core.api`` import time.
 
+    The query string is cut before the healthcheck filter runs, so a line
+    is dropped or kept on the path it would show.
+
     Args:
         level (str): Minimum level for the bridged stdlib loggers.
     """
     handler = _InterceptHandler()
-    healthcheck_filter = _HealthcheckAccessFilter()
+    access_filters = (_QueryStringAccessFilter(), _HealthcheckAccessFilter())
 
     for name in _BRIDGED_LOGGERS:
         std_logger = logging.getLogger(name)
         std_logger.handlers = [handler]
         std_logger.propagate = False
-        std_logger.filters = [f for f in std_logger.filters if not isinstance(f, _HealthcheckAccessFilter)]
+        std_logger.filters = [
+            f for f in std_logger.filters if not isinstance(f, (_QueryStringAccessFilter, _HealthcheckAccessFilter))
+        ]
         if name == "uvicorn.access":
-            std_logger.addFilter(healthcheck_filter)
+            for access_filter in access_filters:
+                std_logger.addFilter(access_filter)
         try:
             std_logger.setLevel(level)
         except ValueError:
