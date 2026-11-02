@@ -132,6 +132,25 @@ def _hermetic_retention_env() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_edge_secret_env() -> Iterator[None]:
+    """Keep a developer ``.env`` from switching the edge-secret check on.
+
+    With ``DOCINT_EDGE_SECRET`` set, every identity header a test sends
+    without the secret is ignored, so a leaked value would turn the suite's
+    authenticated requests into anonymous ones. Tests of the check set it
+    explicitly. A private ``MonkeyPatch`` for the reason
+    :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    mp.delenv("DOCINT_EDGE_SECRET", raising=False)
+    yield
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_assessment_env() -> Iterator[None]:
     """Keep the assessment rule out of agent turns unless a test opts in.
 

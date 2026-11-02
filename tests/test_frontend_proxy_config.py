@@ -254,6 +254,22 @@ def test_proxied_responses_never_spill_to_tmp() -> None:
     assert conf.count("proxy_max_temp_file_size") == 1
 
 
+def test_proxied_locations_forward_identity_and_edge_secret_headers() -> None:
+    """Nginx hands the gateway's identity headers and edge secret to the backend untouched.
+
+    Both arrive as ordinary request headers, which nginx forwards by default.
+    Switching that off, or overriding one of them, on any location would make
+    every request through it anonymous once ``DOCINT_EDGE_SECRET`` is set, or
+    let nginx itself assert an identity.
+    """
+    conf = _nginx_conf()
+    overridden = [name.lower() for name in re.findall(r"proxy_set_header\s+(\S+)", conf)]
+
+    assert "proxy_pass_request_headers" not in conf
+    assert overridden, "expected the proxied locations to set their forwarding headers"
+    assert not [name for name in overridden if name == "x-edge-secret" or name.startswith("x-auth-")]
+
+
 def test_access_log_format_carries_no_query_string_or_client_identity() -> None:
     """The frontend logs the path, never the query string, referer or client.
 
