@@ -702,8 +702,8 @@ Loaded by `load_logging_env()` (`docint/utils/env_cfg.py`), applied by
 ingest run summary counts files and nodes rather than naming content. This is
 not a switch; there is no level at which document text reaches the log.
 
-Two behaviours are wired here rather than being configurable, because
-neither has a defensible "off":
+Three behaviours are wired here rather than being configurable, because
+none has a defensible "off":
 
 - **Uvicorn's loggers are re-dispatched into loguru**, so `docker logs`
   carries one format on one stream. Only `uvicorn`, `uvicorn.error` and
@@ -715,6 +715,14 @@ neither has a defensible "off":
   `start_period`), which on a measured run was roughly half of stdout.
   The filter is narrow and fails open: a `/version` that returns 5xx, or
   one from any non-loopback caller, is kept.
+- **Access lines show the path, never the query string.** Query
+  parameters carry what a user searched for or opened
+  (`/collections/ner/search?q=…`, `/collections/ner/sources?entity_text=…`),
+  so uvicorn's access record is cut at the `?` before it reaches the sink.
+  The frontend's nginx access log does the same with its own `scrubbed`
+  format — time, method, path, protocol, status, bytes sent, request time
+  and the `X-Request-ID` header — in place of the image's default, which
+  logs the whole request line, the referer and the client address.
 
 See also `INGEST_BENCHMARK_ENABLED` under
 [Ingestion](#ingestion--ingestionconfig), which adds per-run throughput

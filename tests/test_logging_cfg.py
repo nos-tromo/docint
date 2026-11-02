@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import logging
+import socket
 import sys
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterator
 
 import pytest
+import uvicorn
 from _pytest.logging import LogCaptureFixture
 from loguru import logger
 
@@ -16,6 +21,7 @@ from docint.utils.logger_cfg import (
     _BRIDGED_LOGGERS,
     _HealthcheckAccessFilter,
     _install_stdlib_bridge,
+    _QueryStringAccessFilter,
     init_logger,
 )
 
@@ -186,6 +192,57 @@ def test_healthcheck_filter_fails_open_on_unexpected_shapes(args: object) -> Non
 
 
 # ---------------------------------------------------------------------------
+# query-string stripping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/collections/ner/sources?entity_text=Example%20Person", "/collections/ner/sources"),
+        ("/collections/ner/search?q=example+term&limit=50", "/collections/ner/search"),
+        ("/collections/list", "/collections/list"),
+    ],
+)
+def test_query_string_filter_keeps_only_the_path(path: str, expected: str) -> None:
+    """The line keeps its route and status and loses what was searched for.
+
+    Args:
+        path (str): The ``path?query`` uvicorn put on the record.
+        expected (str): The path the line must show.
+    """
+    record = _access_record("172.19.0.3:60230", path, 200)
+
+    assert _QueryStringAccessFilter().filter(record) is True
+    assert record.getMessage() == f'172.19.0.3:60230 - "GET {expected} HTTP/1.1" 200'
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        None,
+        (),
+        ("127.0.0.1", "GET", "/version"),
+        ("127.0.0.1", "GET", 404, "1.1", 200),
+        {"client": "127.0.0.1"},
+    ],
+)
+def test_query_string_filter_passes_unexpected_shapes_through(args: object) -> None:
+    """A shape it does not recognise is kept as it is, never dropped.
+
+    Args:
+        args (object): An ``args`` payload the filter must not choke on.
+    """
+    record = logging.LogRecord(
+        name="uvicorn.access", level=logging.INFO, pathname="", lineno=0, msg="x", args=None, exc_info=None
+    )
+    record.args = args  # pyrefly: ignore  # deliberately malformed
+
+    assert _QueryStringAccessFilter().filter(record) is True
+    assert record.args is args
+
+
+# ---------------------------------------------------------------------------
 # the stdlib -> loguru bridge
 # ---------------------------------------------------------------------------
 
@@ -226,6 +283,100 @@ def test_bridge_applies_the_healthcheck_filter_end_to_end(
     assert "/collections/list" in combined
 
 
+def test_bridge_strips_the_query_string_end_to_end(
+    loguru_caplog_info: LogCaptureFixture, restored_stdlib_loggers: None
+) -> None:
+    """Wiring check: the line that reaches the loguru sink shows the path alone.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        restored_stdlib_loggers (None): Restores the mutated stdlib loggers.
+    """
+    _install_stdlib_bridge("INFO")
+
+    logging.getLogger("uvicorn.access").handle(
+        _access_record("172.19.0.3:60230", "/collections/ner/sources?entity_text=Example%20Person", 200)
+    )
+
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert '"GET /collections/ner/sources HTTP/1.1" 200' in combined
+    assert "entity_text" not in combined
+    assert "Example" not in combined
+
+
+def test_bridge_decides_the_healthcheck_on_the_path_the_line_would_show(
+    loguru_caplog_info: LogCaptureFixture, restored_stdlib_loggers: None
+) -> None:
+    """The query is cut first, so no kept line reads exactly like a dropped probe.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        restored_stdlib_loggers (None): Restores the mutated stdlib loggers.
+    """
+    _install_stdlib_bridge("INFO")
+
+    logging.getLogger("uvicorn.access").handle(_access_record("127.0.0.1:53496", "/version?probe=1", 200))
+
+    assert not any("/version" in m for m in loguru_caplog_info.messages)
+
+
+async def _no_content_app(scope: object, receive: object, send: Callable[[dict[str, object]], Awaitable[None]]) -> None:
+    """Answer every HTTP request with an empty 204, whatever its path.
+
+    Args:
+        scope (object): The ASGI connection scope (unused).
+        receive (object): The ASGI receive channel (unused).
+        send (Callable[[dict[str, object]], Awaitable[None]]): The ASGI send channel.
+    """
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
+def test_a_real_uvicorn_access_line_carries_no_query_string(
+    loguru_caplog_info: LogCaptureFixture, restored_stdlib_loggers: None
+) -> None:
+    """Pin the filter to the record uvicorn actually emits, not a hand-built one.
+
+    Every other test here builds its record in uvicorn's argument shape. Were
+    a uvicorn release to change that shape, those tests would still pass
+    while the filter silently stopped matching and query strings returned to
+    the log. ``log_config=None`` keeps uvicorn from replacing the bridge.
+
+    Args:
+        loguru_caplog_info (LogCaptureFixture): Bridged INFO capture.
+        restored_stdlib_loggers (None): Restores the mutated stdlib loggers.
+    """
+    _install_stdlib_bridge("INFO")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(_no_content_app, lifespan="off", log_config=None))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert time.monotonic() < deadline, "uvicorn did not start"
+            time.sleep(0.01)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("GET", "/collections/ner/sources?entity_text=Example%20Person")
+            assert conn.getresponse().status == 204
+        finally:
+            conn.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        sock.close()
+
+    access_lines = [m for m in loguru_caplog_info.messages if '"GET ' in m]
+    assert len(access_lines) == 1
+    assert access_lines[0].endswith('"GET /collections/ner/sources HTTP/1.1" 204')
+    combined = "\n".join(loguru_caplog_info.messages)
+    assert "entity_text" not in combined
+    assert "Example" not in combined
+
+
 def test_bridge_is_idempotent(restored_stdlib_loggers: None) -> None:
     """init_logger runs once per CLI and again at api import; no doubling.
 
@@ -237,6 +388,7 @@ def test_bridge_is_idempotent(restored_stdlib_loggers: None) -> None:
 
     access = logging.getLogger("uvicorn.access")
     assert len(access.handlers) == 1
+    assert sum(isinstance(f, _QueryStringAccessFilter) for f in access.filters) == 1
     assert sum(isinstance(f, _HealthcheckAccessFilter) for f in access.filters) == 1
 
 
