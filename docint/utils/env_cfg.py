@@ -1507,7 +1507,7 @@ def load_nextext_env(
     authenticates as a service instead: ``NEXTEXT_API_KEY`` is sent as
     ``Authorization: Bearer <key>`` and must equal the token Nextext's
     ``NEXTEXT_SERVICE_TOKENS`` lists for docint (``docint=<token>``).
-    Nextext then identifies the caller by that entry's name. Without a
+    Nextext then identifies the caller as ``service:<entry name>``. Without a
     valid token, Nextext reads its trusted header (``NEXTEXT_AUTH_HEADER``,
     default ``X-Auth-User``) only while its own ``NEXTEXT_EDGE_SECRET`` is
     unset, and otherwise falls back to its ``NEXTEXT_DEFAULT_IDENTITY``, else

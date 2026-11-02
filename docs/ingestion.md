@@ -371,14 +371,16 @@ request.
 
 docint calls Nextext's backend directly, not through the edge gateway, so it
 authenticates as a service: set `NEXTEXT_API_KEY` to the token Nextext's
-`NEXTEXT_SERVICE_TOKENS` lists for docint (`docint=<token>`). It is sent as
-`Authorization: Bearer …`, and Nextext identifies docint by that entry's name.
-Without a valid token Nextext reads its trusted header (`NEXTEXT_AUTH_HEADER`,
-default `X-Auth-User`) only while its own `NEXTEXT_EDGE_SECRET` is unset, then
-falls back to its default identity, else answers 401. For that case docint
-sends `NEXTEXT_IDENTITY` (default `docint`) under `NEXTEXT_AUTH_HEADER`
-(default `X-Auth-User`) on every request; set `NEXTEXT_IDENTITY` to empty to
-suppress the header. See
+`NEXTEXT_SERVICE_TOKENS` lists for docint. It is sent as
+`Authorization: Bearer …`, and Nextext identifies docint as the service
+principal `service:<entry name>` (`service:docint` for `docint=<token>`), a
+namespace no user identity can take. Without a valid token Nextext
+reads its trusted header (`NEXTEXT_AUTH_HEADER`, default `X-Auth-User`) only
+while its own `NEXTEXT_EDGE_SECRET` is unset, then falls back to its default
+identity, else answers 401, so the token must be in place before Nextext sets
+its edge secret. For the header path docint sends `NEXTEXT_IDENTITY` (default
+`docint`) under `NEXTEXT_AUTH_HEADER` (default `X-Auth-User`) on every
+request; set `NEXTEXT_IDENTITY` to empty to suppress the header. See
 [configuration.md](configuration.md#nextext-media-processing--nextextconfig).
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
