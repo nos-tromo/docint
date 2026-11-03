@@ -55,3 +55,38 @@ def test_whoami_display_name_is_decorative_not_identity(monkeypatch: pytest.Monk
     # X-Auth-Name alone, with no trusted identity header, still fails closed.
     response = client.get("/whoami", headers={"X-Auth-Name": "Alice Example"})
     assert response.status_code == 401
+
+
+# Invented value, long enough for the configured minimum.
+_EDGE_SECRET = "test-edge-secret-0123456789abcdefghij"
+
+
+def test_whoami_trusts_identity_headers_carrying_the_edge_secret(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """With DOCINT_EDGE_SECRET set, the gateway's request resolves exactly as before."""
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    headers = {"X-Auth-User": "alice", "X-Auth-Name": "Alice Example", "X-Edge-Secret": _EDGE_SECRET}
+
+    response = client.get("/whoami", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"username": "alice", "display_name": "Alice Example"}
+
+
+def test_whoami_ignores_identity_headers_without_the_edge_secret(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A caller without the secret is anonymous: 401, or the default identity with no display name."""
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    forged = {"X-Auth-User": "alice", "X-Auth-Name": "Alice Example"}
+
+    assert client.get("/whoami", headers=forged).status_code == 401
+    assert client.get("/whoami", headers={**forged, "X-Edge-Secret": "not-the-edge-secret"}).status_code == 401
+
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "test-operator")
+    response = client.get("/whoami", headers=forged)
+    assert response.status_code == 200
+    assert response.json() == {"username": "test-operator", "display_name": None}

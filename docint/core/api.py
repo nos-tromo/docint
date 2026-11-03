@@ -61,7 +61,7 @@ from docint.agents.turn.probe import probe_tools
 from docint.agents.turn.topics import TOPIC_CHECKS_CHARS, render_topic_checks
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
-from docint.core.auth.principal import Principal, resolve_principal
+from docint.core.auth.principal import Principal, check_principal_config, resolve_principal
 from docint.core.errors import install_error_handlers
 from docint.core.extract.bundle import build_bundle, build_single
 from docint.core.extract.gather import scroll_collection
@@ -150,6 +150,11 @@ allowed_origins = load_host_env().cors_allowed_origins.split(",")
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Probe Qdrant on startup; close ingest-job subscriber streams on shutdown.
 
+    The principal configuration is checked first, so a ``DOCINT_EDGE_SECRET``
+    too short to accept stops startup rather than failing every request
+    (``check_principal_config``, which also warns once when identity headers
+    would be trusted from any caller).
+
     The session store initializes (and migrates) eagerly here, and a failed
     migration is fatal: unlike Qdrant, an unwritable or stale sessions DB
     never self-heals, and serving anyway means every conversations query
@@ -185,6 +190,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     def _init_session_store() -> None:
         rag.ensure_session_manager().init_session_store_if_needed()
 
+    check_principal_config()
     retention = load_retention_env()
     await to_thread.run_sync(_init_session_store)
     await to_thread.run_sync(rag.probe_qdrant)
@@ -1918,8 +1924,9 @@ class WhoamiOut(BaseModel):
 
     username: str
     # Decorative only — the edge gateway's Authelia displayname, injected
-    # alongside (not instead of) X-Auth-User. Never part of principal
-    # resolution/identity; None when the gateway isn't in front (dev).
+    # alongside (not instead of) X-Auth-User and read under the same trust
+    # rule (Principal.display_name). Never part of the identity; None when
+    # the gateway isn't in front (dev) or the headers were not trusted.
     display_name: str | None = None
 
 
@@ -2113,7 +2120,6 @@ async def get_health() -> HealthOut:
 
 @app.get("/whoami", response_model=WhoamiOut, tags=["Meta"])
 def get_whoami(
-    request: Request,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> WhoamiOut:
     """Return the resolved calling identity, for the SPA's AppHeader.
@@ -2122,22 +2128,21 @@ def get_whoami(
     trusted header or a configured dev default identity) — unlike ``/config``
     and ``/version``, which are deliberately unauthenticated.
 
-    ``display_name`` is read straight off the ``X-Auth-Name`` request header
-    (Authelia's displayname, injected by the edge gateway) and is purely
+    ``display_name`` is the ``X-Auth-Name`` request header (Authelia's
+    displayname, injected by the edge gateway) as the principal resolver
+    read it, under the same trust rule as the identity headers. It is purely
     decorative — it plays no part in identity/principal resolution, unlike
     ``username``. ``None`` when the header is absent (dev without the
-    gateway in front).
+    gateway in front) or the request's identity headers were not trusted.
 
     Args:
-        request (Request): The incoming request, for the decorative
-            ``X-Auth-Name`` header.
         principal (Principal): The resolved request principal.
 
     Returns:
         WhoamiOut: The caller's resolved principal name plus, if present,
             the gateway's decorative display name.
     """
-    return WhoamiOut(username=principal.name, display_name=request.headers.get("X-Auth-Name"))
+    return WhoamiOut(username=principal.name, display_name=principal.display_name)
 
 
 @app.get("/collections/list", response_model=list[str] | AdminCollectionsOut, tags=["Collections"])

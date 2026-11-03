@@ -146,9 +146,10 @@ readiness right now, not at the startup probe.
 Returns `WhoamiOut` — `{"username": str, "display_name": str | None}`.
 Unlike `/config` and `/version` this **is** principal-gated (401 without a
 trusted header or a configured dev default identity). `display_name` is
-read straight off the `X-Auth-Name` header the gateway injects and is
-decorative only — it plays no part in identity resolution, and is `None`
-when the gateway is not in front.
+the `X-Auth-Name` header the gateway injects, read under the same trust
+rule as the identity headers, and is decorative only — it plays no part in
+identity resolution, and is `None` when the gateway is not in front or, with
+`DOCINT_EDGE_SECRET` set, when the request does not carry the secret.
 
 ## Collections
 
@@ -763,9 +764,10 @@ The React UI streams collection-wide CSVs from the backend so the browser never
 accumulates the whole result set in memory. Export endpoints are **owner-gated
 by the collection name in the path** — there is no "select" step, so they are
 stateless and usable from any client with HTTP access to the backend. Behind a
-trusted proxy, pass the user header (e.g. `-H 'X-Auth-User: alice'`); with
-`DOCINT_DEFAULT_IDENTITY` set the header is optional. `404` when the collection
-is not owned by the caller.
+trusted proxy, pass the user header (e.g. `-H 'X-Auth-User: alice'`), plus the
+shared secret (`-H 'X-Edge-Secret: …'`) when `DOCINT_EDGE_SECRET` is set —
+without it the user header is ignored. With `DOCINT_DEFAULT_IDENTITY` set the
+user header is optional. `404` when the collection is not owned by the caller.
 
 | Route | Contents | Schema |
 |---|---|---|

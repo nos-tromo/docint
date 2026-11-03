@@ -209,8 +209,9 @@ documents and companion data).
 
 The principal itself comes from a trusted header — see
 [configuration.md](configuration.md#identity-and-authentication--principalconfig)
-for `DOCINT_AUTH_HEADER`, `DOCINT_DEFAULT_IDENTITY`, and the admin-group
-override.
+for `DOCINT_AUTH_HEADER`, `DOCINT_DEFAULT_IDENTITY`, the admin-group
+override, and `DOCINT_EDGE_SECRET`, which restricts that trust to requests
+carrying the gateway's shared secret.
 
 ## Stateless vs. session-aware retrieval
 

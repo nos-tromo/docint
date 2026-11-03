@@ -5,13 +5,28 @@ the header read for a verified-token read and nothing downstream (data
 model, ownership queries, endpoint wiring) changes. Group membership and
 the admin flag are resolved here too, from the same trusted-header
 contract.
+
+Whether those headers are believed at all is decided here as well. With
+``DOCINT_EDGE_SECRET`` set, only a request carrying that secret in
+``X-Edge-Secret`` (the edge gateway adds it to every request it proxies)
+may assert an identity. Any other caller is treated as if it had sent no
+identity headers, so another container on a shared network cannot act as
+a user, let alone an admin.
 """
 
+import hmac
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 from fastapi import HTTPException, Request
+from loguru import logger
 
-from docint.utils.env_cfg import load_principal_env
+from docint.utils.env_cfg import PrincipalConfig, load_principal_env
+
+#: Header carrying the edge gateway's per-app shared secret.
+EDGE_SECRET_HEADER = "X-Edge-Secret"
+#: The gateway's decorative display name. Never part of the identity.
+DISPLAY_NAME_HEADER = "X-Auth-Name"
 
 
 @dataclass(frozen=True)
@@ -22,6 +37,7 @@ class Principal:
     groups: frozenset[str] = field(default_factory=frozenset)
     is_admin: bool = False
     requested_owner: str | None = None
+    display_name: str | None = None
 
     @property
     def effective_owner(self) -> str:
@@ -37,8 +53,79 @@ class Principal:
         return self.name
 
 
+def check_principal_config() -> PrincipalConfig:
+    """Load the principal configuration at startup and report how far it trusts callers.
+
+    Loading it here makes an invalid ``DOCINT_EDGE_SECRET`` stop startup
+    instead of failing every request. One warning is logged when the
+    backend would believe identity headers from any caller that can reach
+    it: no edge secret and no default identity, which is the production
+    shape before the gateway's secret is rolled out.
+
+    Returns:
+        PrincipalConfig: The loaded configuration.
+
+    Raises:
+        ValueError: If ``DOCINT_EDGE_SECRET`` is set but too short.
+    """
+    cfg = load_principal_env()
+    if cfg.edge_secret is None and cfg.default_identity is None:
+        logger.warning(
+            "Identity headers are trusted from any caller that can reach the backend. "
+            "Set DOCINT_EDGE_SECRET (see edge-plane docs/identity-contract.md)."
+        )
+    return cfg
+
+
+def _carries_edge_secret(request: Request, secret: str) -> bool:
+    """Whether the request's ``X-Edge-Secret`` header equals the configured secret.
+
+    Compared as bytes in constant time. Starlette decodes header values as
+    latin-1, so encoding back with latin-1 restores the bytes on the wire.
+
+    Args:
+        request (Request): The incoming request.
+        secret (str): The configured ``DOCINT_EDGE_SECRET``.
+
+    Returns:
+        bool: ``True`` only when the header is present and matches.
+    """
+    received = request.headers.get(EDGE_SECRET_HEADER)
+    if received is None:
+        return False
+    return hmac.compare_digest(received.encode("latin-1"), secret.encode("utf-8"))
+
+
+def _warn_ignored_identity_headers(request: Request, cfg: PrincipalConfig) -> None:
+    """Log that a request's identity headers were ignored, if it sent any.
+
+    Names the method, the path without its query string, and whether the
+    secret was missing or wrong. Never a header value: neither the secret
+    nor the identity the caller claimed.
+
+    Args:
+        request (Request): The request whose identity headers were ignored.
+        cfg (PrincipalConfig): The principal configuration in force.
+    """
+    identity_headers = (cfg.header_name, cfg.groups_header, DISPLAY_NAME_HEADER)
+    if not any(name in request.headers for name in identity_headers):
+        return
+    logger.warning(
+        "Ignored identity headers on {} '{}': {} {}",
+        request.method,
+        quote(request.scope.get("path", "")),
+        EDGE_SECRET_HEADER,
+        "missing" if EDGE_SECRET_HEADER not in request.headers else "does not match",
+    )
+
+
 def resolve_principal(request: Request) -> Principal:
     """Resolve the calling principal from the configured trusted headers.
+
+    With ``DOCINT_EDGE_SECRET`` set, a request is trusted only when its
+    ``X-Edge-Secret`` matches; unset, every request is. An untrusted
+    request is resolved as if it carried no identity headers (user,
+    groups, display name), and a warning names its method and path.
 
     Resolution order (spec Section 8):
 
@@ -62,18 +149,21 @@ def resolve_principal(request: Request) -> Principal:
         Principal: The resolved calling identity.
 
     Raises:
-        HTTPException: With status 401 when neither the trusted header
-            nor a configured default identity is available.
+        HTTPException: With status 401 when neither a trusted header nor
+            a configured default identity is available.
     """
     cfg = load_principal_env()
-    header_value = request.headers.get(cfg.header_name)
+    trusted = cfg.edge_secret is None or _carries_edge_secret(request, cfg.edge_secret)
+    if not trusted:
+        _warn_ignored_identity_headers(request, cfg)
+    header_value = request.headers.get(cfg.header_name) if trusted else None
     if header_value:
         name = header_value
     elif cfg.default_identity:
         name = cfg.default_identity
     else:
         raise HTTPException(status_code=401, detail="Missing authenticated principal.")
-    raw_groups = request.headers.get(cfg.groups_header)
+    raw_groups = request.headers.get(cfg.groups_header) if trusted else None
     if raw_groups is None:
         raw_groups = cfg.default_groups or ""
     groups = frozenset(g.strip() for g in raw_groups.split(",") if g.strip())
@@ -83,4 +173,5 @@ def resolve_principal(request: Request) -> Principal:
         groups=groups,
         is_admin=cfg.admin_group in groups,
         requested_owner=requested_owner,
+        display_name=request.headers.get(DISPLAY_NAME_HEADER) if trusted else None,
     )

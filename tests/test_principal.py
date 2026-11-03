@@ -1,11 +1,12 @@
 """Tests for principal configuration and the request principal resolver."""
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from docint.core.auth.principal import resolve_principal
-from docint.utils.env_cfg import PrincipalConfig, load_principal_env
+from docint.core.auth.principal import EDGE_SECRET_HEADER, check_principal_config, resolve_principal
+from docint.utils.env_cfg import EDGE_SECRET_MIN_LENGTH, PrincipalConfig, load_principal_env
 
 
 def test_load_principal_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,11 +55,20 @@ def test_load_principal_env_blank_identity_is_none(
     assert cfg.default_identity is None
 
 
-def _make_request(headers: dict[str, str] | None = None) -> Request:
+def _make_request(
+    headers: dict[str, str] | None = None,
+    *,
+    method: str = "GET",
+    path: str = "/",
+    query_string: bytes = b"",
+) -> Request:
     """Build a minimal Starlette ``Request`` with the given headers.
 
     Args:
         headers (dict[str, str] | None): Header name/value pairs.
+        method (str): The request method.
+        path (str): The request path, without a query string.
+        query_string (bytes): The raw query string.
 
     Returns:
         Request: A request object whose ``.headers`` reflects ``headers``.
@@ -66,10 +76,10 @@ def _make_request(headers: dict[str, str] | None = None) -> Request:
     raw_headers = [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in (headers or {}).items()]
     scope = {
         "type": "http",
-        "method": "GET",
-        "path": "/",
+        "method": method,
+        "path": path,
         "headers": raw_headers,
-        "query_string": b"",
+        "query_string": query_string,
     }
     return Request(scope)
 
@@ -260,3 +270,288 @@ def test_resolve_principal_reads_owner_query_param(
     request = _make_request({"X-Auth-User": "root"})
     request.scope["query_string"] = b"owner=alice"
     assert resolve_principal(request).requested_owner == "alice"
+
+
+# --- Edge secret: identity headers are believed only from the gateway -------
+
+# Invented values; the wrong one is as long as the right one so only content differs.
+_EDGE_SECRET = "test-edge-secret-0123456789abcdefghij"
+_WRONG_SECRET = "test-edge-secret-WRONG-0123456789abcd"
+_SHORT_SECRET = "short-test-secret"
+
+
+def test_load_principal_env_edge_secret_unset_or_blank_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset and whitespace-only both leave the check off.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("DOCINT_EDGE_SECRET", raising=False)
+    assert load_principal_env().edge_secret is None
+
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", "   ")
+    assert load_principal_env().edge_secret is None
+
+
+def test_load_principal_env_reads_and_strips_edge_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Surrounding whitespace is dropped, as HTTP drops it from the header the gateway sends.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", f"  {_EDGE_SECRET}\n")
+
+    assert load_principal_env().edge_secret == _EDGE_SECRET
+
+
+def test_load_principal_env_accepts_a_secret_of_the_minimum_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exactly the minimum length is accepted.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    secret = "k" * EDGE_SECRET_MIN_LENGTH
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", secret)
+
+    assert load_principal_env().edge_secret == secret
+
+
+def test_load_principal_env_rejects_a_short_secret_without_echoing_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A secret below the minimum is a configuration error whose message omits the value.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _SHORT_SECRET)
+
+    with pytest.raises(ValueError, match="DOCINT_EDGE_SECRET") as excinfo:
+        load_principal_env()
+    assert _SHORT_SECRET not in str(excinfo.value)
+
+
+def test_principal_config_repr_hides_the_edge_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Logging the config object can never print the secret.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+
+    assert _EDGE_SECRET not in repr(load_principal_env())
+
+
+def test_resolve_principal_without_a_secret_trusts_headers_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset: every caller's identity headers are believed, whatever X-Edge-Secret says.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_GROUPS", raising=False)
+    claimed = {"X-Auth-User": "root", "X-Auth-Groups": "admins", "X-Auth-Name": "Root Example"}
+
+    for headers in (claimed, {**claimed, EDGE_SECRET_HEADER: _WRONG_SECRET}):
+        principal = resolve_principal(_make_request(headers))
+        assert principal.name == "root"
+        assert principal.is_admin is True
+        assert principal.display_name == "Root Example"
+
+
+def test_resolve_principal_with_the_secret_trusts_user_groups_and_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request carrying the configured secret is resolved from its headers.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    headers = {
+        "X-Auth-User": "alice",
+        "X-Auth-Groups": "admins, users",
+        "X-Auth-Name": "Alice Example",
+        EDGE_SECRET_HEADER: _EDGE_SECRET,
+    }
+
+    principal = resolve_principal(_make_request(headers, query_string=b"owner=bob"))
+
+    assert principal.name == "alice"
+    assert principal.groups == frozenset({"admins", "users"})
+    assert principal.is_admin is True
+    assert principal.display_name == "Alice Example"
+    assert principal.effective_owner == "bob"
+
+
+@pytest.mark.parametrize("secret_header", [None, _WRONG_SECRET, ""], ids=["missing", "wrong", "empty"])
+def test_resolve_principal_untrusted_request_fails_closed_without_a_default(
+    monkeypatch: pytest.MonkeyPatch, secret_header: str | None
+) -> None:
+    """Without the right secret the user header counts for nothing: 401 with no default identity.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        secret_header (str | None): The X-Edge-Secret value sent, ``None`` for none.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    headers = {"X-Auth-User": "alice"}
+    if secret_header is not None:
+        headers[EDGE_SECRET_HEADER] = secret_header
+
+    with pytest.raises(HTTPException) as excinfo:
+        resolve_principal(_make_request(headers))
+    assert excinfo.value.status_code == 401
+
+
+def test_resolve_principal_untrusted_request_falls_back_to_the_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An untrusted request gets exactly what a header-less one gets.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    monkeypatch.setenv("DOCINT_DEFAULT_GROUPS", "users")
+    headers = {
+        "X-Auth-User": "alice",
+        "X-Auth-Groups": "editors",
+        "X-Auth-Name": "Alice Example",
+        EDGE_SECRET_HEADER: _WRONG_SECRET,
+    }
+
+    principal = resolve_principal(_make_request(headers))
+
+    assert principal.name == "operator"
+    assert principal.groups == frozenset({"users"})
+    assert principal.display_name is None
+
+
+@pytest.mark.parametrize("secret_header", [None, _WRONG_SECRET], ids=["missing", "wrong"])
+def test_untrusted_admin_claim_never_gains_admin(monkeypatch: pytest.MonkeyPatch, secret_header: str | None) -> None:
+    """A forged admin group header grants nothing, and ``?owner=`` then has no effect.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        secret_header (str | None): The X-Edge-Secret value sent, ``None`` for none.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    monkeypatch.delenv("DOCINT_DEFAULT_GROUPS", raising=False)
+    headers = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
+    if secret_header is not None:
+        headers[EDGE_SECRET_HEADER] = secret_header
+
+    principal = resolve_principal(_make_request(headers, query_string=b"owner=alice"))
+
+    assert principal.is_admin is False
+    assert principal.groups == frozenset()
+    assert principal.effective_owner == "operator"
+
+
+@pytest.mark.parametrize(
+    ("secret_header", "reason"),
+    [(None, "X-Edge-Secret missing"), (_WRONG_SECRET, "X-Edge-Secret does not match")],
+    ids=["missing", "wrong"],
+)
+def test_ignored_identity_headers_are_logged_without_any_value(
+    monkeypatch: pytest.MonkeyPatch,
+    loguru_caplog: LogCaptureFixture,
+    secret_header: str | None,
+    reason: str,
+) -> None:
+    """The warning names method, path and reason; never a header value or the query.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Loguru records bridged into caplog.
+        secret_header (str | None): The X-Edge-Secret value sent, ``None`` for none.
+        reason (str): The reason the warning must give.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    headers = {"X-Auth-User": "claimed-user", "X-Auth-Groups": "claimed-group", "X-Auth-Name": "Claimed Name"}
+    if secret_header is not None:
+        headers[EDGE_SECRET_HEADER] = secret_header
+
+    resolve_principal(
+        _make_request(headers, method="POST", path="/collections/select", query_string=b"owner=target-owner")
+    )
+
+    messages = [record.getMessage() for record in loguru_caplog.records]
+    assert messages == [f"Ignored identity headers on POST '/collections/select': {reason}"]
+    for value in ("claimed-user", "claimed-group", "Claimed Name", "target-owner", _WRONG_SECRET, _EDGE_SECRET):
+        assert value not in loguru_caplog.text
+
+
+def test_untrusted_request_without_identity_headers_is_not_logged(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """Nothing was ignored, so there is nothing to warn about.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Loguru records bridged into caplog.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+
+    assert resolve_principal(_make_request({})).name == "operator"
+    assert loguru_caplog.records == []
+
+
+def test_check_principal_config_warns_in_the_production_shape(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """No edge secret and no default identity: one warning that names the fix.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Loguru records bridged into caplog.
+    """
+    monkeypatch.delenv("DOCINT_EDGE_SECRET", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+
+    check_principal_config()
+
+    messages = [record.getMessage() for record in loguru_caplog.records]
+    assert len(messages) == 1
+    assert "trusted from any caller" in messages[0]
+    assert "DOCINT_EDGE_SECRET" in messages[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("DOCINT_EDGE_SECRET", _EDGE_SECRET), ("DOCINT_DEFAULT_IDENTITY", "operator")],
+    ids=["edge-secret", "default-identity"],
+)
+def test_check_principal_config_is_quiet_otherwise(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, name: str, value: str
+) -> None:
+    """Either setting silences the warning, and the secret itself is never logged.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Loguru records bridged into caplog.
+        name (str): The variable that is set.
+        value (str): Its value.
+    """
+    monkeypatch.delenv("DOCINT_EDGE_SECRET", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    monkeypatch.setenv(name, value)
+
+    check_principal_config()
+
+    assert loguru_caplog.records == []
+
+
+def test_check_principal_config_rejects_a_short_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The startup check raises on a secret too short to accept.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _SHORT_SECRET)
+
+    with pytest.raises(ValueError, match="DOCINT_EDGE_SECRET"):
+        check_principal_config()

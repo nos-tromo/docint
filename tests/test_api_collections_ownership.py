@@ -323,6 +323,33 @@ def test_non_admin_owner_param_still_404s(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+_EDGE_SECRET = "test-edge-secret-0123456789abcdefghij"
+GATEWAY = {"X-Edge-Secret": _EDGE_SECRET}
+
+
+def test_forged_admin_headers_without_the_edge_secret_cannot_cross_owners(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With DOCINT_EDGE_SECRET set, an admin claim from any other caller is ignored and ?owner= does nothing."""
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    alice = {"X-Auth-User": "alice", **GATEWAY}
+    assert client.post("/ingest", json={"collection": "alpha"}, headers=alice).status_code == 200
+
+    # Without the secret, or with a wrong one, the request is the default identity's: alice's name 404s.
+    for headers in (ADMIN, {**ADMIN, "X-Edge-Secret": "not-the-edge-secret"}):
+        selected = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=headers)
+        assert selected.status_code == 404
+        assert client.get("/collections/list?all=true", headers=headers).json() == []
+
+    # With no default identity the same request fails closed.
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY")
+    assert client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=ADMIN).status_code == 401
+
+    # The same claim carried by the gateway is an admin's.
+    resp = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers={**ADMIN, **GATEWAY})
+    assert resp.status_code == 200
+
+
 def test_admin_deletes_cross_owner_collection(client: TestClient) -> None:
     """Admin delete with ?owner= removes the user's mapping (full owner powers)."""
     _ingest(client, "alice", "alpha")
@@ -593,6 +620,25 @@ def test_startup_logs_the_window(
         pass
 
     assert any("Collection retention | window=18m" in str(r.msg) for r in loguru_caplog_info.records)
+
+
+def test_startup_refuses_a_short_edge_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A secret too short to accept stops the app before it serves anything."""
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", "short-test-secret")
+
+    with pytest.raises(ValueError, match="DOCINT_EDGE_SECRET"), TestClient(api_module.app):
+        pass
+
+
+def test_startup_warns_once_when_any_caller_is_trusted(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture
+) -> None:
+    """No edge secret and no default identity: the startup says so, once."""
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY")
+    with TestClient(api_module.app):
+        pass
+
+    assert sum("trusted from any caller" in r.getMessage() for r in loguru_caplog.records) == 1
 
 
 def test_config_advertises_the_retention_window(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

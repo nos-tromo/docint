@@ -697,6 +697,10 @@ def load_quantization_env() -> QdrantQuantizationConfig:
     return QdrantQuantizationConfig(mode=mode, bits=bits, always_ram=always_ram)
 
 
+#: Shortest ``DOCINT_EDGE_SECRET`` accepted. edge-plane's ``make secret`` mints 64.
+EDGE_SECRET_MIN_LENGTH = 32
+
+
 @dataclass(frozen=True)
 class PrincipalConfig:
     """Dataclass for request-principal resolution configuration."""
@@ -706,6 +710,8 @@ class PrincipalConfig:
     groups_header: str
     admin_group: str
     default_groups: str | None
+    # Kept out of the repr so logging the config can never print the secret.
+    edge_secret: str | None = field(default=None, repr=False)
 
 
 def load_principal_env(
@@ -721,6 +727,11 @@ def load_principal_env(
     resolver's dev fallback (when the trusted header is absent) and as
     the migration backfill owner for pre-existing conversation rows, so
     that legacy data and pre-auth requests share one identity.
+
+    ``DOCINT_EDGE_SECRET`` is the shared secret the edge gateway sends in
+    ``X-Edge-Secret``. Set, the identity headers are believed only from a
+    request carrying it (see ``docint.core.auth.principal``); unset or
+    blank, they are believed from any caller, as before the secret existed.
 
     Args:
         default_header_name (str): Default trusted header carrying the
@@ -741,6 +752,13 @@ def load_principal_env(
         - groups_header (str): The trusted header carrying the principal's groups.
         - admin_group (str): The group name for admin-level access.
         - default_groups (str | None): Fallback groups, or ``None`` when unset.
+        - edge_secret (str | None): The gateway's shared secret, or ``None``
+          when unset or blank (identity headers then trusted from any caller).
+
+    Raises:
+        ValueError: If ``DOCINT_EDGE_SECRET`` is set but shorter than
+            ``EDGE_SECRET_MIN_LENGTH`` characters. The message never
+            contains the value.
     """
     raw_identity = os.getenv("DOCINT_DEFAULT_IDENTITY")
     if raw_identity is not None and raw_identity.strip():
@@ -754,12 +772,21 @@ def load_principal_env(
     else:
         resolved_groups = default_groups
 
+    raw_secret = os.getenv("DOCINT_EDGE_SECRET")
+    edge_secret = raw_secret.strip() if raw_secret and raw_secret.strip() else None
+    if edge_secret is not None and len(edge_secret) < EDGE_SECRET_MIN_LENGTH:
+        raise ValueError(
+            f"DOCINT_EDGE_SECRET is shorter than {EDGE_SECRET_MIN_LENGTH} characters. Generate one with "
+            "`make secret` in edge-plane and set the same value in edge-plane's .env."
+        )
+
     return PrincipalConfig(
         header_name=os.getenv("DOCINT_AUTH_HEADER", default_header_name),
         default_identity=resolved_identity,
         groups_header=os.getenv("DOCINT_GROUPS_HEADER", default_groups_header),
         admin_group=os.getenv("DOCINT_ADMIN_GROUP", default_admin_group),
         default_groups=resolved_groups,
+        edge_secret=edge_secret,
     )
 
 
@@ -1475,13 +1502,20 @@ def load_nextext_env(
     The client is disabled unless ``NEXTEXT_API_BASE`` is set, so non-social
     dev hosts skip video/audio rows rather than erroring.
 
-    Nextext resolves a per-request identity from a trusted header (its
-    ``NEXTEXT_AUTH_HEADER``, default ``X-Auth-User``) and rejects header-less
-    callers with 401 unless its own ``NEXTEXT_DEFAULT_IDENTITY`` fallback is
-    set. docint therefore sends ``{auth_header}: {identity}`` on every request
-    (``NEXTEXT_AUTH_HEADER`` / ``NEXTEXT_IDENTITY``, defaults ``X-Auth-User`` /
-    ``docint``). Set ``NEXTEXT_IDENTITY`` to empty to suppress the header and
-    rely on Nextext's server-side default identity instead.
+    docint calls Nextext's backend directly rather than through the edge
+    gateway, so it cannot present the gateway's edge secret and
+    authenticates as a service instead: ``NEXTEXT_API_KEY`` is sent as
+    ``Authorization: Bearer <key>`` and must equal the token Nextext's
+    ``NEXTEXT_SERVICE_TOKENS`` lists for docint (``docint=<token>``).
+    Nextext then identifies the caller as ``service:<entry name>``. Without a
+    valid token, Nextext reads its trusted header (``NEXTEXT_AUTH_HEADER``,
+    default ``X-Auth-User``) only while its own ``NEXTEXT_EDGE_SECRET`` is
+    unset, and otherwise falls back to its ``NEXTEXT_DEFAULT_IDENTITY``, else
+    answers 401. For that case docint still sends ``{auth_header}: {identity}``
+    on every request (``NEXTEXT_AUTH_HEADER`` / ``NEXTEXT_IDENTITY``, defaults
+    ``X-Auth-User`` / ``docint``). Set ``NEXTEXT_IDENTITY`` to empty to
+    suppress the header and rely on Nextext's server-side default identity
+    instead.
 
     Args:
         default_api_base (str): Fallback base URL (empty ⇒ disabled).

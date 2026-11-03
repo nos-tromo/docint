@@ -96,7 +96,8 @@ owner-scoped: two users can each hold a `my_collection` without collision,
 cross-owner access is a 404, and the active collection is resolved per request
 so concurrent users never interfere. The principal comes from a trusted header
 injected by the gateway (`X-Auth-User`); production leaves
-`DOCINT_DEFAULT_IDENTITY` unset so an unauthenticated request is rejected. See
+`DOCINT_DEFAULT_IDENTITY` unset so an unauthenticated request is rejected, and
+sets `DOCINT_EDGE_SECRET` so the header is believed only from the gateway. See
 [architecture.md](docs/architecture.md#multi-tenancy-and-data-isolation) and
 [configuration.md](docs/configuration.md#identity-and-authentication--principalconfig).
 

@@ -369,12 +369,23 @@ docint's client calls `{NEXTEXT_API_BASE}/jobs`, and Nextext mounts its jobs
 router under `/api/v1`, so a base URL without that suffix 404s on every
 request.
 
-Nextext resolves each request's identity from a trusted header (its
-`NEXTEXT_AUTH_HEADER`, default `X-Auth-User`) and rejects header-less callers
-with 401 unless its own default-identity fallback is configured. docint sends
-`NEXTEXT_IDENTITY` (default `docint`) under `NEXTEXT_AUTH_HEADER` (default
-`X-Auth-User`) on every request; set `NEXTEXT_IDENTITY` to empty to suppress
-the header, e.g. when a gateway in between injects it instead.
+docint calls Nextext's backend directly, not through the edge gateway, so it
+authenticates as a service: set `NEXTEXT_API_KEY` to the token Nextext's
+`NEXTEXT_SERVICE_TOKENS` lists for docint. It is sent as
+`Authorization: Bearer …`, and Nextext identifies docint as the service
+principal `service:<entry name>` (`service:docint` for `docint=<token>`), a
+namespace no user identity can take. docint's principal there therefore
+changes from `docint` to `service:docint` once the token matches, and jobs
+started under one are invisible to the other, so switch while docint has no
+Nextext job in flight. Without a valid token Nextext reads its trusted header
+(`NEXTEXT_AUTH_HEADER`, default `X-Auth-User`) only while its own
+`NEXTEXT_EDGE_SECRET` is unset, then falls back to its default identity, else
+answers 401, so the token must be in place before Nextext sets its edge
+secret. For the header path docint sends `NEXTEXT_IDENTITY` (default
+`docint`) under `NEXTEXT_AUTH_HEADER` (default `X-Auth-User`) on every
+request; set `NEXTEXT_IDENTITY` to empty to suppress the header, but never to
+a `service:` value, which Nextext reserves and ignores in the header. See
+[configuration.md](configuration.md#nextext-media-processing--nextextconfig).
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
 video/audio files are skipped gracefully — collections with no audio/video are
