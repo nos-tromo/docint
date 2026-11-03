@@ -1,5 +1,7 @@
 """Shared pytest configuration and fixtures for the docint test suite."""
 
+import io
+import json
 import logging
 import sys
 import time
@@ -69,6 +71,45 @@ def _hermetic_session_store(tmp_path_factory: pytest.TempPathFactory) -> Iterato
     mp.delenv("SESSION_STORE", raising=False)
     yield
     mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def audit_stream() -> Iterator[io.StringIO]:
+    """Give each test an audit chain of its own, and verify every chain it wrote.
+
+    Audited work writes through ``docint.core.audit.current()``; with nothing
+    installed it fails closed, so every test gets a chain on a ``StringIO``.
+    The app's lifespan and the command-line tools open further chains; they
+    land on the same stream because ``open_audit_stream`` is pointed at it. A
+    developer ``.env`` cannot switch the purpose rule on. At teardown the test
+    chain is closed and :func:`verify_chain` must find no problem in any chain
+    on the stream. A private ``MonkeyPatch`` for the reason
+    :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        io.StringIO: The captured audit lines.
+    """
+    from docint.core import audit
+    from docint.utils.audit_event import AuditEmitter, verify_chain
+
+    stream = io.StringIO()
+    mp = pytest.MonkeyPatch()
+    mp.setattr(audit, "open_audit_stream", lambda output: stream)
+    mp.setattr(audit, "HEARTBEAT_INTERVAL_S", 0.0)
+    for name in ("AUDIT_OUTPUT", "AUDIT_REQUIRE_PURPOSE", "AUDIT_CASE_REF", "AUDIT_REASON", "AUDIT_CLI_USER"):
+        mp.delenv(name, raising=False)
+    emitter = AuditEmitter(audit.SERVICE, "0+test", stream=stream, heartbeat_interval_s=0)
+    emitter.start()
+    auditor = audit.Auditor(emitter)
+    audit.install(auditor)
+    try:
+        yield stream
+    finally:
+        audit.uninstall(auditor)
+        auditor.close()
+        mp.undo()
+    report = verify_chain([json.loads(line) for line in stream.getvalue().splitlines()])
+    assert report.ok, report.problems
 
 
 @pytest.fixture(autouse=True)

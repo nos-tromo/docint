@@ -428,16 +428,16 @@ def test_resolve_principal_untrusted_request_ignores_the_defaults_under_the_secr
     assert exc_info.value.status_code == 401
 
 
-# (edge secret, default identity, X-Edge-Secret sent, X-Auth-User sent) -> name, or 401.
+# (edge secret, default identity, X-Edge-Secret sent, X-Auth-User sent) -> (name, via), or 401.
 _IDENTITY_MATRIX = [
-    pytest.param(None, None, None, "alice", "alice", id="no-secret-no-default-header"),
+    pytest.param(None, None, None, "alice", ("alice", "edge"), id="no-secret-no-default-header"),
     pytest.param(None, None, None, None, 401, id="no-secret-no-default-anonymous"),
-    pytest.param(None, "operator", None, "alice", "alice", id="no-secret-default-header"),
-    pytest.param(None, "operator", None, None, "operator", id="no-secret-default-anonymous"),
-    pytest.param(_EDGE_SECRET, None, _EDGE_SECRET, "alice", "alice", id="secret-no-default-trusted"),
+    pytest.param(None, "operator", None, "alice", ("alice", "edge"), id="no-secret-default-header"),
+    pytest.param(None, "operator", None, None, ("operator", "system"), id="no-secret-default-anonymous"),
+    pytest.param(_EDGE_SECRET, None, _EDGE_SECRET, "alice", ("alice", "edge"), id="secret-no-default-trusted"),
     pytest.param(_EDGE_SECRET, None, _WRONG_SECRET, "alice", 401, id="secret-no-default-forged"),
     pytest.param(_EDGE_SECRET, None, None, "alice", 401, id="secret-no-default-unproven"),
-    pytest.param(_EDGE_SECRET, "operator", _EDGE_SECRET, "alice", "alice", id="secret-default-trusted"),
+    pytest.param(_EDGE_SECRET, "operator", _EDGE_SECRET, "alice", ("alice", "edge"), id="secret-default-trusted"),
     pytest.param(_EDGE_SECRET, "operator", _WRONG_SECRET, "alice", 401, id="secret-default-forged"),
     pytest.param(_EDGE_SECRET, "operator", None, "alice", 401, id="secret-default-unproven"),
     pytest.param(_EDGE_SECRET, "operator", _EDGE_SECRET, None, 401, id="secret-default-trusted-anonymous"),
@@ -452,7 +452,7 @@ def test_default_identity_is_honoured_only_without_an_edge_secret(
     default: str | None,
     sent_secret: str | None,
     user: str | None,
-    expected: str | int,
+    expected: tuple[str, str] | int,
 ) -> None:
     """Every combination of edge secret and default identity, forged headers included.
 
@@ -462,7 +462,7 @@ def test_default_identity_is_honoured_only_without_an_edge_secret(
         default (str | None): ``DOCINT_DEFAULT_IDENTITY``.
         sent_secret (str | None): The X-Edge-Secret value sent, ``None`` for none.
         user (str | None): The X-Auth-User value sent, ``None`` for none.
-        expected (str | int): The principal's name, or the refusal's status.
+        expected (tuple[str, str] | int): ``(name, via)``, or the refusal's status.
     """
     for name, value in (("DOCINT_EDGE_SECRET", secret), ("DOCINT_DEFAULT_IDENTITY", default)):
         if value is None:
@@ -481,7 +481,7 @@ def test_default_identity_is_honoured_only_without_an_edge_secret(
         assert exc_info.value.status_code == expected
     else:
         principal = resolve_principal(_make_request(headers))
-        assert principal.name == expected
+        assert (principal.name, principal.via) == expected
 
 
 def test_default_groups_never_apply_under_the_edge_secret(monkeypatch: pytest.MonkeyPatch) -> None:

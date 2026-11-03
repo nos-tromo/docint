@@ -33,13 +33,19 @@ DISPLAY_NAME_HEADER = "X-Auth-Name"
 
 @dataclass(frozen=True)
 class Principal:
-    """The resolved calling identity: principal name, groups, and admin scope."""
+    """The resolved calling identity: principal name, groups, and admin scope.
+
+    ``via`` says how the name was established, in the audit trail's terms:
+    ``edge`` when a trusted identity header carried it, ``system`` when it is
+    the configured default identity (the dev fallback).
+    """
 
     name: str
     groups: frozenset[str] = field(default_factory=frozenset)
     is_admin: bool = False
     requested_owner: str | None = None
     display_name: str | None = None
+    via: str = "edge"
 
     @property
     def effective_owner(self) -> str:
@@ -188,4 +194,5 @@ def resolve_principal(request: Request) -> Principal:
         is_admin=cfg.admin_group in groups,
         requested_owner=requested_owner,
         display_name=request.headers.get(DISPLAY_NAME_HEADER) if trusted else None,
+        via="edge" if header_value else "system",
     )
