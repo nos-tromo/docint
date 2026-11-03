@@ -116,6 +116,11 @@ sets `DOCINT_EDGE_SECRET` so the header is believed only from the gateway. See
 | `make search-index COLLECTION=<name>` · `make search-index-all` | Build the full-text search index for one collection, or backport every collection on the host. Payload-only — no re-embedding, no inference. |
 | `make verify` · `make test` | Pre-push gate (ruff + pyrefly + frontend lint/build), then pytest + vitest. |
 
+`resolve`, `topics`, `extract`, `search-index` and `search-index-all` run
+inside the running backend (`make up` first) and record a data-protection
+audit chain; `CASE_REF=` and `REASON=` state the purpose
+([docs/audit.md](docs/audit.md)).
+
 The twelve console scripts — `docint`, `ingest`, `query`, `query-eval`,
 `resolve`, `extract`, `topics`, `search-index`, `search-index-all`,
 `retention-report`, `verify`, `load-models` — are documented with their flags

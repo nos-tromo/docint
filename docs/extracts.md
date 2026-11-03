@@ -119,7 +119,9 @@ owner-multiplexed stream at `GET /ingest/jobs/events`, framed as
 `extract_started` / `extract_progress` / `extract_completed`. The terminal
 frame carries the stored artifact.
 
-**From the CLI**, on a host with no HTTP access to the backend:
+**From the CLI**, with no HTTP access to the backend needed — `make extract`
+runs it inside the running backend container, and the run records its own
+data-protection audit chain ([audit.md](audit.md#command-line-tools)):
 
 ```bash
 make extract                      # prompts for the collection

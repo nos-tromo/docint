@@ -23,7 +23,7 @@ available, and as plain lookups otherwise.
      text model to produce an `IntentAnalysis` with a rewritten query
      and extracted entities. Falls back to `qa` if the LLM errors.
    - The FastAPI app automatically upgrades to the contextual agent
-     when a text model is available (`docint/core/api.py:181`).
+     when a text model is available (`docint/core/api.py:442`).
 
 2. **Clarification policy** — `docint/agents/policies.py`
    - `ClarificationPolicy.evaluate()` reads the intent analysis and
@@ -756,7 +756,7 @@ preprocessing, no kept read is used: each turn and each check reads it afresh.
 The end of such a write and a deletion drop the kept read at once. A read that
 failed or found a lane uncounted is not kept, so the next turn reads again. A
 change that only makes more of the collection keyword-ready, such as a new
-index or a `make search-index` backfill, which runs in its own container, can
+index or a `make search-index` backfill, which runs in a process of its own, can
 take up to 30 s to show; until then a stale read only withholds what has become
 ready. An `ingest` CLI run on a host is another process too, and its additions
 also show within 30 s. The tool is withheld, and the turn keeps its other
@@ -1367,7 +1367,7 @@ The session store URL is resolved by
 
 A typical `/agent/chat` request touches, in order:
 
-1. `docint/core/api.py:3734` — validates the `AgentChatIn` payload.
+1. `docint/core/api.py:5667` — validates the `AgentChatIn` payload.
 2. `AgentOrchestrator.handle_turn()`
    (`docint/agents/orchestrator.py:106`).
 3. `ContextualUnderstandingAgent.analyze()`

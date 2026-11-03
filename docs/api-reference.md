@@ -5,7 +5,7 @@ The FastAPI app exposes a REST + SSE surface defined in
 tag used in the app, and documents the request and response models.
 
 All request and response bodies are JSON. Pydantic models referenced in
-this doc are declared at the top of `docint/core/api.py:745` and onward.
+this doc are declared at the top of `docint/core/api.py:1428` and onward.
 
 ## Base URL & CORS
 
@@ -16,6 +16,41 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 - See [configuration.md](configuration.md#host-endpoints--hostconfig) for
   the full list of host env vars.
 
+## Identity, stated purpose and the audit log
+
+Every route below that does not say otherwise needs a principal
+(`docint/core/auth/principal.py`). In production the edge gateway sets
+`X-Auth-User` (and `X-Auth-Groups`, the decorative `X-Auth-Name`) together
+with this app's secret in `X-Edge-Secret`; with `DOCINT_EDGE_SECRET` set, the
+identity headers count only beside that secret. The dev fallback
+`DOCINT_DEFAULT_IDENTITY` answers for a request without an identity only while
+no edge secret is set. A request without an identity gets `401` and is not
+recorded ([configuration.md](configuration.md#identity-and-authentication--principalconfig)).
+
+Most routes record a data-protection audit event (§76 BDSG) for what they
+return, change or disclose; [audit.md](audit.md#routes) lists, route by route,
+what is recorded and what is not. Three request headers take part:
+
+| Header | Meaning |
+|---|---|
+| `X-Audit-Purpose` | The caller's stated purpose: the `application/x-www-form-urlencoded` serialization of `case_ref` and/or `reason` — e.g. `case_ref=case-0001&reason=Review+of+the+flagged+postings` (what `new URLSearchParams({case_ref, reason}).toString()` produces). ASCII, at most 4096 characters, each field at most 256 characters once decoded, no control characters, no field repeated. Recorded on the operation's events, never in the operational log. |
+| `X-Request-ID` | The gateway's correlation id, recorded on every event of the request and of the jobs it queues (kept when it is 1–128 characters of letters, digits and `._:-`). |
+| `owner` (query parameter) | An admin (`DOCINT_ADMIN_GROUP`) works in that owner's namespace; the events name the admin as actor `on_behalf_of` the owner. |
+
+The audit gate adds these responses to every audited route:
+
+| Status | When | Recorded |
+|---|---|---|
+| `400` | `X-Audit-Purpose` is malformed, oversized or ambiguous. Body `{"detail": "Invalid request."}`. | Nothing: no operation was started. |
+| `403` | A non-admin's `owner` parameter names someone else. Body `{"detail": "Forbidden."}`. On routes that are not audited the parameter is ignored, as before. | One `denied` event naming the owner asked for. |
+| `428` | `AUDIT_REQUIRE_PURPOSE` lists an action the route's operation records and no purpose is stated. Body `{"detail": "A stated purpose is required for this request."}`. Empty by default, so no route answers it unless an operator sets the knob. | One `denied` event. |
+
+**Fail closed.** When an event cannot be written, the request fails with the
+generic `500` (`{"detail": "Request failed."}` or `"Internal server error."`)
+and does not return its data; a stream ends with its generic error frame
+instead of the frame carrying the result; a queued job is marked failed
+([audit.md](audit.md#fail-closed)).
+
 ## Route map
 
 | Method | Path | Tag | Purpose |
@@ -25,7 +60,7 @@ this doc are declared at the top of `docint/core/api.py:745` and onward.
 | `GET`  | `/version` | `Meta` | Running app version. Unauthenticated; the Docker healthcheck's liveness probe. |
 | `GET`  | `/health` | `Meta` | Dependency status (Qdrant reachability). Unauthenticated, always `200`. |
 | `GET`  | `/whoami` | `Meta` | The resolved calling identity, for the SPA header. Principal-gated. |
-| `GET`  | `/metrics` | — | Prometheus counters/histograms for the obs-plane scrape. Added by `Instrumentator` (`api.py:166`), not an `@app` route, and excluded from the OpenAPI schema. |
+| `GET`  | `/metrics` | — | Prometheus counters/histograms for the obs-plane scrape. Added by `Instrumentator` (`api.py:427`), not an `@app` route, and excluded from the OpenAPI schema. |
 | `GET`  | `/collections/list` | `Collections` | List all Qdrant collections. |
 | `GET`  | `/collections/retention` | `Collections` | When each collection is due for deletion for inactivity. Read-only: never postpones a deadline. |
 | `POST` | `/collections/select` | `Collections` | Activate a collection, pre-warms the NER cache. |
@@ -222,7 +257,7 @@ get the same 409 until the cascade ends.
 ### `POST /query`
 
 Runs a single question against the active collection. Source:
-`docint/core/api.py:1792`.
+`docint/core/api.py:3011`.
 
 Request (`QueryIn`):
 
@@ -1175,7 +1210,7 @@ with it.
 
 ### `POST /agent/chat`
 
-Runs the orchestrator for one turn. Source: `docint/core/api.py:3734`.
+Runs the orchestrator for one turn. Source: `docint/core/api.py:5667`.
 
 Request (`AgentChatIn`):
 
@@ -1468,14 +1503,14 @@ machinery one needs. Successful translations are cached server-side by
 All Pydantic models used by the routes live at the top of
 `docint/core/api.py`:
 
-- `SelectCollectionIn` / `SelectCollectionOut` (`api.py:745`, `751`)
-- `MetadataFilterIn` (`api.py:772`)
-- `QueryIn` / `QueryOut` (`api.py:837`, `907`)
-- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:931`, `950`)
-- `IngestIn` / `IngestOut` (`api.py:977`, `1001`)
-- `SessionListOut` / `SessionHistoryOut` (`api.py:1011`, `1017`)
-- `NERStatsOut` / `NERSearchOut` (`api.py:1023`, `1033`)
-- `AgentChatIn` / `AgentChatOut` (`api.py:1096`, `1107`)
+- `SelectCollectionIn` / `SelectCollectionOut` (`api.py:1428`, `1434`)
+- `MetadataFilterIn` (`api.py:1478`)
+- `QueryIn` / `QueryOut` (`api.py:1588`, `1677`)
+- `SummaryDiagnosticsOut` / `SummarizeOut` (`api.py:1721`, `1740`)
+- `IngestIn` / `IngestOut` (`api.py:1800`, `1896`)
+- `SessionListOut` / `SessionHistoryOut` (`api.py:1906`, `1912`)
+- `NERStatsOut` / `NERSearchOut` (`api.py:1918`, `1928`)
+- `AgentChatIn` / `AgentChatOut` (`api.py:1995`, `2011`)
 
 ## Streaming semantics
 
@@ -1484,7 +1519,7 @@ complete `QueryOut` / `AgentChatOut` payload, so the client updates
 citations and metadata in one atomic step after the tokens stop. How the
 tokens are produced differs by path:
 
-- **Replayed** — `_stream_simulated_text()` (`docint/core/api.py:659`)
+- **Replayed** — `_stream_simulated_text()` (`docint/core/api.py:1342`)
   runs the non-streaming handler, splits the finished answer into tokens
   and yields each with a fixed delay
   (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`, `0.03` s). This is used on one
@@ -1492,7 +1527,7 @@ tokens are produced differs by path:
   `retrieval_mode="stateless"`.
 - **Live** — every session path (`POST /stream_query` in the default mode
   and `POST /agent/chat/stream`) yields from `RAG.stream_chat()` through
-  `_aiter_sync_gen()` (`docint/core/api.py:673`), so tokens arrive as the
+  `_aiter_sync_gen()` (`docint/core/api.py:1356`), so tokens arrive as the
   model produces them and no artificial delay applies. A stateless
   agent turn streams the same way, through `RAG.stream_stateless_agent_turn()`.
 
