@@ -4,10 +4,13 @@ from collections.abc import Sequence
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from loguru import logger
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from docint.core.audit import settle_failed_operations
 from docint.core.state.collection_owner_manager import InvalidCollectionNameError
 
 
@@ -62,9 +65,19 @@ def install_error_handlers(app: FastAPI) -> None:
         logger.warning("Rejected collection name on {} {}: {}", request.method, request.url.path, exc)
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    @app.exception_handler(StarletteHTTPException)
+    async def _handle_http(request: Request, exc: StarletteHTTPException) -> Response:
+        # A server error ends the audited operation it interrupted: recorded
+        # as failed. Client errors (4xx) return no data and record nothing,
+        # except the refusals the audit gate records itself (403, 428).
+        if exc.status_code >= 500:
+            settle_failed_operations(request)
+        return await http_exception_handler(request, exc)
+
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         logger.opt(exception=exc).error(f"Unhandled error on {request.method} {request.url.path}")
+        settle_failed_operations(request)
         return JSONResponse(status_code=500, content={"detail": "Internal server error."})
 
 

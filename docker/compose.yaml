@@ -125,6 +125,11 @@ services:
       # advertises it via GET /config so the SPA sizes upload batches to stay
       # under nginx's client_max_body_size; it does not enforce it here.
       DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}
+      # Data-protection audit lines (docs/audit.md) go to the container's own
+      # stdout under one container-wide lock, so a CLI run with
+      # `docker compose exec` (the make targets) lands in this container's log
+      # beside the API's chain. The lock file lives on /tmp (media-tmp).
+      AUDIT_OUTPUT: container
     env_file: *env-file
     volumes:
       - docling-cache:/home/app/.cache/docling

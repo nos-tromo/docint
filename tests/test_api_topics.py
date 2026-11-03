@@ -396,7 +396,7 @@ def test_the_topics_routes_exist() -> None:
 
 
 def test_topics_routes_honor_admin_owner_context(client: TestClient, fake: _TopicsRAG) -> None:
-    """An admin can read and build another owner's topics; an ordinary caller remains in their own namespace.
+    """An admin can read and build another owner's topics; an ordinary caller asking to is refused.
 
     Args:
         client: The HTTP client.
@@ -413,7 +413,7 @@ def test_topics_routes_honor_admin_owner_context(client: TestClient, fake: _Topi
         response = client.request(method, url, params={"owner": "analyst-b"}, headers=admin)
         assert response.status_code == (202 if method == "POST" else 200)
         denied = client.request(method, url, params={"owner": "analyst-b"}, headers={"X-Auth-User": "analyst-a"})
-        assert denied.status_code == 404
+        assert denied.status_code == 403
     assert fake.reads and all(read[1] == physical for read in fake.reads)
 
 

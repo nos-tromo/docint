@@ -10,6 +10,8 @@ Identity is carried by ``X-Auth-User`` (default header); requests with no header
 fall back to ``DOCINT_DEFAULT_IDENTITY`` ("test-operator").
 """
 
+import io
+import json
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -389,13 +391,41 @@ def test_admin_lists_cross_owner_sessions_with_owner_param(client: TestClient, _
     assert collection_arg is not None  # and the collection resolved under alice's namespace
 
 
-def test_non_admin_owner_param_does_not_rescope_sessions(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """A non-admin passing ?owner= keeps their own session scope."""
-    resp = client.get("/sessions/list", params={"owner": "alice"}, headers={"X-Auth-User": "bob"})
-    assert resp.status_code == 200
+def test_non_admin_owner_param_does_not_rescope_sessions(
+    client: TestClient, _patch_rag: _OwnRAG, audit_stream: io.StringIO
+) -> None:
+    """A non-admin passing ?owner= naming someone else is refused, and the attempt recorded.
 
+    The listing never runs in either namespace; the audit trail holds one
+    denied event naming whom the caller tried to act for.
+    """
+    listed_before = len(_patch_rag._sessions.listed)
+    resp = client.get("/sessions/list", params={"owner": "alice"}, headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 403
+    assert len(_patch_rag._sessions.listed) == listed_before
+
+    denied = [event for event in _audit_events(audit_stream) if event["outcome"] == "denied"]
+    assert [(event["action"], event["operation"]) for event in denied] == [("query", "sessions.list")]
+    assert denied[0]["actor"] == {"user": "bob", "via": "edge", "on_behalf_of": "alice"}
+    assert "target" not in denied[0]
+
+    # Naming themselves is not acting for someone else.
+    assert client.get("/sessions/list", params={"owner": "bob"}, headers={"X-Auth-User": "bob"}).status_code == 200
     owner_arg, _ = _patch_rag._sessions.listed[-1]
     assert owner_arg == "bob"
+
+
+def _audit_events(stream: io.StringIO) -> list[dict[str, Any]]:
+    """Return the audit events captured so far, lifecycle events left out.
+
+    Args:
+        stream (io.StringIO): The test's audit stream.
+
+    Returns:
+        list[dict[str, Any]]: The events, in order.
+    """
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    return [event for event in events if event["action"] not in ("lifecycle", "admin")]
 
 
 def test_collections_list_all_admin_shape(client: TestClient) -> None:

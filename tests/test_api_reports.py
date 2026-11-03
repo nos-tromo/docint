@@ -436,14 +436,17 @@ def test_admin_reads_cross_owner_report_with_owner_param(client: TestClient) -> 
 
 
 def test_non_admin_owner_param_does_not_rescope_reports(client: TestClient) -> None:
-    """A non-admin passing ?owner= keeps their own report scope (404 cross-owner)."""
+    """A non-admin passing ?owner= never reaches another owner's reports (404 or 403, never the data)."""
     created = client.post(
         "/reports", json={"title": "Alice case", "collection_name": "docs"}, headers={"X-Auth-User": "alice"}
     ).json()
     rid = created["id"]
 
     assert client.get(f"/reports/{rid}", params={"owner": "alice"}, headers={"X-Auth-User": "bob"}).status_code == 404
-    assert client.get("/reports", params={"owner": "alice"}, headers={"X-Auth-User": "bob"}).json()["reports"] == []
+    # Asking to act for someone else is refused outright on an audited route.
+    listed = client.get("/reports", params={"owner": "alice", "collection": "docs"}, headers={"X-Auth-User": "bob"})
+    assert listed.status_code == 403
+    assert "reports" not in listed.json()
 
 
 # ---------------------------------------------------------------------------

@@ -502,3 +502,62 @@ def test_uvicorn_access_lines_never_reach_stdout(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert "/collections/list" in result.stderr
+
+
+def test_a_runs_social_links_are_a_combine_beneath_its_collect() -> None:
+    """The linker's joins are a ``combine`` under the run, by posting uuid; references stay off the criteria."""
+    from docint.core.audit_ingest import record_run
+    from docint.core.rag import IngestStats, SocialLinkStats
+
+    stream = io.StringIO()
+    op = audit.Operation(_auditor(stream), _context(), "collect", "ingest.run", container="docs")
+    stats = IngestStats(
+        files_processed=1,
+        files_skipped=0,
+        files_failed=0,
+        docs=3,
+        nodes=3,
+        file_hashes=("h1",),
+        social_link=SocialLinkStats(dossiers=1, postings=("u1", ""), comments=4, media=2),
+    )
+    with metering() as meter:
+        count_transfer("embed", "inference:embed", "embed-model", 3)
+
+    record_run(op, stats, meter, empty=False)
+
+    events = [event for event in _events(stream) if event["action"] != "lifecycle"]
+    assert [(event["action"], event["operation"]) for event in events] == [
+        ("collect", "ingest.run"),
+        ("combine", "ingest.social_link"),
+        ("ai_call", "ingest.embed"),
+    ]
+    assert events[0]["target"] == {"kind": "document", "ids": ["h1"], "count": 1, "container": "docs"}
+    assert "file_hashes" not in events[0]["criteria"] and "social_link" not in events[0]["criteria"]
+    assert events[1]["target"] == {"kind": "posting", "ids": ["u1"], "count": 2, "container": "docs"}
+    assert events[1]["criteria"] == {"dossiers": 1, "comments": 4, "media_linked": 2}
+    assert events[1]["parent_event_id"] == events[0]["event_id"]
+
+
+def test_social_link_stats_count_what_the_linker_joined() -> None:
+    """Postings by uuid, comments, dossiers and linked media; nothing at all without a social export."""
+    from types import SimpleNamespace
+
+    from docint.core.rag import SocialLinkStats, _social_link_stats
+
+    pipeline = SimpleNamespace(
+        social_link_documents=[
+            SimpleNamespace(metadata={"table": {"style": "postings"}, "reference_metadata": {"uuid": "u1"}}),
+            SimpleNamespace(metadata={"table": {"style": "comments"}}),
+            SimpleNamespace(metadata={"reference_metadata": {"type": "transcript_segment"}}),
+        ],
+        social_link_consumed={
+            Path("profile/dossier.json"),
+            Path("profile/progress.json"),
+            Path("_run.json"),
+            Path("profile/clip.mp4"),
+            Path("profile/photo.jpg"),
+        },
+    )
+
+    assert _social_link_stats(pipeline) == SocialLinkStats(dossiers=1, postings=("u1",), comments=1, media=2)
+    assert _social_link_stats(SimpleNamespace()) is None

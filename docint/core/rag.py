@@ -1018,6 +1018,11 @@ class IngestStats:
         files_failed: Distinct file hashes in batches that raised.
         docs: Documents emitted, across the core and streaming lanes.
         nodes: Nodes persisted, across both lanes.
+        file_hashes: The hashes of the files this run began work on, sorted —
+            what the audit trail names as collected. Kept off the run-summary
+            log line, which carries the counts.
+        social_link: What the social linker joined, ``None`` when the batch
+            held no social export. Also kept off the log line.
     """
 
     files_processed: int
@@ -1025,6 +1030,59 @@ class IngestStats:
     files_failed: int
     docs: int
     nodes: int
+    file_hashes: tuple[str, ...] = ()
+    social_link: SocialLinkStats | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SocialLinkStats:
+    """What one run's social linker joined, for the audit trail's ``combine`` event.
+
+    Attributes:
+        dossiers: Social exports read.
+        postings: The uuids of the postings joined to their comments and media
+            (an empty string for a posting without one).
+        comments: Comments joined to their postings.
+        media: Media files linked to postings.
+    """
+
+    dossiers: int = 0
+    postings: tuple[str, ...] = ()
+    comments: int = 0
+    media: int = 0
+
+
+def _social_link_stats(pipeline: Any) -> SocialLinkStats | None:
+    """Count what the generic lane's social linker joined.
+
+    Read off the pipeline's linker results: the posting and comment rows it
+    built and the paths it claimed (dossiers, their run files, linked media).
+
+    Args:
+        pipeline (Any): The generic lane's pipeline.
+
+    Returns:
+        SocialLinkStats | None: The counts, ``None`` when nothing was linked.
+    """
+    documents = list(getattr(pipeline, "social_link_documents", None) or [])
+    claimed = [Path(path) for path in getattr(pipeline, "social_link_consumed", None) or ()]
+    if not documents and not claimed:
+        return None
+    postings: list[str] = []
+    comments = 0
+    for document in documents:
+        metadata = getattr(document, "metadata", None) or {}
+        style = (metadata.get("table") or {}).get("style")
+        if style == "postings":
+            postings.append(str((metadata.get("reference_metadata") or {}).get("uuid") or ""))
+        elif style == "comments":
+            comments += 1
+    return SocialLinkStats(
+        dossiers=sum(1 for path in claimed if path.name == "dossier.json"),
+        postings=tuple(postings),
+        comments=comments,
+        media=sum(1 for path in claimed if path.suffix.lower() != ".json" and not path.name.startswith("_")),
+    )
 
 
 def _build_ingest_stats(
@@ -1068,6 +1126,8 @@ def _build_ingest_stats(
         files_failed=len({fh for hashes, _ in ingest_failures for fh in hashes}),
         docs=total_docs,
         nodes=total_nodes,
+        file_hashes=tuple(sorted(manifest_started)),
+        social_link=_social_link_stats(pipeline),
     )
 
 
