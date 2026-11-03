@@ -136,24 +136,25 @@ Loaded by `load_principal_env()` (`env_cfg.py:717`). Configures request-principa
 | Variable | Default | Description |
 |---|---|---|
 | `DOCINT_AUTH_HEADER` | `X-Auth-User` | Trusted header carrying the authenticated principal's username. Set by the gateway (`edge-plane`); in dev, falls back to `DOCINT_DEFAULT_IDENTITY`. |
-| `DOCINT_DEFAULT_IDENTITY` | *unset* | Dev-only fallback identity when the trusted header is absent. Production must leave this unset so requests without `X-Auth-User` are rejected (401). Also backfills the owner for pre-existing collection and session rows (legacy migration). |
+| `DOCINT_DEFAULT_IDENTITY` | *unset* | Dev-only fallback identity when the trusted header is absent — honoured **only while `DOCINT_EDGE_SECRET` is unset**. With the secret set it is ignored (one startup warning), so a request without the gateway's identity gets 401 either way. Production must leave this unset so requests without `X-Auth-User` are rejected (401). Also backfills the owner for pre-existing collection and session rows (legacy migration), whether or not the secret is set. |
 | `DOCINT_EDGE_SECRET` | *unset* | Shared secret the gateway sends in `X-Edge-Secret` on every request it proxies — the same value as edge-plane's own `DOCINT_EDGE_SECRET`, generated with `make secret` there. Set, the identity headers (`DOCINT_AUTH_HEADER`, `DOCINT_GROUPS_HEADER` and the decorative `X-Auth-Name`) are believed only from a request carrying it; any other request resolves as if it sent none of them, so it can claim neither a user nor the admin group. Unset or blank: believed from any caller that can reach the backend, as before, with one startup warning when `DOCINT_DEFAULT_IDENTITY` is unset too. Must be at least 32 characters, or the backend refuses to start. |
-| `DOCINT_GROUPS_HEADER` | `X-Auth-Groups` | Trusted header carrying the principal's group memberships (comma-separated). Set by the gateway; in dev, falls back to `DOCINT_DEFAULT_GROUPS`. |
+| `DOCINT_GROUPS_HEADER` | `X-Auth-Groups` | Trusted header carrying the principal's group memberships (comma-separated). Set by the gateway; in dev, falls back to `DOCINT_DEFAULT_GROUPS` (only while `DOCINT_EDGE_SECRET` is unset). |
 | `DOCINT_ADMIN_GROUP` | `admins` | Group name that grants admin-level access. Members of this group (from `X-Auth-Groups`) can access collections, chat sessions, and reports owned by other principals via the `owner` query parameter; non-admin principals are unaffected and cross-owner access remains 404. |
-| `DOCINT_DEFAULT_GROUPS` | *unset* | Dev-only fallback group memberships (comma-separated) when the trusted header is absent. E.g. `DOCINT_DEFAULT_GROUPS=admins,devs` makes the dev principal an admin and member of devs. |
+| `DOCINT_DEFAULT_GROUPS` | *unset* | Dev-only fallback group memberships (comma-separated) when the trusted header is absent. E.g. `DOCINT_DEFAULT_GROUPS=admins,devs` makes the dev principal an admin and member of devs. Like `DOCINT_DEFAULT_IDENTITY`, ignored while `DOCINT_EDGE_SECRET` is set — a gateway request without `X-Auth-Groups` then has no groups, so a dev admin default left in `.env` can never make a gateway user an admin. |
 
 **The edge secret.** The backend sits on the shared `inference-net` and
 `data-net`, so without `DOCINT_EDGE_SECRET` any container there can send
 `X-Auth-User`/`X-Auth-Groups` itself and act as any user, an admin included.
 With it set, a request whose `X-Edge-Secret` is missing or wrong (compared in
-constant time) gets exactly what a request without identity headers gets:
-`DOCINT_DEFAULT_IDENTITY` and `DOCINT_DEFAULT_GROUPS` when set, else 401. When
-such a request did carry identity headers, a warning names its method and path
-(no query string) and whether the secret was missing or did not match — never
-a header value. The frontend's nginx forwards request headers unchanged, the SSE
-locations included, so only the gateway and the backend hold the secret. A
-caller that reaches the backend directly, such as a script, must send
-`X-Edge-Secret` as well or it is anonymous.
+constant time) gets exactly what a request without identity headers gets, and
+with the secret set that is a 401: the dev fallbacks `DOCINT_DEFAULT_IDENTITY`
+and `DOCINT_DEFAULT_GROUPS` are ignored, and startup warns once when either is
+set beside the secret. When such a request did carry identity headers, a
+warning names its method and path (no query string) and whether the secret was
+missing or did not match — never a header value. The frontend's nginx forwards
+request headers unchanged, the SSE locations included, so only the gateway and
+the backend hold the secret. A caller that reaches the backend directly, such
+as a script, must send `X-Edge-Secret` as well or it is anonymous.
 
 Roll it out gateway first: set the secret in edge-plane's `.env` and restart
 the gateway, then set the same value here and restart the backend. docint

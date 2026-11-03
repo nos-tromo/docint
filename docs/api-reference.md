@@ -766,8 +766,9 @@ by the collection name in the path** — there is no "select" step, so they are
 stateless and usable from any client with HTTP access to the backend. Behind a
 trusted proxy, pass the user header (e.g. `-H 'X-Auth-User: alice'`), plus the
 shared secret (`-H 'X-Edge-Secret: …'`) when `DOCINT_EDGE_SECRET` is set —
-without it the user header is ignored. With `DOCINT_DEFAULT_IDENTITY` set the
-user header is optional. `404` when the collection is not owned by the caller.
+without it the user header is ignored. With `DOCINT_DEFAULT_IDENTITY` set and
+no `DOCINT_EDGE_SECRET`, the user header is optional. `404` when the collection
+is not owned by the caller.
 
 | Route | Contents | Schema |
 |---|---|---|

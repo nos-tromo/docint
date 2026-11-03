@@ -330,18 +330,18 @@ GATEWAY = {"X-Edge-Secret": _EDGE_SECRET}
 def test_forged_admin_headers_without_the_edge_secret_cannot_cross_owners(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With DOCINT_EDGE_SECRET set, an admin claim from any other caller is ignored and ?owner= does nothing."""
+    """With DOCINT_EDGE_SECRET set, an admin claim from any other caller is unauthenticated, default identity or not."""
     monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
     alice = {"X-Auth-User": "alice", **GATEWAY}
     assert client.post("/ingest", json={"collection": "alpha"}, headers=alice).status_code == 200
 
-    # Without the secret, or with a wrong one, the request is the default identity's: alice's name 404s.
+    # Without the secret, or with a wrong one, nothing authenticates the request:
+    # the default identity is ignored while the secret is set.
     for headers in (ADMIN, {**ADMIN, "X-Edge-Secret": "not-the-edge-secret"}):
         selected = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=headers)
-        assert selected.status_code == 404
-        assert client.get("/collections/list?all=true", headers=headers).json() == []
+        assert selected.status_code == 401
+        assert client.get("/collections/list?all=true", headers=headers).status_code == 401
 
-    # With no default identity the same request fails closed.
     monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY")
     assert client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=ADMIN).status_code == 401
 
