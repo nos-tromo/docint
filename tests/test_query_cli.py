@@ -624,21 +624,27 @@ def test_main_runs_all_requested_actions(monkeypatch: pytest.MonkeyPatch) -> Non
         "export_chat_queries",
         lambda rag, **kwargs: sequence.append(f"chat:{kwargs['output_path']}"),
     )
-    monkeypatch.setattr(
-        query_cli,
-        "export_summary",
-        lambda rag, output_path: sequence.append(f"summary:{output_path}"),
-    )
-    monkeypatch.setattr(
-        query_cli,
-        "export_entities",
-        lambda rag, output_path: sequence.append(f"entities:{output_path}"),
-    )
-    monkeypatch.setattr(
-        query_cli,
-        "export_hate_speech",
-        lambda rag, output_path: sequence.append(f"hate:{output_path}"),
-    )
+    chains: list[Any] = []
+
+    def _export(name: str) -> Any:
+        """Build an export stand-in that records its call and the run's audit chain.
+
+        Args:
+            name (str): The export's label in the sequence.
+
+        Returns:
+            Any: The stand-in.
+        """
+
+        def _run(rag: Any, output_path: Path, audit: Any) -> None:
+            chains.append(audit)
+            sequence.append(f"{name}:{output_path}")
+
+        return _run
+
+    monkeypatch.setattr(query_cli, "export_summary", _export("summary"))
+    monkeypatch.setattr(query_cli, "export_entities", _export("entities"))
+    monkeypatch.setattr(query_cli, "export_hate_speech", _export("hate"))
 
     query_cli.main(["--all"])
 
@@ -649,3 +655,6 @@ def test_main_runs_all_requested_actions(monkeypatch: pytest.MonkeyPatch) -> Non
         "hate:/tmp/results/1700000123_alpha",
         "unload",
     ]
+    # Every export records on the run's one chain.
+    assert len(chains) == 3
+    assert all(chain is chains[0] and chain is not None for chain in chains)

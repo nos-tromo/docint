@@ -1,4 +1,12 @@
-"""CLI entry point for chat queries and collection-level exports."""
+"""CLI entry point for chat queries and collection-level exports.
+
+Audited like the API's chat and exports (``docs/audit.md``): each chat query
+is a ``query`` (``chat.query``) with the answer's ``ai_call``
+(``chat.answer``) and the result file it writes as a ``disclose`` to
+``file:query``; the summary is a ``modify`` (``summary.build``) with its
+model calls, and every export file kind is one ``disclose`` to ``file:query``.
+Each event is written before the file it covers.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +24,11 @@ from loguru import logger
 
 from docint.agents.generation import ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
+from docint.cli._audit import session
+from docint.core.audit import CliAudit, Operation, cli_audit, metered
+from docint.core.audit_targets import chunk_target, entity_target
 from docint.core.rag import RAG
+from docint.utils.audit_event import AiCall, sha256_text
 from docint.utils.csv_stream import entity_stats_row, hate_speech_row
 from docint.utils.env_cfg import (
     load_path_env,
@@ -28,6 +40,8 @@ from docint.utils.reference_metadata import format_reference_metadata_block
 
 DEFAULT_CHAT_SENTINEL = "__default_chat_queries__"
 DEFAULT_ENTITY_LIMIT = 50
+#: The actions a query run may record, for the purpose rule.
+QUERY_ACTIONS = ("ai_call", "disclose", "modify")
 
 
 def get_col_name() -> str:
@@ -526,7 +540,26 @@ def _build_hate_speech_txt(findings: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None:
+def _model_alias(rag: Any) -> str:
+    """Return the chat model a run asks for, for its ``ai_call`` events.
+
+    Args:
+        rag (Any): The active RAG instance.
+
+    Returns:
+        str: The model id, ``unknown`` when none is configured.
+    """
+    return str(getattr(rag, "text_model_id", None) or "unknown")
+
+
+def run_query(
+    rag: RAG,
+    query: str,
+    index: int,
+    output_path: str | Path,
+    *,
+    audit: CliAudit | None = None,
+) -> None:
     """Run one query against the RAG instance and store the result.
 
     Args:
@@ -534,6 +567,30 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
         query (str): Query string.
         index (int): Query index for naming.
         output_path (str | Path): Directory where results are stored.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this query when omitted.
+    """
+    with session(audit, "query", "query", "chat.query", also=QUERY_ACTIONS) as cli:
+        collection = str(getattr(rag, "qdrant_collection", "") or "") or None
+        op = cli.operation(
+            "query",
+            "chat.query",
+            container=collection,
+            criteria={"question_sha256": sha256_text(query), "query_index": index},
+        )
+        with metered(op):
+            _run_query(rag, query, index, output_path, op)
+
+
+def _run_query(rag: RAG, query: str, index: int, output_path: str | Path, op: Operation) -> None:
+    """Answer one query, record it, then write its result file.
+
+    Args:
+        rag (RAG): Active RAG instance.
+        query (str): Query string.
+        index (int): Query index for naming.
+        output_path (str | Path): Directory where results are stored.
+        op (Operation): The query's open ``query`` operation.
     """
     logger.info("Running query {}: {}", index, query)
 
@@ -573,6 +630,19 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
         )
     )
 
+    answer = str(result.get("response") or result.get("answer") or "")
+    target = chunk_target(sources)
+    op.record(target=target)
+    if answer:
+        op.child(
+            "ai_call",
+            "chat.answer",
+            target=target,
+            recipient="inference:chat",
+            ai=AiCall(model_alias=_model_alias(rag), output_sha256=sha256_text(answer), sources=list(target.ids)),
+        )
+    # The result file carries the answer and its sources out of the app.
+    op.child("disclose", "export.query_result", target=target, recipient="file:query")
     timestamp = str(int(time()))
     _store_text_output(
         filename=f"{timestamp}_{index}_result",
@@ -587,6 +657,7 @@ def export_chat_queries(
     queries_path: Path,
     prompts_path: Path,
     output_path: Path,
+    audit: CliAudit | None = None,
 ) -> None:
     """Run batch chat queries from a text file.
 
@@ -595,6 +666,8 @@ def export_chat_queries(
         queries_path (Path): Query file path.
         prompts_path (Path): Prompts directory, kept for compatibility with load_queries.
         output_path (Path): Results directory.
+        audit (CliAudit | None): The command's audit chain; each query opens
+            one of its own when omitted.
     """
     queries = load_queries(queries_path=queries_path, prompts_path=prompts_path)
     if not queries:
@@ -602,18 +675,48 @@ def export_chat_queries(
         return
 
     for index, query in enumerate(queries, start=1):
-        run_query(rag=rag, query=query, index=index, output_path=output_path)
+        run_query(rag=rag, query=query, index=index, output_path=output_path, audit=audit)
 
 
-def export_summary(rag: RAG, *, output_path: Path) -> None:
+def export_summary(rag: RAG, *, output_path: Path, audit: CliAudit | None = None) -> None:
     """Generate and store a collection summary payload.
+
+    The build is a ``modify`` (it refreshes the cached summary) with its
+    model calls as transfers; the summary file is a ``disclose``.
 
     Args:
         rag (RAG): Active RAG instance.
         output_path (Path): Results directory.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this export when omitted.
     """
-    logger.info("Generating collection summary...")
-    data = rag.build_tree_summary()
+    with session(audit, "query", "modify", "summary.build", also=QUERY_ACTIONS) as cli:
+        container = str(getattr(rag, "qdrant_collection", "") or "") or None
+        build = cli.operation("modify", "summary.build", container=container)
+        logger.info("Generating collection summary...")
+        with metered(build) as meter:
+            data = rag.build_tree_summary()
+        sources = [src for src in data.get("sources", []) if isinstance(src, dict)]
+        diagnostics = data.get("summary_diagnostics")
+        build.record(
+            target=chunk_target(sources),
+            criteria={"llm_calls": diagnostics.get("llm_calls")} if isinstance(diagnostics, dict) else None,
+        )
+        build.transfers(meter)
+        export = cli.operation("disclose", "export.summary", container=container)
+        with metered(export):
+            _write_summary(rag, data, output_path, export)
+
+
+def _write_summary(rag: RAG, data: dict[str, Any], output_path: Path, op: Operation) -> None:
+    """Validate a built summary, record its export, then write the summary file.
+
+    Args:
+        rag (RAG): Active RAG instance.
+        data (dict[str, Any]): The built summary.
+        output_path (Path): Results directory.
+        op (Operation): The export's open ``disclose`` operation.
+    """
     summary = str(data.get("response") or data.get("answer") or "")
     sources = [src for src in data.get("sources", []) if isinstance(src, dict)]
     summary_diagnostics = data.get("summary_diagnostics")
@@ -632,6 +735,7 @@ def export_summary(rag: RAG, *, output_path: Path) -> None:
         ),
     }
     collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
+    op.record(target=chunk_target(sources), recipient="file:query")
     _store_text_output(
         f"summary_{collection}",
         _build_summary_txt(str(rag.qdrant_collection or collection), payload),
@@ -639,12 +743,33 @@ def export_summary(rag: RAG, *, output_path: Path) -> None:
     )
 
 
-def export_entities(rag: RAG, *, output_path: Path) -> None:
+def export_entities(rag: RAG, *, output_path: Path, audit: CliAudit | None = None) -> None:
     """Export the top collection entities and their mention counts as text.
 
     Args:
         rag (RAG): Active RAG instance.
         output_path (Path): Results directory.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this export when omitted.
+    """
+    with session(audit, "query", "disclose", "export.entities", also=QUERY_ACTIONS) as cli:
+        op = cli.operation(
+            "disclose",
+            "export.entities",
+            container=str(getattr(rag, "qdrant_collection", "") or "") or None,
+            criteria={"top_k": DEFAULT_ENTITY_LIMIT, "min_mentions": 1, "entity_merge_mode": "orthographic"},
+        )
+        with metered(op):
+            _export_entities(rag, output_path, op)
+
+
+def _export_entities(rag: RAG, output_path: Path, op: Operation) -> None:
+    """Read the top entities, record their export, then write the files.
+
+    Args:
+        rag (RAG): Active RAG instance.
+        output_path (Path): Results directory.
+        op (Operation): The export's open ``disclose`` operation.
     """
     logger.info("Exporting top entities...")
     stats = rag.get_collection_ner_stats(
@@ -655,6 +780,7 @@ def export_entities(rag: RAG, *, output_path: Path) -> None:
     )
     top_entities = [row for row in list(stats.get("top_entities") or []) if isinstance(row, dict)]
     collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
+    op.record(target=entity_target(top_entities), recipient="file:query")
     _store_text_output(
         f"entities_{collection}",
         _build_entities_txt(top_entities, collection=str(rag.qdrant_collection or "")),
@@ -663,16 +789,35 @@ def export_entities(rag: RAG, *, output_path: Path) -> None:
     _store_csv_output(f"entities_{collection}", _build_entities_csv(top_entities), output_path)
 
 
-def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
+def export_hate_speech(rag: RAG, *, output_path: Path, audit: CliAudit | None = None) -> None:
     """Export flagged hate-speech findings as text.
 
     Args:
         rag (RAG): Active RAG instance.
         output_path (Path): Results directory.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this export when omitted.
+    """
+    with session(audit, "query", "disclose", "export.hate_speech", also=QUERY_ACTIONS) as cli:
+        op = cli.operation(
+            "disclose", "export.hate_speech", container=str(getattr(rag, "qdrant_collection", "") or "") or None
+        )
+        with metered(op):
+            _export_hate_speech(rag, output_path, op)
+
+
+def _export_hate_speech(rag: RAG, output_path: Path, op: Operation) -> None:
+    """Read the hate-speech findings, record their export, then write the files.
+
+    Args:
+        rag (RAG): Active RAG instance.
+        output_path (Path): Results directory.
+        op (Operation): The export's open ``disclose`` operation.
     """
     logger.info("Exporting hate-speech findings...")
     findings = [row for row in rag.get_collection_hate_speech() if isinstance(row, dict)]
     collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
+    op.record(target=chunk_target(findings), recipient="file:query")
     _store_text_output(
         f"hate_speech_{collection}",
         _build_hate_speech_txt(findings),
@@ -739,33 +884,37 @@ def main(argv: Sequence[str] | None = None) -> None:
     set_offline_env()
     args = parse_args(argv)
 
-    col_name = _resolve_collection_name(args)
-    rag = rag_pipeline(col_name=col_name)
-    path_config = load_path_env()
-    run_output_path = _build_run_output_path(
-        path_config.results,
-        collection_name=col_name,
-    )
+    # One chain for the whole run, opened first: a run that needs a stated
+    # purpose and has none is refused before anything is asked or read.
+    with cli_audit("query", "query", "chat.query", also=QUERY_ACTIONS) as cli:
+        col_name = _resolve_collection_name(args)
+        rag = rag_pipeline(col_name=col_name)
+        path_config = load_path_env()
+        run_output_path = _build_run_output_path(
+            path_config.results,
+            collection_name=col_name,
+        )
 
-    try:
-        if _should_run_chat(args):
-            export_chat_queries(
-                rag,
-                queries_path=_resolve_chat_queries_path(args, default_queries_path=path_config.queries),
-                prompts_path=path_config.prompts,
-                output_path=run_output_path,
-            )
+        try:
+            if _should_run_chat(args):
+                export_chat_queries(
+                    rag,
+                    queries_path=_resolve_chat_queries_path(args, default_queries_path=path_config.queries),
+                    prompts_path=path_config.prompts,
+                    output_path=run_output_path,
+                    audit=cli,
+                )
 
-        if args.all or args.summary:
-            export_summary(rag, output_path=run_output_path)
+            if args.all or args.summary:
+                export_summary(rag, output_path=run_output_path, audit=cli)
 
-        if args.all or args.entities:
-            export_entities(rag, output_path=run_output_path)
+            if args.all or args.entities:
+                export_entities(rag, output_path=run_output_path, audit=cli)
 
-        if args.all or args.hate_speech:
-            export_hate_speech(rag, output_path=run_output_path)
-    finally:
-        rag.unload_models()
+            if args.all or args.hate_speech:
+                export_hate_speech(rag, output_path=run_output_path, audit=cli)
+        finally:
+            rag.unload_models()
 
     logger.info("Query CLI work completed.")
 

@@ -1,4 +1,10 @@
-"""CLI for corpus-specific retrieval evaluation across retrieval modes."""
+"""CLI for corpus-specific retrieval evaluation across retrieval modes.
+
+Audited like a chat query (``docs/audit.md``): every (query, mode) run is a
+``query`` (``eval.query``) with the answer's ``ai_call`` (``eval.answer``),
+and the written report is a ``disclose`` (``export.eval_results``) to
+``file:query-eval``, recorded before the file is written.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +16,16 @@ from typing import Any, Protocol
 
 from loguru import logger
 
+from docint.cli._audit import session
 from docint.cli.query import _store_output, get_col_name, rag_pipeline
+from docint.core.audit import CliAudit, cli_audit, metered
+from docint.core.audit_targets import chunk_target
+from docint.utils.audit_event import AiCall, sha256_text
 from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logger_cfg import init_logger
+
+#: The actions an eval run may record, for the purpose rule.
+EVAL_ACTIONS = ("ai_call", "disclose")
 
 
 class RetrievalEvalRAG(Protocol):
@@ -145,6 +158,7 @@ def evaluate_retrieval(
     query_specs: list[dict[str, Any]],
     *,
     modes: list[str] | None = None,
+    audit: CliAudit | None = None,
 ) -> dict[str, Any]:
     """Run the same query set across multiple retrieval modes.
 
@@ -157,26 +171,69 @@ def evaluate_retrieval(
             and optional expectation keys).
         modes (list[str] | None): Retrieval modes to test. Defaults to
             ``["default", "hybrid", "sparse"]`` if hybrid is enabled, else ``["default"]``.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this evaluation when omitted.
 
     Returns:
         dict[str, Any]: Collection name, tested modes, query count, a per-mode summary, and the
             detailed results for each (query, mode).
     """
+    with session(audit, "query-eval", "query", "eval.query", also=EVAL_ACTIONS) as cli:
+        return _evaluate(rag, query_specs, modes, cli)
+
+
+def _evaluate(
+    rag: RetrievalEvalRAG,
+    query_specs: list[dict[str, Any]],
+    modes: list[str] | None,
+    cli: CliAudit,
+) -> dict[str, Any]:
+    """Run the evaluation, recording each (query, mode) run as it completes.
+
+    Args:
+        rag (RetrievalEvalRAG): The RAG pipeline to use for running queries.
+        query_specs (list[dict[str, Any]]): Query specs.
+        modes (list[str] | None): Retrieval modes to test.
+        cli (CliAudit): The command's audit chain.
+
+    Returns:
+        dict[str, Any]: The evaluation report (see :func:`evaluate_retrieval`).
+    """
     selected_modes = modes or (["default", "hybrid", "sparse"] if rag.enable_hybrid else ["default"])
     results: list[dict[str, Any]] = []
     summary_by_mode: dict[str, dict[str, Any]] = {}
+    container = str(getattr(rag, "qdrant_collection", "") or "") or None
+    model = str(getattr(rag, "text_model_id", None) or "unknown")
 
     for query_index, query_spec in enumerate(query_specs, start=1):
         query_text = str(query_spec["query"])
         mode_results: list[dict[str, Any]] = []
         for mode in selected_modes:
-            started_at = perf_counter()
-            payload = rag.run_query(
-                query_text,
-                retrieval_options={"vector_store_query_mode": mode},
+            op = cli.operation(
+                "query",
+                "eval.query",
+                container=container,
+                criteria={"question_sha256": sha256_text(query_text), "mode": mode, "query_index": query_index},
             )
+            started_at = perf_counter()
+            with metered(op):
+                payload = rag.run_query(
+                    query_text,
+                    retrieval_options={"vector_store_query_mode": mode},
+                )
             latency_ms = round((perf_counter() - started_at) * 1000, 2)
             sources = [source for source in (payload.get("sources") or []) if isinstance(source, dict)]
+            target = chunk_target(sources)
+            op.record(target=target)
+            answer = str(payload.get("response") or "")
+            if answer:
+                op.child(
+                    "ai_call",
+                    "eval.answer",
+                    target=target,
+                    recipient="inference:chat",
+                    ai=AiCall(model_alias=model, output_sha256=sha256_text(answer), sources=list(target.ids)),
+                )
             expectations = _match_expectations(sources, query_spec)
             mode_result = {
                 "mode": mode,
@@ -254,24 +311,43 @@ def evaluate_retrieval(
 
 
 def main() -> None:
-    """Run retrieval evaluation for the active collection."""
+    """Run retrieval evaluation for the active collection.
+
+    One audit chain for the whole run, opened before the prompt so a run that
+    needs a stated purpose and has none is refused first.
+    """
     init_logger()
     set_offline_env()
-    col_name = get_col_name()
-    rag = rag_pipeline(col_name=col_name)
-    path_config = load_path_env()
-    query_specs = load_eval_queries(
-        queries_path=path_config.queries,
-        prompts_path=path_config.prompts,
-    )
-    report = evaluate_retrieval(rag, query_specs)
-    timestamp = str(int(time()))
-    _store_output(
-        filename=f"{timestamp}_retrieval_eval",
-        data=report,
-        output_path=path_config.results,
-    )
-    rag.unload_models()
+    with cli_audit("query-eval", "query", "eval.query", also=EVAL_ACTIONS) as cli:
+        col_name = get_col_name()
+        rag = rag_pipeline(col_name=col_name)
+        path_config = load_path_env()
+        query_specs = load_eval_queries(
+            queries_path=path_config.queries,
+            prompts_path=path_config.prompts,
+        )
+        report = evaluate_retrieval(rag, query_specs, audit=cli)
+        # The report holds every answer and its sources: recorded before it is written.
+        written = [
+            source
+            for result in report["results"]
+            for mode_result in result["results"]
+            for source in mode_result["sources"]
+        ]
+        export = cli.operation(
+            "disclose",
+            "export.eval_results",
+            container=col_name,
+            criteria={"queries": report["query_count"], "modes": report["modes"]},
+        )
+        export.record(target=chunk_target(written), recipient="file:query-eval")
+        timestamp = str(int(time()))
+        _store_output(
+            filename=f"{timestamp}_retrieval_eval",
+            data=report,
+            output_path=path_config.results,
+        )
+        rag.unload_models()
     logger.info("Retrieval evaluation complete.")
 
 

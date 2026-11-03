@@ -7,7 +7,7 @@
 # The compose lifecycle (network/volumes/build/bundle/up/up-dev/dev/stop/down/
 # logs/pre-commit/test) + the versioned image tag come from make/common.mk,
 # vendored from nos-tromo/.github. Only docint-specific config, the help
-# text, and the `resolve` target live here.
+# text, and the CLI targets live here.
 
 .DEFAULT_GOAL := help
 
@@ -17,6 +17,16 @@ VOLUMES  := docling-cache sessions-storage source-preview-cache pipeline-storage
 include make/common.mk
 
 .PHONY: help resolve health search-index search-index-all extract topics retention-report
+
+# The CLI targets that process collection content (resolve, extract, topics,
+# search-index, search-index-all) each record a data-protection audit chain
+# (docs/audit.md). They run inside the running backend (`docker compose exec`,
+# so the backend must be up): there, AUDIT_OUTPUT=container puts the chain on
+# the backend's own log, while a one-off container could exit before the log
+# collector sees it and its audit lines would be lost. The operator is the
+# host account; CASE_REF=<ref> and REASON=<text> state the purpose, which the
+# command refuses to run without (exit code 2) when AUDIT_REQUIRE_PURPOSE asks.
+AUDIT_EXEC_ENV = -e AUDIT_CLI_USER="$${SUDO_USER:-$$(id -un)}" -e AUDIT_CASE_REF="$(CASE_REF)" -e AUDIT_REASON="$(REASON)"
 
 help:
 	@echo "docint — build-host helpers."
@@ -37,6 +47,8 @@ help:
 	@echo "  make topics     build, extend or inspect a collection's topics (OP=build|align|discover|status, COLLECTION=<name> optional)"
 	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
 	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
+	@echo "                  (the five above run in the running backend and are audited;"
+	@echo "                   CASE_REF=<ref> REASON=<text> state the purpose)"
 	@echo "  make retention-report  show what COLLECTION_RETENTION deletes, and when (WINDOW=6m optional; read-only)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
@@ -58,53 +70,53 @@ health:
 	|| echo "docint health: UNKNOWN — backend not answering /health (backend down, or image predates the endpoint)."
 
 # Resolve duplicate / semantically-similar entities for a collection into
-# durable canonicals (see CLAUDE.md). Runs the `resolve` CLI in a one-off
-# backend container so it reaches the qdrant / vllm-router network aliases —
-# production is Docker-only, no host `uv`. Interactive by default; pass
-# COLLECTION=<name> to run non-interactively. Requires the backend image
-# built (make build/up) and data-plane + vllm-service already up.
+# durable canonicals (see CLAUDE.md). Runs the `resolve` CLI inside the running
+# backend so it reaches the qdrant / vllm-router network aliases — production
+# is Docker-only, no host `uv` — and its audit chain lands on the backend's log
+# (AUDIT_EXEC_ENV above). Interactive by default; pass COLLECTION=<name> to run
+# non-interactively. Requires `make up` and data-plane + vllm-service up.
 resolve:
 	@if [ -n "$(COLLECTION)" ]; then \
-		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) run --rm -T backend resolve; \
+		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) exec -T $(AUDIT_EXEC_ENV) backend resolve; \
 	else \
-		$(COMPOSE) run --rm backend resolve; \
+		$(COMPOSE) exec $(AUDIT_EXEC_ENV) backend resolve; \
 	fi
 
 # Render a collection's written data extract — full transcripts, keyframe
 # descriptions, image captions and document text — as a ZIP under
 # RESULTS_PATH. Reads Qdrant only; no inference, so it is safe on an
-# airgapped host. Runs in a one-off backend container to reach the qdrant
-# alias; interactive by default, pass COLLECTION=<name> to run
-# non-interactively.
+# airgapped host. Runs inside the running backend to reach the qdrant alias
+# (the archive lands on the same pipeline-storage volume); interactive by
+# default, pass COLLECTION=<name> to run non-interactively.
 extract:
 	@if [ -n "$(COLLECTION)" ]; then \
-		$(COMPOSE) run --rm -T backend extract "$(COLLECTION)"; \
+		$(COMPOSE) exec -T $(AUDIT_EXEC_ENV) backend extract "$(COLLECTION)"; \
 	else \
-		$(COMPOSE) run --rm backend extract; \
+		$(COMPOSE) exec $(AUDIT_EXEC_ENV) backend extract; \
 	fi
 
 # Build, extend or inspect a collection's topics (docs/topics.md). Runs the
-# `topics` CLI in a one-off backend container so it reaches the qdrant and
+# `topics` CLI inside the running backend so it reaches the qdrant and
 # vllm-router aliases. OP is build, align, discover or status (the default);
 # pass COLLECTION=<name> to run non-interactively.
 topics:
 	@if [ -n "$(COLLECTION)" ]; then \
-		$(COMPOSE) run --rm -T backend topics "$(or $(OP),status)" "$(COLLECTION)"; \
+		$(COMPOSE) exec -T $(AUDIT_EXEC_ENV) backend topics "$(or $(OP),status)" "$(COLLECTION)"; \
 	else \
-		$(COMPOSE) run --rm backend topics "$(or $(OP),status)"; \
+		$(COMPOSE) exec $(AUDIT_EXEC_ENV) backend topics "$(or $(OP),status)"; \
 	fi
 
 # Build the full-text search index for a collection: creates the `search_text`
 # payload index and backfills the field across existing points. Payload-only —
 # no re-embedding, no inference — so it is safe on an airgapped host, and
-# re-running it skips populated points. Runs in a one-off backend container so
-# it reaches the qdrant network alias; production is Docker-only, no host `uv`.
+# re-running it skips populated points. Runs inside the running backend so it
+# reaches the qdrant network alias; production is Docker-only, no host `uv`.
 # Interactive by default; pass COLLECTION=<name> to run non-interactively.
 search-index:
 	@if [ -n "$(COLLECTION)" ]; then \
-		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) run --rm -T backend search-index; \
+		printf '%s\n' "$(COLLECTION)" | $(COMPOSE) exec -T $(AUDIT_EXEC_ENV) backend search-index; \
 	else \
-		$(COMPOSE) run --rm backend search-index; \
+		$(COMPOSE) exec $(AUDIT_EXEC_ENV) backend search-index; \
 	fi
 
 # Backport the full-text search index across every collection on this host.
@@ -114,13 +126,15 @@ search-index:
 # after a partial failure is safe. One failing collection does not strand the
 # rest; the run exits non-zero and names every failure at the end.
 search-index-all:
-	$(COMPOSE) run --rm -T backend search-index-all
+	$(COMPOSE) exec -T $(AUDIT_EXEC_ENV) backend search-index-all
 
 # Show every collection's last activity and when retention deletes it — run it
 # before setting COLLECTION_RETENTION. Read-only: deletes nothing and records
 # no window (only the backend's startup does). Pass WINDOW=6m|12m|18m|24m to
 # evaluate a window as if it were switched on now. Runs in a one-off backend
-# container so it reads the same sessions store and Qdrant the API does.
+# container so it reads the same sessions store and Qdrant the API does. Not
+# audited, so it needs no running backend: it reads only the retention clock
+# (owner, collection name, last activity), no collection content.
 retention-report:
 	@if [ -n "$(WINDOW)" ]; then \
 		$(COMPOSE) run --rm -T backend retention-report --window "$(WINDOW)"; \

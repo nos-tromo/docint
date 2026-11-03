@@ -9,6 +9,10 @@ skipped.
 
 Takes the *logical* collection name shown in the app; the physical Qdrant name
 is owner-namespaced and resolved here.
+
+Writing ``search_text`` copies chunk text into the payload, so each collection
+indexed is an audited ``modify`` (``search_index.build``); ``search-index-all``
+records every collection on one chain.
 """
 
 import sys
@@ -17,10 +21,13 @@ from pathlib import Path
 
 from loguru import logger
 
+from docint.cli._audit import collection_criteria, session
 from docint.cli._collection import CollectionNotFoundError, resolve_collection_name
+from docint.core.audit import AUDIT_FAILURES, CliAudit, metered
 from docint.core.rag import RAG
 from docint.core.search.fields import ensure_field_indexes
 from docint.core.search.index import backfill_search_text, ensure_search_index, image_companion_name
+from docint.utils.audit_event import Target
 from docint.utils.env_cfg import set_offline_env
 from docint.utils.logger_cfg import init_logger
 
@@ -34,90 +41,108 @@ def get_collection() -> str:
     return input("Enter collection name: ").strip()
 
 
-def build_search_index(collection: str) -> None:
+def build_search_index(collection: str, *, audit: CliAudit | None = None) -> None:
     """Create the search index and backfill the field for one collection.
 
     Every failure here exits non-zero rather than reporting a count. The
     backfill's scroll is deliberately fail-soft, so a collection that does not
     exist yields ``0 scanned, 0 written`` — which, announced as a total, reads
     exactly like an already-migrated collection. An operator working through a
-    list would tick it off.
+    list would tick it off. Each failure is recorded as the audited
+    operation's ``error`` outcome.
 
     Args:
         collection (str): Logical or physical collection name.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this collection when omitted.
 
     Raises:
         SystemExit: When the name cannot be resolved, the payload index cannot
             be created, or the collection yielded no points at all.
     """
-    rag = RAG(qdrant_collection=collection)
-    try:
-        try:
-            physical = resolve_collection_name(rag, collection)
-        except CollectionNotFoundError as exc:
-            logger.error("{}", exc)
-            raise SystemExit(1) from exc
+    with session(audit, "search-index", "modify", "search_index.build") as cli:
+        op = cli.operation("modify", "search_index.build", container=collection)
+        image_counts: dict[str, object] = {}
+        with metered(op):
+            rag = RAG(qdrant_collection=collection)
+            try:
+                try:
+                    physical = resolve_collection_name(rag, collection)
+                except CollectionNotFoundError as exc:
+                    logger.error("{}", exc)
+                    raise SystemExit(1) from exc
 
-        if physical != collection:
-            logger.info("Resolved '{}' to the physical collection '{}'.", collection, physical)
+                if physical != collection:
+                    logger.info("Resolved '{}' to the physical collection '{}'.", collection, physical)
+                op.criteria.update(collection_criteria(collection, physical))
 
-        if not ensure_search_index(rag.qdrant_client, physical):
+                if not ensure_search_index(rag.qdrant_client, physical):
+                    logger.error(
+                        "Could not create the search index on '{}'. Search would be case-sensitive on "
+                        "non-ASCII text without it, so this is a hard failure — is Qdrant reachable?",
+                        physical,
+                    )
+                    raise SystemExit(1)
+
+                if not ensure_field_indexes(rag.qdrant_client, physical):
+                    logger.warning(
+                        "Could not create every field-search index on '{}' — searching in Author, Network, … "
+                        "may report not_indexed until Qdrant is reachable.",
+                        physical,
+                    )
+
+                summary = backfill_search_text(
+                    rag.qdrant_client,
+                    physical,
+                    extract_text=RAG._extract_indexable_text,
+                    progress=lambda msg: logger.info(msg),
+                )
+
+                # Image captions and tags live in the companion, not the main
+                # collection. Indexing only the latter would leave every figure and
+                # video keyframe unfindable by keyword while this run reported
+                # success. A collection with no images simply has no companion.
+                companion = image_companion_name(physical)
+                if rag.qdrant_client.collection_exists(collection_name=companion):
+                    if not ensure_search_index(rag.qdrant_client, companion):
+                        logger.error("Could not create the search index on '{}'.", companion)
+                        raise SystemExit(1)
+                    if not ensure_field_indexes(rag.qdrant_client, companion):
+                        logger.warning("Could not create every field-search index on '{}'.", companion)
+                    image_summary = backfill_search_text(
+                        rag.qdrant_client,
+                        companion,
+                        extract_text=RAG._extract_indexable_text,
+                        progress=lambda msg: logger.info(msg),
+                    )
+                    image_counts = {"images_scanned": image_summary.scanned, "images_written": image_summary.written}
+                    logger.info(
+                        "Image companion '{}': {} scanned, {} written, {} already populated, {} without text.",
+                        companion,
+                        image_summary.scanned,
+                        image_summary.written,
+                        image_summary.skipped,
+                        image_summary.empty,
+                    )
+            finally:
+                rag.unload_models()
+
+        counts: dict[str, object] = {
+            "scanned": summary.scanned,
+            "written": summary.written,
+            "skipped": summary.skipped,
+            "empty": summary.empty,
+            **image_counts,
+        }
+        if summary.scanned == 0:
             logger.error(
-                "Could not create the search index on '{}'. Search would be case-sensitive on "
-                "non-ASCII text without it, so this is a hard failure — is Qdrant reachable?",
+                "Scanned no points in '{}'. An empty result here means the scroll failed, not that "
+                "the collection is already indexed — check the warnings above.",
                 physical,
             )
+            op.fail(criteria=counts)
             raise SystemExit(1)
-
-        if not ensure_field_indexes(rag.qdrant_client, physical):
-            logger.warning(
-                "Could not create every field-search index on '{}' — searching in Author, Network, … "
-                "may report not_indexed until Qdrant is reachable.",
-                physical,
-            )
-
-        summary = backfill_search_text(
-            rag.qdrant_client,
-            physical,
-            extract_text=RAG._extract_indexable_text,
-            progress=lambda msg: logger.info(msg),
-        )
-
-        # Image captions and tags live in the companion, not the main
-        # collection. Indexing only the latter would leave every figure and
-        # video keyframe unfindable by keyword while this run reported
-        # success. A collection with no images simply has no companion.
-        companion = image_companion_name(physical)
-        if rag.qdrant_client.collection_exists(collection_name=companion):
-            if not ensure_search_index(rag.qdrant_client, companion):
-                logger.error("Could not create the search index on '{}'.", companion)
-                raise SystemExit(1)
-            if not ensure_field_indexes(rag.qdrant_client, companion):
-                logger.warning("Could not create every field-search index on '{}'.", companion)
-            image_summary = backfill_search_text(
-                rag.qdrant_client,
-                companion,
-                extract_text=RAG._extract_indexable_text,
-                progress=lambda msg: logger.info(msg),
-            )
-            logger.info(
-                "Image companion '{}': {} scanned, {} written, {} already populated, {} without text.",
-                companion,
-                image_summary.scanned,
-                image_summary.written,
-                image_summary.skipped,
-                image_summary.empty,
-            )
-    finally:
-        rag.unload_models()
-
-    if summary.scanned == 0:
-        logger.error(
-            "Scanned no points in '{}'. An empty result here means the scroll failed, not that "
-            "the collection is already indexed — check the warnings above.",
-            physical,
-        )
-        raise SystemExit(1)
+        op.record(target=Target(kind="chunk", count=summary.written), criteria=counts)
 
     logger.info(
         "Search index ready for '{}': {} scanned, {} written, {} already populated, {} without text.",
@@ -167,6 +192,9 @@ def index_all_collections(
             # build_search_index signals its own failures this way; record and
             # keep going rather than letting one collection end the run.
             failures.append(name)
+        except AUDIT_FAILURES:
+            # The run cannot go on unrecorded.
+            raise
         except Exception as exc:
             logger.error("Failed to index '{}': {}", name, exc)
             failures.append(name)
@@ -177,17 +205,19 @@ def build_all_search_indexes() -> None:
     """Create the search index and backfill every collection on this host.
 
     Idempotent: collections already carrying ``search_text`` are scanned and
-    skipped cheaply, so re-running after a partial failure is safe.
+    skipped cheaply, so re-running after a partial failure is safe. The run
+    is one audit chain with one ``search_index.build`` event per collection.
 
     Raises:
         SystemExit: When any collection failed, so a partial migration cannot
             be mistaken for a clean one.
     """
-    rag = RAG(qdrant_collection="")
-    try:
-        failures = index_all_collections(rag, index_one=_index_one_physical)
-    finally:
-        rag.unload_models()
+    with session(None, "search-index-all", "modify", "search_index.build") as cli:
+        rag = RAG(qdrant_collection="")
+        try:
+            failures = index_all_collections(rag, index_one=lambda physical: _index_one_physical(physical, audit=cli))
+        finally:
+            rag.unload_models()
 
     if failures:
         logger.error(
@@ -199,16 +229,17 @@ def build_all_search_indexes() -> None:
     logger.info("All collections indexed.")
 
 
-def _index_one_physical(physical: str) -> None:
+def _index_one_physical(physical: str, *, audit: CliAudit | None = None) -> None:
     """Index one already-resolved physical collection.
 
     Args:
         physical (str): Physical Qdrant collection name.
+        audit (CliAudit | None): The bulk run's audit chain.
 
     Raises:
         SystemExit: Propagated from :func:`build_search_index` on failure.
     """
-    build_search_index(physical)
+    build_search_index(physical, audit=audit)
 
 
 def main_all() -> None:

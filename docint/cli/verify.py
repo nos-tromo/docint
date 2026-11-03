@@ -3,6 +3,10 @@
 Wraps :meth:`docint.core.rag.RAG.verify_collection` to report (and
 optionally repair) drift between the Qdrant vector store and the
 SQLite KV docstore.
+
+A check reads counts and node ids only and is not audited; ``--repair``
+deletes KV-only orphan nodes, so a repair run is an audited ``delete``
+(``verify.repair``) naming the nodes it removed.
 """
 
 from __future__ import annotations
@@ -14,7 +18,9 @@ from typing import Any
 
 from loguru import logger
 
+from docint.core.audit import AUDIT_FAILURES, cli_audit, metered
 from docint.core.rag import RAG
+from docint.utils.audit_event import Target
 from docint.utils.env_cfg import set_offline_env
 from docint.utils.logger_cfg import init_logger
 
@@ -82,6 +88,38 @@ def _print_human_report(report: dict[str, Any]) -> None:
             sys.stdout.write(f"  - {parent_id}\n")
 
 
+def _repair(rag: RAG, collection: str) -> dict[str, Any] | None:
+    """Verify a collection and delete its KV-only orphans, as one audited ``delete``.
+
+    Args:
+        rag (RAG): The engine.
+        collection (str): The collection to repair.
+
+    Returns:
+        dict[str, Any] | None: The report, or ``None`` when the check failed
+            (recorded as the operation's ``error`` outcome).
+    """
+    with cli_audit("verify", "delete", "verify.repair") as cli:
+        op = cli.operation("delete", "verify.repair", container=collection)
+        try:
+            with metered(op):
+                report = rag.verify_collection(collection, repair=True)
+        except AUDIT_FAILURES:
+            raise
+        except Exception as exc:
+            logger.error("verify_collection failed: {}", exc)
+            return None
+        repaired = [str(node_id) for node_id in report.get("repaired_ids") or []]
+        op.record(
+            target=Target(kind="node", ids=repaired, count=len(repaired)),
+            criteria={
+                "kv_orphans": len(report.get("kv_orphans") or []),
+                "qdrant_orphans": len(report.get("qdrant_orphans") or []),
+            },
+        )
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the verify CLI.
 
@@ -99,11 +137,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     rag = RAG(qdrant_collection=args.collection)
-    try:
-        report = rag.verify_collection(args.collection, repair=args.repair)
-    except Exception as exc:
-        logger.error("verify_collection failed: {}", exc)
-        return 2
+    if args.repair:
+        report = _repair(rag, args.collection)
+        if report is None:
+            return 2
+    else:
+        try:
+            report = rag.verify_collection(args.collection, repair=False)
+        except Exception as exc:
+            logger.error("verify_collection failed: {}", exc)
+            return 2
 
     if args.json:
         sys.stdout.write(json.dumps(report, indent=2) + "\n")

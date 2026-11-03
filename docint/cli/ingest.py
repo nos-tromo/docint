@@ -1,4 +1,11 @@
-"""CLI entry point for ingesting documents into a collection."""
+"""CLI entry point for ingesting documents into a collection.
+
+A terminal run is one audited ``collect`` (``ingest.run``) naming the files
+it ingested, with a ``combine`` for the social linker's joins and one
+``ai_call`` per stage that sent their content to inference. :func:`ingest_docs`
+itself records nothing: the API's job runner calls it too and records the run
+under the request's own context.
+"""
 
 import sys
 import time
@@ -7,6 +14,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from docint.core.audit import cli_audit, metered
+from docint.core.audit_ingest import record_run
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import load_path_env, set_offline_env
@@ -100,21 +109,31 @@ def main() -> None:
     duration covers everything the operator waited for, model loading
     included. There is no job and no ingest card on this path, so this line
     is the only record of how long the run took.
+
+    The run's audit chain opens first, so a run that needs a stated purpose
+    and has none is refused (exit code 2) before anything is asked or read.
     """
     init_logger()
     set_offline_env()
     data_path = load_path_env().data
-    qdrant_col = get_collection()
-    started_ticks = time.monotonic()
-    try:
-        ingest_docs(qdrant_col, data_path)
-    except EmptyIngestionError as exc:
-        logger.warning(
-            "Ingestion produced no content for '{}'. Empty KV store has been "
-            "removed; uploaded source files are retained.",
-            exc.collection_name,
-        )
-    else:
+    with cli_audit("ingest", "collect", "ingest.run", also=("ai_call", "combine")) as cli:
+        qdrant_col = get_collection()
+        op = cli.operation("collect", "ingest.run", container=qdrant_col, criteria={"source": "data_dir"})
+        started_ticks = time.monotonic()
+        stats: IngestStats | None = None
+        empty = False
+        with metered(op, prefix="ingest") as meter:
+            try:
+                stats = ingest_docs(qdrant_col, data_path)
+            except EmptyIngestionError as exc:
+                logger.warning(
+                    "Ingestion produced no content for '{}'. Empty KV store has been "
+                    "removed; uploaded source files are retained.",
+                    exc.collection_name,
+                )
+                empty = True
+        record_run(op, stats, meter, empty=empty)
+    if not empty:
         logger.info("Ingestion complete in {}.", format_elapsed(time.monotonic() - started_ticks))
 
 
