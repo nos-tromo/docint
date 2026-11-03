@@ -52,6 +52,7 @@ from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.rtf import RTFReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
+from docint.utils.audit_meter import count_transfer, in_context
 from docint.utils.batching import chunk_nodes
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
@@ -811,7 +812,10 @@ class DocumentIngestionPipeline:
 
         pool_size = (self.ner_max_workers if ner_enabled else 0) + (self.hate_speech_max_workers if hate_enabled else 0)
         with ThreadPoolExecutor(max_workers=max(1, pool_size)) as executor:
-            futures = [executor.submit(_process_node, progress_offset + i, node) for i, node in enumerate(nodes)]
+            # In the caller's context, so each model call counts against its audit meter.
+            futures = [
+                executor.submit(in_context(_process_node), progress_offset + i, node) for i, node in enumerate(nodes)
+            ]
             wait(futures)
         # Stage errors are swallowed per node above; anything stored on a
         # future is a coordination failure (e.g. the progress callback raised)
@@ -844,6 +848,7 @@ class DocumentIngestionPipeline:
                 constrained, and the provider's finish reason when reported.
         """
         model = cast(OpenAI, self.hate_speech_model)
+        count_transfer("hate_speech", "inference:chat", getattr(model, "model", None))
         extra: dict[str, Any] = {"max_tokens": max_tokens} if max_tokens is not None else {}
         if response_format is not None and self.hate_speech_structured:
             try:
@@ -950,7 +955,12 @@ class DocumentIngestionPipeline:
                         (
                             job,
                             executor.submit(
-                                self._classify_transcript_window, lines, window, language, core_chars, context_chars
+                                in_context(self._classify_transcript_window),
+                                lines,
+                                window,
+                                language,
+                                core_chars,
+                                context_chars,
                             ),
                         )
                     )

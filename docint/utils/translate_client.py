@@ -15,6 +15,7 @@ from functools import lru_cache
 
 from loguru import logger
 
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import load_language_env, load_model_env
 from docint.utils.openai_cfg import OpenAIPipeline
 from docint.utils.prompt_loader import load_localized_prompt
@@ -71,6 +72,8 @@ def _translate_cached(text: str, target_lang: str, model: str) -> str:
     session-lifetime — a reload re-asks for every one.
     """
     system_prompt = load_localized_prompt("translate", default=_DEFAULT_TRANSLATE_PROMPT, lang=target_lang)
+    # Counted only on a miss: a cached translation sends nothing.
+    count_transfer("translate", "inference:chat", model)
     return _pipeline().call_chat(text, system_prompt=system_prompt, model=model).strip()
 
 

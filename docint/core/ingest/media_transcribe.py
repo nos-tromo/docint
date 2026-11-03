@@ -24,6 +24,7 @@ from docint.core.ingest.images_service import IngestContext
 from docint.core.ingest.preprocess import PreprocessProgress, preprocess_key, run_all
 from docint.core.readers.json import CustomJSONReader
 from docint.core.summary.units import TRANSIENT_TRANSCRIPT_SUFFIX
+from docint.utils.audit_meter import in_context
 from docint.utils.hashing import compute_file_hash
 from docint.utils.nextext_client import NextextResult
 
@@ -130,7 +131,10 @@ class MediaTranscriber:
         if to_fetch:
             workers = max(1, min(self.nextext_max_concurrency, len(to_fetch)))
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(self.nextext_client.process_media, clip.path): clip for clip in to_fetch}
+                # In the caller's context, so each round trip counts against its audit meter.
+                futures = {
+                    executor.submit(in_context(self.nextext_client.process_media), clip.path): clip for clip in to_fetch
+                }
                 for done, future in enumerate(as_completed(futures), start=1):
                     clip = futures[future]
                     try:

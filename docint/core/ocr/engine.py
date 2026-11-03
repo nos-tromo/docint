@@ -39,6 +39,7 @@ from docint.core.ocr.families import (
     family_for,
 )
 from docint.core.ocr.imaging import encode_jpeg, image_from_bytes
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import load_model_env, load_ocr_client_env, load_openai_env
 from docint.utils.llm_sanitize import looks_like_no_image_refusal, squeeze_char_runs, strip_reasoning
 from docint.utils.openai_cfg import OpenAIPipeline
@@ -417,6 +418,7 @@ class DocumentOcrEngine:
         request_kwargs: dict[str, object] = {}
         if self._pipeline.reasoning_effort is not None:
             request_kwargs["reasoning_effort"] = self._pipeline.reasoning_effort
+        count_transfer("ocr", "inference:ocr", self.model, kind="image")
         try:
             response = self._client.chat.completions.create(  # type: ignore[call-overload]
                 model=self.model,

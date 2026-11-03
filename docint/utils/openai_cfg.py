@@ -21,6 +21,7 @@ from openai import (
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
 from typing_extensions import override
 
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import (
     OpenAIConfig,
     load_language_env,
@@ -310,6 +311,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
                 provider's context-limit error. No retry, no truncation.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name, len(texts))
         try:
             return super()._get_text_embeddings(texts)
         except Exception as exc:
@@ -330,6 +332,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
                 oversize input. No retry, no silent truncation.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name, len(texts))
         try:
             return super()._get_text_embeddings(texts)
         except Exception as exc:
@@ -350,6 +353,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
                 oversize input. No retry, no silent truncation.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name, len(texts))
         try:
             return await super()._aget_text_embeddings(texts)
         except Exception as exc:
@@ -373,6 +377,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             EmbeddingInputTooLongError: When the query overflows the budget.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name)
         try:
             return super()._get_query_embedding(query)
         except Exception as exc:
@@ -392,6 +397,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             EmbeddingInputTooLongError: When the query overflows the budget.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name)
         try:
             return await super()._aget_query_embedding(query)
         except Exception as exc:
@@ -411,6 +417,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             EmbeddingInputTooLongError: When the text overflows the budget.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name)
         try:
             return super()._get_text_embedding(text)
         except Exception as exc:
@@ -430,6 +437,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             EmbeddingInputTooLongError: When the text overflows the budget.
             EmbeddingEndpointError: When the endpoint is unusable.
         """
+        count_transfer("embed", "inference:embed", self.model_name)
         try:
             return await super()._aget_text_embedding(text)
         except Exception as exc:
@@ -631,6 +639,7 @@ class OpenAIPipeline:
             if self.reasoning_effort is not None:
                 request_kwargs["reasoning_effort"] = self.reasoning_effort
 
+            count_transfer("caption", "inference:vision", self.vision_model_id, kind="image")
             response = self.vision_client.chat.completions.create(
                 model=self.vision_model_id,
                 messages=messages,

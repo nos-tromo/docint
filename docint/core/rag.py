@@ -273,6 +273,7 @@ from docint.core.topics.service import TopicsDeps, TopicsService
 from docint.core.topics.stopwords import load_stop_words, stop_words_digest
 from docint.core.topics.store import TopicRun, TopicStore
 from docint.utils import image_description
+from docint.utils.audit_meter import count_transfer
 from docint.utils.batching import chunk_nodes
 from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.duration import format_elapsed
@@ -2801,6 +2802,7 @@ class RemoteSparseEncoder:
         if not texts:
             return [], []
 
+        count_transfer("sparse", "inference:sparse", self.model, len(texts))
         score_batches = self._pool_token_scores(texts)
         sparse_indices: list[list[int]] = []
         sparse_values: list[list[float]] = []
@@ -10475,6 +10477,7 @@ class RAG:
 
         def _complete(prompt: str) -> str:
             """Invoke the chat model and coerce its response to text."""
+            count_transfer("summary", "inference:chat", self.text_model_id)
             return str(getattr(self.post_retrieval_text_model.complete(prompt), "text", "") or "")
 
         def _build_synthesis_prompt(briefs: list[str], diag: dict[str, Any]) -> str:
@@ -11233,6 +11236,7 @@ class RAG:
         Returns:
             str: The reply text.
         """
+        count_transfer("labels", "inference:chat", self.text_model_id, kind="topic")
         if response_format is not None:
             response = self.text_model.complete(prompt, response_format=response_format, max_tokens=LABEL_MAX_TOKENS)
         else:
@@ -12102,6 +12106,7 @@ class RAG:
 
         def _chat(prompt: str) -> str:
             """Run the configured chat model for one tie-break prompt."""
+            count_transfer("tiebreak", "inference:chat", self.text_model_id, kind="entity")
             completion = self.text_model.complete(prompt)
             return str(getattr(completion, "text", "") or "").strip()
 

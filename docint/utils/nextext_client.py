@@ -23,6 +23,7 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import NextextConfig, load_nextext_env
 
 __all__ = ["NextextClient", "NextextKeyframe", "NextextResult"]
@@ -217,6 +218,7 @@ class NextextClient:
         """
         if not self._cfg.enabled:
             return NextextResult(status="disabled")
+        count_transfer("transcribe", "inference:asr", "nextext", kind="media")
         try:
             with file_path.open("rb") as handle:
                 resp = self._client.post(
