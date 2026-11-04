@@ -71,7 +71,7 @@ and its access model. Nothing on this page duplicates that.
 | Action | In docint |
 |---|---|
 | `collect` | Files staged by an upload (`ingest.upload`) and every ingest run into a collection (`ingest.run`): through the job queued by `POST /ingest/finalize`, the synchronous `POST /ingest`, and the `ingest` command. |
-| `modify` | A session's scope or topic changed; reports created, edited, assigned and filled; a collection summary built; a topic run built, discovered or aligned; the full-text search backfill (`search-index`). |
+| `modify` | A session's scope or topic changed; reports created, edited, assigned and filled; a collection summary built; a topic run built, discovered, aligned, reduced or relaxed; the full-text search backfill (`search-index`). |
 | `query` | Chat and agent turns, keyword search, one chunk's text, the NER views, the hate-speech list, the documents list, session listings and histories, report listings and reports, the topics views, a summary read, a source preview or a thumbnail. |
 | `disclose` | Every download (`recipient="download:<format>"`: CSV exports, report exports, extract archives, a single source's extract, a session's source files, a stored report PDF) and every file written for someone to take away (`recipient="file:extract"`, `"file:report_pdf"`, and the command-line tools' result files). |
 | `ai_call` | A model call: the answer of a chat or agent turn (`inference:chat`), a snippet translation, a summary read's validation, and the transfers of a batch operation — one event per stage, with counts ([Model calls](#model-calls)). |
@@ -309,6 +309,7 @@ ends ([Background jobs](#background-jobs)).
 | `GET /collections/{name}/sources/{source_id}/extract.{fmt}` | `disclose` `extract.source`, `download:<fmt>` | The units rendered ([unit targets](#how-an-event-is-shaped)); criteria `source`, `reference_number`, `operator`. |
 | `POST /collections/{name}/topics` | queues a topics run | The run records `modify` `topics.<action>` when it ends. The gate checks `modify` and `ai_call`. |
 | `GET /collections/{name}/topics` | `query` `topics.overview` | `topic`: the run's topics (labels, keywords and summaries come from passages). Criteria `run_id`. A `204` records nothing. |
+| `GET /collections/{name}/topics/tuning` | `query` `topics.tuning` | `topic`: the run's topics before any reduction (their labels come from passages). Criteria `run_id`. A `204` records nothing. The SPA reads it once per opening of fine-tuning; previewing a merge reads nothing more. |
 | `GET /collections/{name}/topics/{topic_id}/evidence` | `query` `topics.evidence` | `chunk`. Criteria `topic_id`, `run_id`, `limit`. |
 | `GET /collections/{name}/topics/{topic_id}/documents` | `query` `topics.documents` | `document`. Criteria `topic_id`, `run_id`, `limit`. |
 | `GET /collections/{name}/topics/{topic_id}/chunks` | `query` `topics.chunks` | `chunk`. Criteria `topic_id`, `run_id`, `limit`, `page`. |
@@ -395,7 +396,7 @@ system.
 |---|---|
 | Ingest run (`POST /ingest/finalize`) | `collect` `ingest.run` — `document`: the hashes of the files the run worked on; criteria `source: "upload"`, the run's options (`hybrid`, `ner`, `hate_speech`, `summary`, `topics`), its counts (`files_processed`, `files_skipped`, `files_failed`, `docs`, `nodes`) and `empty`. Beneath it: `combine` `ingest.social_link` when the batch held a social export — `posting`: the uuids of the postings joined; criteria `dossiers`, `comments`, `media_linked` — and one `ai_call` `ingest.<stage>` per stage. Then, each as an operation of its own: `combine` `entities.resolve` when entity resolution follows the ingest, `modify` `summary.build` when the summary stage runs, `modify` `topics.build` or `topics.align` for the topics stage, each with its transfers beneath it. |
 | Summary build (`POST /summarize` on a miss) | `modify` `summary.build` — `chunk`: the summary's sources; criteria `llm_calls`; transfers `summary.build.summary`. |
-| Topics run (`POST /collections/{name}/topics`) | `modify` `topics.<action>` — `topic`, count = topics; criteria `run_id`, `added`, `assigned`, `deferred`; transfers `topics.<action>.fit` / `.labels`. A refusal is `error` with `refused: <code>`. |
+| Topics run (`POST /collections/{name}/topics`) | `modify` `topics.<action>` — `topic`, count = the run's topics before any reduction; criteria `run_id`, `added`, `assigned`, `deferred`, and the job's settings (`min_topic_size`, `threshold`, and a reduce's `groups` as their count); transfers `topics.<action>.fit` / `.labels` (a `reduce` labels its new groups, a `relax` calls no model). A refusal is `error` with `refused: <code>`. |
 | Extract (`POST /collections/{name}/extracts`) | `disclose` `extract.build`, `file:extract` — the units rendered; criteria `target`, `reference_number`, `operator`, the stored extract's id, `counts`. An empty collection stores nothing and records nothing. |
 | Report PDF (`POST /reports/{report_id}/pdf`) | `disclose` `report.pdf_render`, `file:report_pdf` — `report_item`: the items rendered; criteria `report_id`, `pages`. |
 

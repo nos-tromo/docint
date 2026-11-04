@@ -888,14 +888,26 @@ off, every route here answers `404`.
 
 | Route | Contents |
 |---|---|
-| `POST /collections/{name}/topics` | Queue a job. Optional body `{"action": "build" \| "discover" \| "align"}`, `build` when omitted. `202 {"job_id"}`; `409 {"detail": {"message", "job_id"}}` while a topics job is in flight for the collection; `400` for `discover` or `align` when none is and the collection has no usable run. |
+| `POST /collections/{name}/topics` | Queue a job. Optional body `{"action": "build" \| "discover" \| "align" \| "reduce" \| "relax"}` with the action's settings (below), `build` when omitted. `202 {"job_id"}`; `409 {"detail": {"message", "job_id"}}` while a topics job is in flight for the collection; `400` for any action but `build` when none is and the collection has no usable run; `422` for a setting the action does not take or out of range. |
 | `GET /collections/{name}/topics` | The active run's overview (below); `204` when the collection has no usable run. |
+| `GET /collections/{name}/topics/tuning` | What fine-tuning starts from (below); `204` when the collection has no usable run. |
 | `GET /collections/{name}/topics/{topic_id}/evidence` | `{"topic", "sources"}`: the topic's chunks nearest its centre, closest first. `limit` 1–20, default 5. |
 | `GET /collections/{name}/topics/{topic_id}/documents` | `{"documents": [{"file_hash", "filename", "count"}], "more"}`: the topic's chunks counted per source file, largest first. `limit` 1–500, default 50; `more` says the list was cut. |
 | `GET /collections/{name}/topics/{topic_id}/chunks` | `{"items", "next_cursor"}`: one page of the topic's chunks. `limit` 1–200, default 50; pass `next_cursor` back as `cursor`. `400` for a malformed cursor. |
 
+The settings of a job, each taken by its action only:
+
+| Setting | Action | Value |
+|---|---|---|
+| `min_topic_size` | `build` | 2 to 10,000: the smallest topic the fit may form, in place of `TOPICS_MIN_TOPIC_SIZE` and the automatic size. |
+| `run_id` | `reduce`, `relax` (required) | The run the request was drawn up against. Another active run ends the job refused with `run_changed`. |
+| `groups` | `reduce` (required) | Lists of two or more topic ids, no id in two lists, at most 10,000 lists: the topics read as one. `[]` undoes the reduction. |
+| `threshold` | `relax` | 0.01 to 0.99, used to two decimals: the lowered bar. `null` or omitted undoes the last relax and only measures. |
+
 A topic the active run lacks answers `404`, and so does `-1`: unassigned chunks
-are counted, never listed. Each detail route accepts an optional `run_id`;
+are counted, never listed. A topic a reduction merged into another is no
+longer one of the run's topics, and answers `404` too; the group it joined
+answers for all its members. Each detail route accepts an optional `run_id`;
 it returns `404` if that run is no longer active. The SPA sends the overview's
 run id so a rebuild cannot put a new topic's passages under an older label.
 A run built before the collection was deleted and
@@ -915,9 +927,10 @@ The overview:
   "params": {"seed": 42, "min_topic_size": 10, "nr_topics": 0, "top_n_words": 10, "min_df": 2,
              "max_df": 0.8, "fit_max_points": 100000, "min_text_chars": 40, "admit_percentile": 5.0,
              "merge_min_similarity": 0.7},
+  "leaf_count": 14,
   "coverage": {"total": 4000, "assigned": 3510, "unassigned": 420, "pending": 70},
   "topics": [
-    {"id": 2, "label": "Alpha and beta",
+    {"id": 2, "members": [2, 9], "label": "Alpha and beta",
      "description": "The passages compare alpha and beta. They name the delta survey and the gamma station. Some treat beta as a variant of alpha. Others hold the two apart. Both readings cite the same field notes.",
      "keywords": [["alpha", 0.0412], ["beta", 0.0377], ["gamma", 0.0201]],
      "size": 640, "share": 0.16, "origin": "build", "added_at": "2026-10-25T10:14:21+00:00",
@@ -930,7 +943,10 @@ The overview:
   parents); `assigned` those in one of the run's topics, `unassigned` those the
   run placed in none (`-1`), and `pending` those it has not placed yet.
 - `topics` is ordered by `size`, largest first, then by `id`. `share` is
-  `size / total`, a fraction from 0 to 1 rounded to four places.
+  `size / total`, a fraction from 0 to 1 rounded to four places. A topic's
+  `members` are the run's own topics it is read as: its own id alone, or every
+  topic a reduction merged into it, the lowest of which is its `id`.
+  `leaf_count` counts the run's own topics before any reduction.
 - `description` is the topic's summary of four to five sentences, written by
   the chat model when the topic was added (empty when no label was written; a
   run built before summaries grew may still carry one sentence).
@@ -940,6 +956,34 @@ The overview:
 - `embed_model_changed` is true when the configured embedding model is not the
   one the run was built with; the SPA then suggests a rebuild.
 - `params` are the settings the build ran with.
+
+The tuning view:
+
+```json
+{
+  "run_id": "20261025-101500-a1b2c3",
+  "min_topic_size": 10,
+  "leaves": [{"id": 2, "label": "Alpha and beta", "fit_size": 512, "size": 640}],
+  "merges": [[2, 9, 0.871203], [4, 7, 0.812004]],
+  "groups": [[2, 9]],
+  "group_labels": {"2,9": "Alpha and beta"},
+  "relax": {"threshold": 0.42, "histogram": [0, 0, 3, 12, 41], "applied": 380, "stale": false}
+}
+```
+
+- `leaves` are every topic of the run before any reduction, in id order.
+- `merges` is the tree a reduction follows: per step the two clusters it
+  joins, each named by its lowest topic id, and their similarity, closest
+  first. The first `k - n` steps leave `n` of the `k` topics; the SPA cuts it
+  itself and sends the groups.
+- `groups` are the stored reduction; `group_labels` the labels written for
+  groups, keyed by their members joined with commas.
+- `relax` describes the last relax: the bar applied now (`null` when none
+  is), the `histogram` of the best cosine of every chunk the rule leaves out,
+  100 counts for bins of 0.01 from 0 (shortened above; `null` before the
+  first relax), how many chunks are placed
+  under the bar now, and `stale` when there is no histogram or the pool it
+  counted has changed since.
 
 A job runs as `kind="topics"` on the shared stream (`GET /ingest/jobs/events`),
 framed as `topics_started` (`collection`, `action`), `topics_progress`
@@ -960,7 +1004,9 @@ curl "http://localhost:8000/collections/my_collection/topics"
 ```
 
 A topic narrows `/query`, `/stream_query` and `/search` as a metadata filter:
-`{"field": "docint_topic", "operator": "eq", "value": "<run_id>:<topic_id>"}`.
+`{"field": "docint_topic", "operator": "eq", "value": "<run_id>:<topic_id>"}`,
+or for a merged topic one rule over all its members,
+`{"field": "docint_topic", "operator": "in", "values": ["<run_id>:2", "<run_id>:9"]}`.
 Image points carry no topic keys, so the rule selects text chunks only. An
 answer under a rule naming a topic key is built from the matching chunks alone,
 without their parent sections or a posting's linked siblings.
