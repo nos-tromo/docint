@@ -154,7 +154,7 @@ export const en = {
   'chat.retrieval_target_used.visual': 'Answered from images only',
   'chat.topic_focus': 'Topic filter',
   'chat.topic_focus_applied': 'Applied to answers and searches.',
-  'chat.topic_focus_stale': 'From an earlier build; not applied.',
+  'chat.topic_focus_stale': 'No longer among the current topics; not applied.',
   'chat.topic_focus_scoped': 'Applied to searches only; answers use the selected chunks.',
   'chat.topic_focus_not_visual': 'Not applied to answers from images.',
   'chat.topic_focus_remove': 'Remove topic filter',

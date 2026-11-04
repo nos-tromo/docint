@@ -23,11 +23,16 @@ export function Inspector() {
     () => (query.data?.pages ?? []).flatMap((p) => p.items),
     [query.data]
   )
-  // Keyed by the value a document's topics carry, so another run's never finds a topic here.
+  // Keyed by the values a document's topics carry, so another run's never finds a topic here; a
+  // merged topic answers for each of its members' values.
   const topics = useMemo(
     () =>
       overview
-        ? new Map<string, TopicSummary>(overview.topics.map((topic) => [topicValue(overview.run_id, topic.id), topic]))
+        ? new Map<string, TopicSummary>(
+            overview.topics.flatMap((topic) =>
+              (topic.members ?? [topic.id]).map((member) => [topicValue(overview.run_id, member), topic] as const)
+            )
+          )
         : undefined,
     [overview]
   )

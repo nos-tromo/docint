@@ -107,6 +107,15 @@ describe('Inspector topics column', () => {
     expect(screen.getByText('Topics')).toBeInTheDocument()
   })
 
+  it("counts a merged topic's members as that one topic", async () => {
+    stubApi({ topicsEnabled: true, overview: { ...OVERVIEW, topics: [{ ...OVERVIEW.topics[0], members: [2, 7] }] } })
+    serving.docs = [{ ...DOCS[0], topics: [...(DOCS[0].topics ?? []), { topic: `${RUN}:7`, count: 3 }] }]
+    renderInspector()
+
+    expect(await screen.findByTestId('topic-badge')).toHaveTextContent('T2 Orbits and comets 15')
+    expect(screen.getAllByTestId('topic-badge')).toHaveLength(1)
+  })
+
   it('leaves the column out while the collection has no run', async () => {
     const fetchMock = stubApi({ topicsEnabled: true, overview: null })
     renderInspector()

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { TOPIC_FIELD, topicValue } from '@/api/topics'
+import { TOPIC_FIELD, topicValue, type TopicSummary } from '@/api/topics'
 import type { MetadataFilter, SessionTopicFocus } from '@/api/types'
 import type { CollectionScope } from '@/hooks/useActiveCollection'
 
@@ -77,23 +77,50 @@ export function focusInScope(focus: TopicFocus | null, scope: CollectionScope): 
   return focus !== null && focus.collection === scope.collection && focus.owner === scope.owner
 }
 
+/** What a focus is checked against: the active run and the topics it shows. */
+export interface FocusRun {
+  run_id: string
+  topics: Pick<TopicSummary, 'id' | 'members'>[]
+}
+
 /**
- * The metadata rule a topic focus adds to a turn or a search.
- *
- * Only while the focus names a topic of the active collection's active run: an
- * earlier build's value matches no chunk, so sending it would empty the answer
- * rather than narrow it.
+ * The topic a focus names in the active run, as the run shows it now.
  *
  * @param focus - The focus, or null for none.
  * @param scope - The active collection and its owner.
- * @param activeRunId - The collection's active run, or null when it has none or it is not known yet.
+ * @param run - The collection's active run, or null/undefined when it has none or it is not read yet.
+ * @returns The topic, or null when the focus is not one of the run's topics.
+ */
+export function focusedTopic<T extends Pick<TopicSummary, 'id' | 'members'>>(
+  focus: TopicFocus | null,
+  scope: CollectionScope,
+  run: { run_id: string; topics: T[] } | null | undefined
+): T | null {
+  if (!focus || !focusInScope(focus, scope) || !run || focus.runId !== run.run_id) return null
+  return run.topics.find((topic) => topic.id === focus.topicId) ?? null
+}
+
+/**
+ * The metadata rule a topic focus adds to a turn or a search.
+ *
+ * Only while the focus names a topic the active run shows: an earlier build's
+ * value matches no chunk, and a topic merged into another is no longer one of
+ * the run's own, so sending either would empty the answer rather than narrow
+ * it. A topic that merges several of the run's topics matches any of them.
+ *
+ * @param focus - The focus, or null for none.
+ * @param scope - The active collection and its owner.
+ * @param run - The collection's active run, or null/undefined when it has none or it is not read yet.
  * @returns The rule, or null when the focus does not apply.
  */
 export function topicFocusRule(
   focus: TopicFocus | null,
   scope: CollectionScope,
-  activeRunId: string | null
+  run: FocusRun | null | undefined
 ): MetadataFilter | null {
-  if (!focus || !focusInScope(focus, scope) || focus.runId !== activeRunId) return null
-  return { field: TOPIC_FIELD, operator: 'eq', value: topicValue(focus.runId, focus.topicId) }
+  const topic = focusedTopic(focus, scope, run)
+  if (!focus || !topic) return null
+  const members = topic.members ?? [topic.id]
+  if (members.length === 1) return { field: TOPIC_FIELD, operator: 'eq', value: topicValue(focus.runId, members[0]) }
+  return { field: TOPIC_FIELD, operator: 'in', values: members.map((id) => topicValue(focus.runId, id)) }
 }
