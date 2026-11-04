@@ -9018,13 +9018,15 @@ class RAG:
                 within (qdrant_models.Filter): The request's compiled filter.
 
             Returns:
-                TopicsListing: The run's topics holding a chunk the filter selects, with their labels
-                and keywords from the run, largest first.
+                TopicsListing: The run's topics, as its view shows them, holding a chunk the filter
+                selects, with their labels and keywords from the run, largest first.
             """
             self._ensure_topic_indexes_once(collection)
             client = self.qdrant_client
-            topics = run.table.topics
-            sizes = topic_counts(client, collection, run.run_id, limit=len(topics) + 2, extra=within)
+            view = run.view
+            # The facet counts leaves; a group's size is its leaves' sum.
+            leaf_counts = topic_counts(client, collection, run.run_id, limit=len(run.table.topics) + 2, extra=within)
+            sizes = view.sizes(leaf_counts)
             total = count_points(client, collection, and_filters(eligible_filter(), within))
             lines = sorted(
                 (
@@ -9034,7 +9036,7 @@ class RAG:
                         keywords=tuple(word for word, _ in topic.keywords[:KEYWORDS_SHOWN]),
                         size=sizes[topic.id],
                     )
-                    for topic in topics
+                    for topic in view.table.topics
                     if sizes.get(topic.id, 0) > 0
                 ),
                 key=lambda line: (-line.size, line.topic_id),
@@ -9052,7 +9054,8 @@ class RAG:
             Returns:
                 TopicPassages | None: The passages, closest first, at most ``AGENT_TOPIC_PASSAGES``,
                 none when the vectors no longer match the run's size, with the topic's label in the
-                run. ``None`` for a topic the run lacks, the unassigned ``-1`` included.
+                run. ``None`` for a topic the run's view lacks: a topic merged into a group, and the
+                unassigned ``-1``.
 
             Raises:
                 RuntimeError: When the active collection is not the one the topics were built for,
@@ -9060,10 +9063,11 @@ class RAG:
             """
             if self.qdrant_collection != collection:
                 raise RuntimeError("A topics read ran outside the collection it was built for.")
-            centre = run.table.centre(topic_id)
-            if centre is None:
+            view = run.view
+            centre, leaves = view.table.centre(topic_id), view.members.get(topic_id)
+            if centre is None or leaves is None:
                 return None
-            info = run.table.topic(topic_id)
+            info = view.table.topic(topic_id)
             label = info.label if info is not None else ""
             self._ensure_topic_indexes_once(collection)
             dense = dense_vector(self.qdrant_client, collection)
@@ -9075,7 +9079,7 @@ class RAG:
                 centre=centre,
                 dense=dense,
                 run_id=run.run_id,
-                topic_id=topic_id,
+                topic_ids=leaves,
                 limit=AGENT_TOPIC_PASSAGES,
                 extra=request_filter,
             )

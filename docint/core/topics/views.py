@@ -1,7 +1,9 @@
 """The topics read side: a run's overview and one topic's evidence, documents and members.
 
 Read-only. Each function takes the active run, already checked for staleness,
-and returns ``None`` for a topic the run's table lacks, the unassigned bucket
+and shows its topics as its reduction presents them (``TopicRun.view``): a group
+is one topic, read as the union of its leaves. A function returns ``None`` for
+a topic the view lacks, a leaf merged into a group and the unassigned bucket
 ``-1`` included: unassigned chunks are counted, never listed.
 """
 
@@ -50,10 +52,12 @@ def overview(
     if run is None:
         return None
     ensure_indexes(physical)
-    topics = run.table.topics
-    counts = topic_counts(client, physical, run.run_id, limit=len(topics) + 2)
+    view = run.view
+    # The facet counts leaves, so its limit is the leaf count, whatever the view shows.
+    counts = topic_counts(client, physical, run.run_id, limit=len(run.table.topics) + 2)
     total = count(client, physical, eligible_filter())
-    sizes = {t.id: counts.get(t.id, 0) for t in topics}
+    sizes = view.sizes(counts)
+    topics = view.table.topics
     record = run.record
     return {
         "run_id": run.run_id,
@@ -62,29 +66,35 @@ def overview(
         "embed_model": record.get("embed_model"),
         "embed_model_changed": record.get("embed_model") != embed_model,
         "params": record.get("params"),
+        "leaf_count": len(run.table.topics),
         "coverage": {
             "total": total,
             "assigned": sum(sizes.values()),
             "unassigned": counts.get(-1, 0),
             "pending": count(client, physical, pending_filter(run.run_id)),
         },
-        "topics": [_topic_row(t, sizes[t.id], total) for t in sorted(topics, key=lambda t: (-sizes[t.id], t.id))],
+        "topics": [
+            _topic_row(t, sizes[t.id], total, view.members[t.id])
+            for t in sorted(topics, key=lambda t: (-sizes[t.id], t.id))
+        ],
     }
 
 
-def _topic_row(topic: TopicInfo, size: int, total: int) -> dict[str, Any]:
+def _topic_row(topic: TopicInfo, size: int, total: int, members: tuple[int, ...]) -> dict[str, Any]:
     """Shape one topic for the overview.
 
     Args:
         topic: The topic's record.
         size: Its member count.
         total: Eligible chunks in the collection.
+        members: Its leaf ids; just its own id unless it is a group.
 
     Returns:
         The topic's public fields.
     """
     return {
         "id": topic.id,
+        "members": list(members),
         "label": topic.label,
         "description": topic.description,
         "keywords": [[word, score] for word, score in topic.keywords],
@@ -120,15 +130,16 @@ def evidence(
 
     Returns:
         Sources, closest first; empty when the vectors no longer match the
-        run's size. ``None`` for a topic the run lacks.
+        run's size. ``None`` for a topic the view lacks.
     """
-    centre = run.table.centre(topic_id)
-    if run.table.topic(topic_id) is None or centre is None:
+    view = run.view
+    centre, leaves = view.table.centre(topic_id), view.members.get(topic_id)
+    if centre is None or leaves is None:
         return None
     if dense.dim != run.table.dim:
         return []
     points = central_points(
-        client, physical, centre=centre, dense=dense, run_id=run.run_id, topic_id=topic_id, limit=limit
+        client, physical, centre=centre, dense=dense, run_id=run.run_id, topic_ids=leaves, limit=limit
     )
     return [source_of(p) for p in points]
 
@@ -155,11 +166,12 @@ def documents(
     Returns:
         ``{"documents": [{file_hash, filename, count}], "more"}``, largest
         first; a hash with no known name is named by itself. ``None`` for a
-        topic the run lacks.
+        topic the view lacks.
     """
-    if run.table.topic(topic_id) is None:
+    leaves = run.view.members.get(topic_id)
+    if leaves is None:
         return None
-    rows = document_counts(client, physical, run.run_id, topic_id, limit=limit + 1)
+    rows = document_counts(client, physical, run.run_id, leaves, limit=limit + 1)
     shown = rows[:limit]
     known = names() if shown else {}
     return {
@@ -192,17 +204,16 @@ def chunks(
         source_of: Shapes a point as a source.
 
     Returns:
-        ``{"items", "next_cursor"}``, or ``None`` for a topic the run lacks.
+        ``{"items", "next_cursor"}``, or ``None`` for a topic the view lacks.
 
     Raises:
         InvalidCursorError: When the cursor is malformed.
     """
-    if run.table.topic(topic_id) is None:
+    leaves = run.view.members.get(topic_id)
+    if leaves is None:
         return None
     offset = decode_cursor(cursor)["o"]
     if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int | str)):
         raise InvalidCursorError("cursor offset is not a point id")
-    points, next_offset = member_page(
-        client, physical, run_id=run.run_id, topic_id=topic_id, offset=offset, limit=limit
-    )
+    points, next_offset = member_page(client, physical, run_id=run.run_id, topic_ids=leaves, offset=offset, limit=limit)
     return {"items": [source_of(p) for p in points], "next_cursor": encode_cursor(next_offset)}

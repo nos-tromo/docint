@@ -3597,11 +3597,12 @@ TOPIC_RUN_ID = "20260301-101500-a1b2c3"
 NO_ROOM_FOR_TOPICS = "The topics tool was withheld from an agent turn: "
 
 
-def _topic_run(*, empty: bool = False) -> TopicRun:
+def _topic_run(*, empty: bool = False, groups: list[list[int]] | None = None) -> TopicRun:
     """Build the invented run: three topics over four-dimensional vectors.
 
     Args:
         empty (bool): Whether the run found no topics at all.
+        groups (list[list[int]] | None): A reduction to store with the run.
 
     Returns:
         TopicRun: The run.
@@ -3635,7 +3636,7 @@ def _topic_run(*, empty: bool = False) -> TopicRun:
         else (_info(0, "Hafenfest und Stände"), _info(1, "Regatta am Sonntag"), _info(2, "Anmeldung am Kai"))
     )
     table = TopicTable(topics=topics, centres=np.eye(len(topics), 4))
-    return TopicRun(run_id=TOPIC_RUN_ID, record={}, table=table)
+    return TopicRun(run_id=TOPIC_RUN_ID, record={"groups": groups} if groups else {}, table=table)
 
 
 def _overview() -> dict[str, Any]:
@@ -3684,7 +3685,9 @@ def _no_filtered_count(*args: Any, **kwargs: Any) -> Any:
     raise AssertionError("A filtered count ran, which the test did not expect.")
 
 
-def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = False) -> _TopicReads:
+def _topics_ready(
+    monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = False, groups: list[list[int]] | None = None
+) -> _TopicReads:
     """Give the collection an active run, and record what its topics read and where.
 
     The filtered facet and count fail the test unless it scripts them.
@@ -3693,11 +3696,12 @@ def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = Fa
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         rag (RAG): The engine, before the turn is built.
         empty (bool): Whether the run found no topics.
+        groups (list[list[int]] | None): A reduction stored with the run.
 
     Returns:
         _TopicReads: The record, filled in as the topics are read.
     """
-    run = _topic_run(empty=empty)
+    run = _topic_run(empty=empty, groups=groups)
     seen = _TopicReads()
 
     def _overview_read(client: Any, captured: TopicRun, physical: str, **kwargs: Any) -> dict[str, Any]:
@@ -3741,7 +3745,7 @@ def _topics_ready(monkeypatch: pytest.MonkeyPatch, rag: RAG, *, empty: bool = Fa
                 "collection": collection,
                 "active": rag.qdrant_collection,
                 "run_id": kwargs["run_id"],
-                "topic_id": kwargs["topic_id"],
+                "topic_ids": kwargs["topic_ids"],
                 "limit": kwargs["limit"],
                 "extra": kwargs.get("extra"),
             }
@@ -3989,7 +3993,7 @@ def test_topic_passages_and_in_the_turns_filter_and_stay_in_their_collection(mon
             "collection": PHYSICAL,
             "active": PHYSICAL,
             "run_id": TOPIC_RUN_ID,
-            "topic_id": 1,
+            "topic_ids": (1,),
             "limit": 5,
             "extra": build_qdrant_filter(RULES),
         }
@@ -4003,6 +4007,51 @@ def test_topic_passages_and_in_the_turns_filter_and_stay_in_their_collection(mon
     with rag.collection_scope("u0123456789ab__other"), pytest.raises(RuntimeError, match="outside the collection"):
         turn.loop._registry.call(tool_call("topics", topic="T0"), ctx)
     assert len(reads) == 1
+
+
+def test_a_reduced_run_lists_and_reads_a_group_as_one_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Merged topics 0 and 1 are one topic T0 of their summed chunks, and its passages read both leaves.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    seen = _topics_ready(monkeypatch, rag, groups=[[0, 1]])
+
+    def _counts(client: Any, collection: str, run_id: str, *, limit: int, extra: Any = None) -> dict[int, int]:
+        """Answer each leaf's filtered size.
+
+        Args:
+            client (Any): The store client.
+            collection (str): The collection.
+            run_id (str): The run.
+            limit (int): Most facet values; the leaf count plus room.
+            extra (Any): The further filter.
+
+        Returns:
+            dict[int, int]: Leaf 1 holds five chunks, leaf 0 three, leaf 2 two.
+        """
+        assert limit == 5
+        return {0: 3, 1: 5, 2: 2}
+
+    monkeypatch.setattr("docint.core.rag.topic_counts", _counts)
+    monkeypatch.setattr("docint.core.rag.count_points", lambda client, collection, flt: 12)
+
+    with rag.collection_scope(PHYSICAL):
+        turn = _turn(rag, target="documents", metadata_filter_rules=RULES, metadata_filters_active=True)
+        ctx = _ctx(turn)
+        listing = turn.loop._registry.call(tool_call("topics"), ctx)
+        group = turn.loop._registry.call(tool_call("topics", topic="T0"), ctx)
+        merged = turn.loop._registry.call(tool_call("topics", topic="T1"), ctx)
+
+    assert listing.trail == {
+        "total": 12,
+        "filtered": True,
+        "topics": [[0, "Hafenfest und Stände", 8], [2, "Anmeldung am Kai", 2]],
+    }
+    assert [read["topic_ids"] for read in seen.reads] == [(0, 1)]
+    assert group.found == 1
+    assert merged.kind == "no_such_topic"
 
 
 def test_carried_passages_match_a_topic_rule_through_their_payload(monkeypatch: pytest.MonkeyPatch) -> None:

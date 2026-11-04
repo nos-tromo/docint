@@ -205,19 +205,22 @@ def run_filter(run_id: str) -> models.Filter:
     return models.Filter(must=[models.FieldCondition(key=RUN_FIELD, match=models.MatchValue(value=run_id))])
 
 
-def topic_filter(run_id: str, topic_id: int) -> models.Filter:
-    """Select the members of one topic.
+def topic_filter(run_id: str, topic_ids: int | Sequence[int]) -> models.Filter:
+    """Select the members of one topic, or of several leaves read as one.
 
     Args:
         run_id: Run id.
-        topic_id: Topic id.
+        topic_ids: A topic id, or the leaf ids of a group.
 
     Returns:
-        Points whose topic key is that run's topic.
+        Points whose topic key is one of that run's topics.
     """
-    return models.Filter(
-        must=[models.FieldCondition(key=TOPIC_FIELD, match=models.MatchValue(value=topic_value(run_id, topic_id)))]
+    ids = [topic_ids] if isinstance(topic_ids, int) else list(topic_ids)
+    values = [topic_value(run_id, topic_id) for topic_id in ids]
+    match: models.MatchValue | models.MatchAny = (
+        models.MatchValue(value=values[0]) if len(values) == 1 else models.MatchAny(any=values)
     )
+    return models.Filter(must=[models.FieldCondition(key=TOPIC_FIELD, match=match)])
 
 
 def and_filters(*filters: models.Filter | None) -> models.Filter:
@@ -489,14 +492,16 @@ def topic_counts(
     return out
 
 
-def document_counts(client: Any, collection: str, run_id: str, topic_id: int, *, limit: int) -> list[tuple[str, int]]:
+def document_counts(
+    client: Any, collection: str, run_id: str, topic_ids: Sequence[int], *, limit: int
+) -> list[tuple[str, int]]:
     """Count a topic's members per source document.
 
     Args:
         client: Qdrant client.
         collection: Physical collection name.
         run_id: Run id.
-        topic_id: Topic id.
+        topic_ids: The topic's leaf ids.
         limit: Most facet values to read.
 
     Returns:
@@ -505,7 +510,7 @@ def document_counts(client: Any, collection: str, run_id: str, topic_id: int, *,
     hits = client.facet(
         collection_name=collection,
         key=FILE_HASH_FIELD,
-        facet_filter=topic_filter(run_id, topic_id),
+        facet_filter=topic_filter(run_id, topic_ids),
         exact=True,
         limit=limit,
     ).hits
@@ -519,7 +524,7 @@ def central_points(
     centre: np.ndarray,
     dense: DenseVector,
     run_id: str,
-    topic_id: int,
+    topic_ids: Sequence[int],
     limit: int,
     extra: models.Filter | None = None,
 ) -> list[Any]:
@@ -531,7 +536,7 @@ def central_points(
         centre: The query vector.
         dense: The collection's dense vector.
         run_id: Run id.
-        topic_id: Topic id.
+        topic_ids: The topic's leaf ids.
         limit: Most points to return.
         extra: A further filter the members must satisfy.
 
@@ -543,7 +548,7 @@ def central_points(
             collection_name=collection,
             query=centre.tolist(),
             using=dense.name,
-            query_filter=and_filters(topic_filter(run_id, topic_id), extra),
+            query_filter=and_filters(topic_filter(run_id, topic_ids), extra),
             limit=limit,
             with_payload=True,
         ).points
@@ -551,7 +556,7 @@ def central_points(
 
 
 def member_page(
-    client: Any, collection: str, *, run_id: str, topic_id: int, offset: Any, limit: int
+    client: Any, collection: str, *, run_id: str, topic_ids: Sequence[int], offset: Any, limit: int
 ) -> tuple[list[Any], Any]:
     """Read one page of a topic's members.
 
@@ -559,7 +564,7 @@ def member_page(
         client: Qdrant client.
         collection: Physical collection name.
         run_id: Run id.
-        topic_id: Topic id.
+        topic_ids: The topic's leaf ids.
         offset: The scroll offset from the previous page, ``None`` for the first.
         limit: Page size.
 
@@ -568,7 +573,7 @@ def member_page(
     """
     points, next_offset = client.scroll(
         collection_name=collection,
-        scroll_filter=topic_filter(run_id, topic_id),
+        scroll_filter=topic_filter(run_id, topic_ids),
         offset=offset,
         limit=limit,
         with_payload=True,

@@ -223,8 +223,11 @@ def test_overview_counts_coverage_and_sorts_topics_by_size(client: QdrantClient,
     assert [t["id"] for t in out["topics"]] == [1, 2, 0]
     assert [t["size"] for t in out["topics"]] == [40, 30, 20]
     assert out["topics"][0]["share"] == round(40 / total, 4)
+    assert out["leaf_count"] == len(SIZES)
+    assert [t["members"] for t in out["topics"]] == [[1], [2], [0]]
     assert set(out["topics"][0]) == {
         "id",
+        "members",
         "label",
         "description",
         "keywords",
@@ -360,6 +363,84 @@ def test_chunks_page_with_a_cursor_and_a_bad_cursor_raises(client: QdrantClient,
         views.chunks(client, run, COLL, 2, cursor="not a cursor", limit=25, source_of=_source)
     with pytest.raises(InvalidCursorError):
         views.chunks(client, run, COLL, 2, cursor=encode_cursor([1]), limit=25, source_of=_source)
+
+
+def _grouped(run: TopicRun, *groups: list[int]) -> TopicRun:
+    """Present a run through a reduction, as a stored one would.
+
+    Args:
+        run: The run.
+        *groups: Each group's leaf ids.
+
+    Returns:
+        The run with those groups in its record.
+    """
+    return TopicRun(run.run_id, {**run.record, "groups": [list(group) for group in groups]}, run.table)
+
+
+def test_a_group_is_listed_once_with_its_leaves_counts_summed(client: QdrantClient, run: TopicRun) -> None:
+    """A group of topics 0 and 2 is one topic of 50 chunks, listed under 0 with its members.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    out = views.overview(client, _grouped(run, [0, 2]), COLL, embed_model=EMBED, ensure_indexes=_no_ensure)
+
+    assert out is not None
+    assert [(t["id"], t["size"], t["members"]) for t in out["topics"]] == [
+        (0, SIZES[0] + SIZES[2], [0, 2]),
+        (1, SIZES[1], [1]),
+    ]
+    assert out["leaf_count"] == len(SIZES)
+    assert out["coverage"]["assigned"] == sum(SIZES)
+    total = out["coverage"]["total"]
+    assert out["topics"][0]["share"] == round((SIZES[0] + SIZES[2]) / total, 4)
+
+
+def test_a_topic_merged_into_a_group_has_no_views_of_its_own(client: QdrantClient, run: TopicRun) -> None:
+    """Topic 2 inside the group under 0 has no evidence, documents or chunks; the group has.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    grouped, dense = _grouped(run, [0, 2]), dense_vector(client, COLL)
+    assert views.evidence(client, grouped, COLL, 2, dense=dense, limit=3, source_of=_source) is None
+    assert views.documents(client, grouped, COLL, 2, limit=5, names=dict) is None
+    assert views.chunks(client, grouped, COLL, 2, cursor=None, limit=5, source_of=_source) is None
+
+
+def test_a_groups_views_read_all_of_its_leaves(client: QdrantClient, run: TopicRun) -> None:
+    """A group's documents and chunks cover both leaves, and its evidence ranks by the group centre.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    grouped = _grouped(run, [0, 2])
+    docs = views.documents(client, grouped, COLL, 0, limit=10, names=dict)
+    assert docs is not None
+    assert {d["file_hash"]: d["count"] for d in docs["documents"]} == {
+        "hash-a": HASH_A,
+        "hash-b": SIZES[0] - HASH_A,
+        "hash-2": SIZES[2],
+    }
+    page = views.chunks(client, grouped, COLL, 0, cursor=None, limit=200, source_of=_source)
+    assert page is not None
+    assert len(page["items"]) == SIZES[0] + SIZES[2]
+    assert {("blob0" in item["text"]) or ("blob2" in item["text"]) for item in page["items"]} == {True}
+
+    dense = dense_vector(client, COLL)
+    out = views.evidence(client, grouped, COLL, 0, dense=dense, limit=SIZES[0] + SIZES[2], source_of=_source)
+    assert out is not None
+    assert len(out) == SIZES[0] + SIZES[2]
+    centre = grouped.view.table.centre(0)
+    assert centre is not None
+    scores = [source["score"] for source in out]
+    assert scores == sorted(scores, reverse=True)
+    # Topic 2 has the larger fit, so the weighted centre lies nearer its blob.
+    assert "blob2" in out[0]["text"]
 
 
 def _rag(client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, created: str) -> RAG:
