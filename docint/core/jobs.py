@@ -265,8 +265,11 @@ class IngestJobState:
     reference_number: str | None = None
     #: Who asked for the extract, printed under its title.
     operator: str | None = None
-    #: A topics job's action: ``build``, ``discover`` or ``align``.
+    #: A topics job's action: ``build``, ``discover``, ``align``, ``reduce`` or ``relax``.
     action: str | None = None
+    #: A topics job's settings for its action, passed to the topics service
+    #: as keywords; ``None`` for the defaults.
+    topics_options: dict[str, Any] | None = None
     #: The audit context (actor, stated purpose, request id) of the request
     #: that created the job, which the job's audit events are recorded with.
     #: Opaque here; the runner reads it.
@@ -628,6 +631,7 @@ class IngestJobManager:
         reference_number: str | None = None,
         operator: str | None = None,
         action: str | None = None,
+        topics_options: dict[str, Any] | None = None,
         upload_lead_s: float = 0.0,
         audit: Any = None,
     ) -> tuple[IngestJobState, bool]:
@@ -681,6 +685,8 @@ class IngestJobManager:
                 under. Extract-only.
             operator (str | None): Who asked for the extract. Extract-only.
             action (str | None): A topics job's action. Topics-only.
+            topics_options (dict[str, Any] | None): A topics job's settings
+                for its action. Topics-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports. Ignored when an in-flight
@@ -716,6 +722,7 @@ class IngestJobManager:
                 reference_number=reference_number,
                 operator=operator,
                 action=action,
+                topics_options=topics_options,
                 upload_lead_s=upload_lead_s,
                 audit=audit,
             )
@@ -741,6 +748,7 @@ class IngestJobManager:
         reference_number: str | None = None,
         operator: str | None = None,
         action: str | None = None,
+        topics_options: dict[str, Any] | None = None,
         upload_lead_s: float = 0.0,
         audit: Any = None,
     ) -> IngestJobState:
@@ -772,6 +780,8 @@ class IngestJobManager:
                 under. Extract-only.
             operator (str | None): Who asked for the extract. Extract-only.
             action (str | None): A topics job's action. Topics-only.
+            topics_options (dict[str, Any] | None): A topics job's settings
+                for its action. Topics-only.
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed. Clamped here — it reaches the server as a
                 client-reported number, and it bounds a log line, so it must
@@ -797,6 +807,7 @@ class IngestJobManager:
             reference_number=reference_number,
             operator=operator,
             action=action,
+            topics_options=topics_options,
             batch_dir=batch_dir,
             hybrid=hybrid,
             ner=ner,

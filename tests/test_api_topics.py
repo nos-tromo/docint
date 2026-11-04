@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 import time
@@ -26,7 +27,7 @@ from docint.core.jobs import TERMINAL_STATUSES, IngestJobManager, IngestJobState
 from docint.core.rag import RAG
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
-from docint.core.topics.service import TopicsRefused, progress_payload
+from docint.core.topics.service import TopicsOutcome, TopicsRefused, progress_payload
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.topics_client import TopicsUnreachable
 
@@ -440,6 +441,98 @@ def test_post_queues_a_topics_job_with_its_action(client: TestClient, fake: _Top
     assert _physical(fake) not in json.dumps(built)
 
     assert client.post("/collections/docs/topics", json={"action": "other"}).status_code == 422
+
+
+def test_a_builds_topic_size_reaches_its_job(make_client: Callable[[JobRunner], TestClient]) -> None:
+    """A build asked for a topic size carries it to the job; one without carries no settings.
+
+    Args:
+        make_client: The client factory.
+    """
+    seen: list[tuple[str | None, dict[str, Any] | None]] = []
+
+    def recording(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Record the job's action and settings.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        seen.append((state.action, state.topics_options))
+        return {"empty": True, "resolution": None}
+
+    client = make_client(recording)
+    sized = client.post("/collections/docs/topics", json={"action": "build", "min_topic_size": 7})
+    assert sized.status_code == 202
+    _await_terminal(client, sized.json()["job_id"])
+    plain = client.post("/collections/docs/topics", json={})
+    _await_terminal(client, plain.json()["job_id"])
+
+    assert seen == [("build", {"min_topic_size": 7}), ("build", None)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"min_topic_size": 1},
+        {"min_topic_size": 10_001},
+        {"action": "discover", "min_topic_size": 5},
+        {"action": "align", "min_topic_size": 5},
+    ],
+)
+def test_a_setting_out_of_range_or_for_another_action_is_refused(client: TestClient, body: dict[str, Any]) -> None:
+    """The route is the trust boundary: a bad size, or one for an action that takes none, is a 422.
+
+    Args:
+        client: The client.
+        body: The request body.
+    """
+    assert client.post("/collections/docs/topics", json=body).status_code == 422
+
+
+def test_the_runner_hands_a_jobs_settings_to_the_service_and_its_audit_record(
+    fake: _TopicsRAG, audit_stream: io.StringIO
+) -> None:
+    """The settings reach the service as keywords and the run's modify event as criteria.
+
+    Args:
+        fake: The RAG stand-in.
+        audit_stream: The test's audit stream.
+    """
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _Recorder:
+        """A topics service stand-in that records its run."""
+
+        def run(self, action: str, physical: str, **kwargs: Any) -> TopicsOutcome:
+            """Record the call and report a finished build.
+
+            Args:
+                action: The action.
+                physical: Physical collection name.
+                **kwargs: The run's keywords.
+
+            Returns:
+                A build's outcome.
+            """
+            calls.append((action, kwargs))
+            return TopicsOutcome("build", "20260101-000000-abcdef", 3, 3, 10, empty=False)
+
+    fake.service = _Recorder()
+    state = _topics_state("p1")
+    state.topics_options = {"min_topic_size": 7}
+
+    api_module._run_topics_job(state, lambda event, payload: None)
+
+    assert calls[0][0] == "build"
+    assert calls[0][1]["min_topic_size"] == 7
+    events = [json.loads(line) for line in audit_stream.getvalue().splitlines()]
+    (built,) = [event for event in events if event.get("operation") == "topics.build"]
+    assert built["criteria"]["min_topic_size"] == 7
+    assert built["criteria"]["job_id"] == "job-1"
 
 
 def test_a_second_post_answers_409_with_the_running_job_id(make_client: Callable[[JobRunner], TestClient]) -> None:

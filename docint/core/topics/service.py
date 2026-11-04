@@ -503,6 +503,7 @@ class TopicsService:
         owner_created_at: Callable[[], str | None],
         progress: Progress,
         warn: Warn,
+        min_topic_size: int | None = None,
     ) -> TopicsOutcome:
         """Run one job under the collection's lock, waiting for it if needed.
 
@@ -513,6 +514,8 @@ class TopicsService:
             owner_created_at: Reads the ownership row's ``created_at`` now.
             progress: Receives ``(stage, done, total)``; a raise stops the job.
             warn: Receives ``(code, message)`` for a job that finds nothing.
+            min_topic_size: For a build, the smallest topic in place of the
+                configured or automatic size.
 
         Returns:
             The outcome.
@@ -526,7 +529,7 @@ class TopicsService:
         lock = self._wait_for_lock(physical, progress)
         job = _Job()
         try:
-            outcome = self._run_locked(action, physical, owner_created_at, progress, warn, job)
+            outcome = self._run_locked(action, physical, owner_created_at, progress, warn, job, min_topic_size)
         except TopicsRefused as exc:
             counts = "".join(f" {key}={value}" for key, value in exc.counts().items())
             logger.info("Topics {} refused for '{}' | code={}{}", action, logical, exc.code, counts)
@@ -751,6 +754,7 @@ class TopicsService:
         progress: Progress,
         warn: Warn,
         job: _Job,
+        min_topic_size: int | None = None,
     ) -> TopicsOutcome:
         """Dispatch a job once the lock is held.
 
@@ -764,6 +768,7 @@ class TopicsService:
             progress: The progress channel.
             warn: The warning channel.
             job: What the job has written.
+            min_topic_size: For a build, the smallest topic in place of the configured or automatic size.
 
         Returns:
             The outcome.
@@ -780,7 +785,9 @@ class TopicsService:
         ensure_topic_indexes(client, physical)
         dense = dense_vector(client, physical)
         if action == "build":
-            return self._build(physical, dense, created, owner_created_at, progress, warn, job)
+            return self._build(
+                physical, dense, created, owner_created_at, progress, warn, job, min_topic_size=min_topic_size
+            )
         run = store.active(physical, owner_created_at=created)
         if run is None:
             raise TopicsRefused("no_run")
@@ -799,6 +806,8 @@ class TopicsService:
         progress: Progress,
         warn: Warn,
         job: _Job,
+        *,
+        min_topic_size: int | None = None,
     ) -> TopicsOutcome:
         """Fit a new run over the collection and make it the active one.
 
@@ -810,6 +819,7 @@ class TopicsService:
             progress: The progress channel.
             warn: The warning channel.
             job: What the job has written.
+            min_topic_size: The smallest topic in place of the configured or automatic size.
 
         Returns:
             The outcome.
@@ -818,7 +828,9 @@ class TopicsService:
             TopicsRefused: ``too_few_chunks``, or ``collection_changed`` before the run is written or activated.
         """
         deps, store = self._deps, self._deps.store
-        fitted = self._fit_pool(physical, dense, eligible_filter(), "too_few_chunks", progress)
+        fitted = self._fit_pool(
+            physical, dense, eligible_filter(), "too_few_chunks", progress, min_topic_size=min_topic_size
+        )
         _refuse_if_replaced(owner_created_at, created)
         if not any(t.size > 0 for t in fitted.result.topics):
             warn("none_found", WARNINGS["none_found"])
@@ -978,6 +990,7 @@ class TopicsService:
         progress: Progress,
         *,
         least_topic_size: int = 2,
+        min_topic_size: int | None = None,
     ) -> _Fitted:
         """Sample the points a filter selects and fit them.
 
@@ -988,6 +1001,7 @@ class TopicsService:
             refusal: The refusal code for a sample too small to fit.
             progress: The progress channel.
             least_topic_size: Smallest automatic minimum topic size; a configured size ignores it.
+            min_topic_size: A size asked for with the job, before the configured and the automatic one.
 
         Returns:
             The sample and its fit.
@@ -1007,7 +1021,7 @@ class TopicsService:
             min_text_chars=cfg.min_text_chars,
             text_chars=text_chars,
         )
-        mts = cfg.min_topic_size or max(auto_min_topic_size(sample.n), least_topic_size)
+        mts = min_topic_size or cfg.min_topic_size or max(auto_min_topic_size(sample.n), least_topic_size)
         needed = min_eligible(mts)
         if sample.n < needed:
             raise TopicsRefused(refusal, found=sample.n, needed=needed)
