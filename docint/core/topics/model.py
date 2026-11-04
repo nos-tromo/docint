@@ -205,6 +205,20 @@ class TopicTable:
         row = self._row(topic_id)
         return None if row is None else self.centres[row]
 
+    def nearest(self, vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Find each vector's nearest centre, whatever the floors.
+
+        Args:
+            vectors: ``(n, dim)`` matrix; the table must hold at least one topic.
+
+        Returns:
+            Each vector's row of its nearest centre, a tie going to the lowest
+            row, and its cosine to that centre.
+        """
+        scores = unit_rows(vectors) @ self.centres.T
+        best = scores.argmax(axis=1)
+        return best, scores[np.arange(best.shape[0]), best]
+
     def align(self, vectors: np.ndarray) -> np.ndarray:
         """Assign each vector to its nearest topic when it clears that topic's floor.
 
@@ -217,10 +231,8 @@ class TopicTable:
         n = int(np.asarray(vectors).shape[0])
         if not self.topics:
             return np.full(n, -1, dtype=np.int64)
-        scores = unit_rows(vectors) @ self.centres.T
-        best = scores.argmax(axis=1)
-        rows = np.arange(n)
-        admit = scores[rows, best] >= self.floors[best]
+        best, cosine = self.nearest(vectors)
+        admit = cosine >= self.floors[best]
         return np.where(admit, self.ids[best], -1).astype(np.int64)
 
     def appended(self, topics: Sequence[TopicInfo], centres: np.ndarray) -> TopicTable:

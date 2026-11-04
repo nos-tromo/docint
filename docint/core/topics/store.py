@@ -24,6 +24,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -32,6 +33,7 @@ import numpy as np
 from loguru import logger
 
 from docint.core.topics.model import TopicInfo, TopicTable
+from docint.core.topics.reduce import TopicView, view_of
 
 __all__ = ["RUN_ID_PATTERN", "TopicLock", "TopicRun", "TopicStore"]
 
@@ -59,6 +61,18 @@ class TopicRun:
     run_id: str
     record: Mapping[str, Any]
     table: TopicTable
+
+    @cached_property
+    def view(self) -> TopicView:
+        """Return the run's topics as its reduction presents them.
+
+        Jobs align and discover on :attr:`table`, the leaves; every read that
+        shows topics, counts them or filters by one goes through the view.
+
+        Returns:
+            TopicView: The view, computed once per run object.
+        """
+        return view_of(self.table, self.record)
 
 
 class TopicLock:
