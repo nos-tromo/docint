@@ -25,6 +25,7 @@ import numpy as np
 from loguru import logger
 from pydantic import BaseModel, ValidationError
 
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import TopicsClientConfig, load_topics_client_env
 
 FIT_PATH = "/topics/fit"
@@ -450,6 +451,7 @@ class TopicsClient:
         texts_bytes = encode_texts(texts)
         if len(texts_bytes) > texts_limit(n):
             raise ValueError(f"texts hold {len(texts_bytes)} bytes, over the limit of {texts_limit(n)}")
+        count_transfer("fit", "inference:topics", "topics", len(texts))
         meta = {
             "n": n,
             "dim": dim,

@@ -144,9 +144,9 @@ def test_admin_capability_boundary_on_analysis_path(monkeypatch: pytest.MonkeyPa
 
     Complements ``test_api_collections_ownership.py``'s admin-select/-delete/
     -ingest coverage with the same guarantee on ``/collections/documents``:
-    - a non-admin passing ``?owner=`` still resolves in their own namespace
-      (404 here, since carol owns nothing named 'docs') — the query param is
-      not a privilege escalation by itself;
+    - a non-admin passing ``?owner=`` naming someone else is refused (403,
+      recorded in the audit trail as denied) — the query param is not a
+      privilege escalation by itself;
     - an admin with no ``?owner=`` is scoped to their own (empty) namespace,
       not silently granted every owner's data.
 
@@ -159,13 +159,13 @@ def test_admin_capability_boundary_on_analysis_path(monkeypatch: pytest.MonkeyPa
     api_module = _wire(monkeypatch, rag)
     client = TestClient(api_module.app)
 
-    # Non-admin: the owner param is inert without admin rights.
+    # Non-admin: the owner param grants nothing without admin rights; asking is refused.
     denied = client.get(
         "/collections/documents",
         params={"collection": "docs", "owner": "alice"},
         headers={"X-Auth-User": "carol"},
     )
-    assert denied.status_code == 404
+    assert denied.status_code == 403
 
     # Admin, no owner param: scoped to their own (unregistered) namespace.
     admin_own = client.get(

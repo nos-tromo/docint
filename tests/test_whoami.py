@@ -78,7 +78,7 @@ def test_whoami_trusts_identity_headers_carrying_the_edge_secret(
 def test_whoami_ignores_identity_headers_without_the_edge_secret(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """A caller without the secret is anonymous: 401, or the default identity with no display name."""
+    """A caller without the secret is anonymous: 401, a configured default identity included."""
     monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
     monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
     forged = {"X-Auth-User": "alice", "X-Auth-Name": "Alice Example"}
@@ -86,7 +86,7 @@ def test_whoami_ignores_identity_headers_without_the_edge_secret(
     assert client.get("/whoami", headers=forged).status_code == 401
     assert client.get("/whoami", headers={**forged, "X-Edge-Secret": "not-the-edge-secret"}).status_code == 401
 
+    # The dev fallback holds only while no edge secret is set.
     monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "test-operator")
-    response = client.get("/whoami", headers=forged)
-    assert response.status_code == 200
-    assert response.json() == {"username": "test-operator", "display_name": None}
+    assert client.get("/whoami", headers=forged).status_code == 401
+    assert client.get("/whoami").status_code == 401

@@ -19,6 +19,8 @@ from fastapi import UploadFile
 from starlette.requests import Request
 
 import docint.core.api as api_module
+from docint.core import audit
+from docint.utils.audit_event import Actor
 from docint.utils.hashing import compute_file_hash
 
 MiB = 1024 * 1024
@@ -65,7 +67,9 @@ async def _attempt(filename: str, data: bytes) -> AsyncGenerator[str, None]:
         AsyncGenerator[str, None]: The attempt's event stream, not yet started.
     """
     upload = UploadFile(io.BytesIO(data), filename=filename)
-    response = await api_module.ingest_upload(Request({"type": "http", "headers": []}), "c1", [upload])
+    # Called past FastAPI, so the audited operation its dependency opens is built here.
+    op = audit.Operation(audit.current(), audit.AuditContext(actor=Actor("alice", "edge")), "collect", "ingest.upload")
+    response = await api_module.ingest_upload(Request({"type": "http", "headers": []}), "c1", [upload], op=op)
     return cast(AsyncGenerator[str, None], response.body_iterator)
 
 

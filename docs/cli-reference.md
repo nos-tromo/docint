@@ -79,8 +79,10 @@ canonical records, so the NER views can group by canonical entity under
 `entity_merge_mode=resolved`. Re-runnable and idempotent. Tuned by the
 `RES_*` settings in `docint/utils/env_cfg.py` (`RES_EMBED_THRESHOLD`,
 `RES_LLM_TIEBREAK`, `RES_CASE_NORMALIZE`, `RES_VECTOR_K`). In Docker the
-`make resolve` target runs this in a one-off `backend` container so it
-reaches the `qdrant` / `vllm-router` network aliases.
+`make resolve` target runs this inside the running `backend` container
+(`docker compose exec`) so it reaches the `qdrant` / `vllm-router` network
+aliases and its audit chain lands on the backend's log
+([Audit log](#audit-log)).
 
 ## `extract` — written data extracts
 
@@ -96,8 +98,8 @@ keyframe descriptions, image captions and document text as a ZIP under
 `RESULTS_PATH` — the offline twin of `POST /collections/{name}/extracts`,
 sharing its gather, partition and bundle code. Reads Qdrant only: no
 inference, so it is safe on an airgapped host. In Docker the `make extract`
-target runs it in a one-off `backend` container so it reaches the `qdrant`
-alias. The bundle layout and the caps are documented in
+target runs it inside the running `backend` container so it reaches the
+`qdrant` alias; the archive lands on the same `pipeline-storage` volume. The bundle layout and the caps are documented in
 [extracts.md](extracts.md).
 
 ## `topics` — topic runs
@@ -133,8 +135,8 @@ and refuses a logical name several users own, listing each physical name.
 | `1` | An endpoint fault. The logged error names the fit URL (without credentials) and, for a configuration fault, the setting to change. |
 | `2` | A refusal, an unknown or ambiguous collection, no collection name, or `TOPICS_ENABLED` off. |
 
-In Docker the `make topics` target runs it in a one-off `backend` container so
-it reaches the `qdrant` and `vllm-router` aliases. A run here sends no frames
+In Docker the `make topics` target runs it inside the running `backend`
+container so it reaches the `qdrant` and `vllm-router` aliases. A run here sends no frames
 to the SPA, and it cannot drop the API's cached document rows (see
 [topics.md](topics.md#limitations)).
 
@@ -178,8 +180,8 @@ Payload-only — no re-embedding, no inference, no model downloads — so it is
 safe on an airgapped host and costs a scroll plus batched payload writes.
 Re-running is cheap: points that already carry the field are skipped, and it
 heals a collection left half-indexed by an interrupted earlier run. In Docker
-the `make search-index` target runs this in a one-off `backend` container so it
-reaches the `qdrant` network alias.
+the `make search-index` target runs this inside the running `backend`
+container so it reaches the `qdrant` network alias.
 
 Until it has run, `POST /search` returns `status: "not_indexed"` for that
 collection rather than an empty hit list — an empty list must never be able to
@@ -360,6 +362,38 @@ server-side) makes the command a no-op.
 in the builder stage and ships the result at `/app/hf-hub`, so a
 container downloads nothing at startup.
 
+## Audit log
+
+Every command that processes collection content records a data-protection
+audit chain of its own ([audit.md](audit.md#command-line-tools)): `resolve`,
+`extract`, `topics` (all four operations), `search-index`,
+`search-index-all`, `ingest`, `query`, `query-eval` and `verify --repair`.
+`verify` without `--repair`, `retention-report`, `load-models` and `docint`
+record nothing of their own: they read counts, node ids and the retention
+clock, or serve the API, which records its own.
+
+| Variable | Meaning |
+|---|---|
+| `AUDIT_CLI_USER` | The operator, recorded as the actor (`via: "cli"`). The make targets pass `$SUDO_USER`, else `id -un`. |
+| `AUDIT_CASE_REF`, `AUDIT_REASON` | The run's stated purpose. Set them per run (`make … CASE_REF=… REASON=…`), never in `.env`. |
+| `AUDIT_OUTPUT` | `container` in the backend container (compose sets it): the chain goes to the container's own log under one lock. Unset on a `uv run` host: the process's stdout. |
+| `AUDIT_REQUIRE_PURPOSE` | Actions that need a stated purpose; a run that needs one and has none exits with code `2`. Empty by default. |
+
+The make targets for the audited commands run them inside the **running**
+backend (`docker compose exec`), so `make up` first: a one-off container can
+exit before the log collector has found it, and its audit lines would be
+lost. `retention-report` keeps its one-off container.
+
+```bash
+make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"
+make extract COLLECTION=mydocs CASE_REF=case-0001
+docker compose --env-file .env -f docker/compose.yaml \
+  exec -e AUDIT_CLI_USER="$(id -un)" -e AUDIT_CASE_REF=case-0001 backend query --collection mydocs --all
+```
+
+An audit write that fails ends the command with a non-zero exit code; the
+work does not finish unrecorded.
+
 ## Exit codes and logging
 
 - All commands initialise loguru through `init_logger()`
@@ -370,3 +404,11 @@ container downloads nothing at startup.
 - `ingest`, `resolve`, `query`, `query-eval`, `verify`, and `load-models`
   return non-zero exit codes on unhandled exceptions. Redirect stderr if
   you want a file to read afterwards.
+- An audited command exits with code `2` when it needs a stated purpose and
+  has none, or when `AUDIT_CASE_REF`/`AUDIT_REASON` holds control characters
+  or more than 256 characters; one line on stderr says why
+  ([Audit log](#audit-log)). A failed audit write exits non-zero.
+- Audit lines never reach the stderr log. Inside the backend container
+  (`AUDIT_OUTPUT=container`) they go to the container's log, apart from the
+  command's own stdout (`verify --json`, `topics status`). On a `uv run` host
+  they go to the process's stdout, beside that output.

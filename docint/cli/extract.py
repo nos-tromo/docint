@@ -4,6 +4,9 @@ The offline twin of ``POST /collections/{name}/extracts``: same gather,
 partition and bundle code, writing the ZIP to ``RESULTS_PATH`` instead of the
 extract store. Useful on a host with no HTTP access to the backend, and for
 scripting a batch of collections.
+
+The written archive is an audited disclosure (``extract.build`` to
+``file:extract``), recorded before the file is written.
 """
 
 import argparse
@@ -13,7 +16,10 @@ from pathlib import Path
 
 from loguru import logger
 
+from docint.cli._audit import collection_criteria, session
 from docint.cli._collection import CollectionNotFoundError, resolve_collection_name
+from docint.core.audit import CliAudit, metered
+from docint.core.audit_targets import unit_target
 from docint.core.extract.bundle import build_bundle
 from docint.core.extract.gather import scroll_collection
 from docint.core.extract.units import partition, resolve_target
@@ -51,6 +57,7 @@ def build_extract(
     with_pdf: bool,
     reference_number: str | None = None,
     operator: str | None = None,
+    audit: CliAudit | None = None,
 ) -> Path:
     """Render one collection's extract and write it to disk.
 
@@ -61,6 +68,8 @@ def build_extract(
         with_pdf (bool): Whether to render the combined PDF.
         reference_number (str | None): Case file the appendix is filed under.
         operator (str | None): Who built it.
+        audit (CliAudit | None): The command's audit chain; one is opened for
+            this run when omitted.
 
     Returns:
         Path: The written archive.
@@ -69,53 +78,66 @@ def build_extract(
         SystemExit: When the collection cannot be resolved, or holds nothing
             the target names.
     """
-    rag = RAG(qdrant_collection=collection)
-    try:
-        try:
-            physical = resolve_collection_name(rag, collection)
-        except CollectionNotFoundError as exc:
-            logger.error("{}", exc)
-            raise SystemExit(1) from exc
-        if physical != collection:
-            logger.info("Resolved '{}' to the physical collection '{}'.", collection, physical)
-
-        main_points, image_points = scroll_collection(
-            rag.qdrant_client, physical, rag._image_collection_name(physical), source_id=target
+    with session(audit, "extract", "disclose", "extract.build") as cli:
+        op = cli.operation(
+            "disclose",
+            "extract.build",
+            container=collection,
+            criteria={"target": target, "reference_number": reference_number, "operator": operator},
         )
-        units = partition(main_points, image_points)
-        if target:
-            units = resolve_target(units, target)
-        if not units:
-            logger.error("Nothing to extract for '{}'{}.", collection, f" (target {target!r})" if target else "")
-            raise SystemExit(1)
-
-        engine = None
-        if with_pdf:
+        with metered(op):
+            rag = RAG(qdrant_collection=collection)
             try:
-                html_to_pdf("<html><body></body></html>")
-                engine = html_to_pdf
-            except PdfEngineUnavailableError as exc:
-                logger.warning("PDF engine unavailable, writing the bundle without one: {}", exc)
+                try:
+                    physical = resolve_collection_name(rag, collection)
+                except CollectionNotFoundError as exc:
+                    logger.error("{}", exc)
+                    raise SystemExit(1) from exc
+                if physical != collection:
+                    logger.info("Resolved '{}' to the physical collection '{}'.", collection, physical)
+                op.criteria.update(collection_criteria(collection, physical))
 
-        now = datetime.now(tz=UTC)
-        bundle = build_bundle(
-            units,
-            collection=collection,
-            cfg=load_extract_env(),
-            pdf=engine,
-            now=now,
-            progress=lambda rendered, total: logger.info("Rendering {}/{}", rendered, total),
-            reference_number=reference_number,
-            operator=operator,
-        )
-    finally:
-        rag.unload_models()
+                main_points, image_points = scroll_collection(
+                    rag.qdrant_client, physical, rag._image_collection_name(physical), source_id=target
+                )
+                units = partition(main_points, image_points)
+                if target:
+                    units = resolve_target(units, target)
+                if not units:
+                    logger.error(
+                        "Nothing to extract for '{}'{}.", collection, f" (target {target!r})" if target else ""
+                    )
+                    raise SystemExit(1)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # A file name holds 255 bytes, and a legal collection name can hold more.
-    stem = collection.encode("utf-8")[:200].decode("utf-8", "ignore")
-    path = out_dir / f"{stem}-extract-{now:%Y%m%d-%H%M}.zip"
-    path.write_bytes(bundle.zip_bytes)
+                engine = None
+                if with_pdf:
+                    try:
+                        html_to_pdf("<html><body></body></html>")
+                        engine = html_to_pdf
+                    except PdfEngineUnavailableError as exc:
+                        logger.warning("PDF engine unavailable, writing the bundle without one: {}", exc)
+
+                now = datetime.now(tz=UTC)
+                bundle = build_bundle(
+                    units,
+                    collection=collection,
+                    cfg=load_extract_env(),
+                    pdf=engine,
+                    now=now,
+                    progress=lambda rendered, total: logger.info("Rendering {}/{}", rendered, total),
+                    reference_number=reference_number,
+                    operator=operator,
+                )
+            finally:
+                rag.unload_models()
+
+            out_dir.mkdir(parents=True, exist_ok=True)
+            # A file name holds 255 bytes, and a legal collection name can hold more.
+            stem = collection.encode("utf-8")[:200].decode("utf-8", "ignore")
+            path = out_dir / f"{stem}-extract-{now:%Y%m%d-%H%M}.zip"
+        # Recorded before the archive exists: a write that fails leaves no file.
+        op.record(target=unit_target(units), criteria={"counts": bundle.counts}, recipient="file:extract")
+        path.write_bytes(bundle.zip_bytes)
     logger.info(
         "Extract written | file={!r} bytes={} {}",
         str(path),

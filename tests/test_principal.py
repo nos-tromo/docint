@@ -404,8 +404,10 @@ def test_resolve_principal_untrusted_request_fails_closed_without_a_default(
     assert excinfo.value.status_code == 401
 
 
-def test_resolve_principal_untrusted_request_falls_back_to_the_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An untrusted request gets exactly what a header-less one gets.
+def test_resolve_principal_untrusted_request_ignores_the_defaults_under_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the edge secret set, the dev fallbacks do not authenticate an untrusted request.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -420,11 +422,87 @@ def test_resolve_principal_untrusted_request_falls_back_to_the_defaults(monkeypa
         EDGE_SECRET_HEADER: _WRONG_SECRET,
     }
 
-    principal = resolve_principal(_make_request(headers))
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_principal(_make_request(headers))
 
-    assert principal.name == "operator"
-    assert principal.groups == frozenset({"users"})
-    assert principal.display_name is None
+    assert exc_info.value.status_code == 401
+
+
+# (edge secret, default identity, X-Edge-Secret sent, X-Auth-User sent) -> (name, via), or 401.
+_IDENTITY_MATRIX = [
+    pytest.param(None, None, None, "alice", ("alice", "edge"), id="no-secret-no-default-header"),
+    pytest.param(None, None, None, None, 401, id="no-secret-no-default-anonymous"),
+    pytest.param(None, "operator", None, "alice", ("alice", "edge"), id="no-secret-default-header"),
+    pytest.param(None, "operator", None, None, ("operator", "system"), id="no-secret-default-anonymous"),
+    pytest.param(_EDGE_SECRET, None, _EDGE_SECRET, "alice", ("alice", "edge"), id="secret-no-default-trusted"),
+    pytest.param(_EDGE_SECRET, None, _WRONG_SECRET, "alice", 401, id="secret-no-default-forged"),
+    pytest.param(_EDGE_SECRET, None, None, "alice", 401, id="secret-no-default-unproven"),
+    pytest.param(_EDGE_SECRET, "operator", _EDGE_SECRET, "alice", ("alice", "edge"), id="secret-default-trusted"),
+    pytest.param(_EDGE_SECRET, "operator", _WRONG_SECRET, "alice", 401, id="secret-default-forged"),
+    pytest.param(_EDGE_SECRET, "operator", None, "alice", 401, id="secret-default-unproven"),
+    pytest.param(_EDGE_SECRET, "operator", _EDGE_SECRET, None, 401, id="secret-default-trusted-anonymous"),
+    pytest.param(_EDGE_SECRET, "operator", None, None, 401, id="secret-default-anonymous"),
+]
+
+
+@pytest.mark.parametrize(("secret", "default", "sent_secret", "user", "expected"), _IDENTITY_MATRIX)
+def test_default_identity_is_honoured_only_without_an_edge_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    secret: str | None,
+    default: str | None,
+    sent_secret: str | None,
+    user: str | None,
+    expected: tuple[str, str] | int,
+) -> None:
+    """Every combination of edge secret and default identity, forged headers included.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        secret (str | None): ``DOCINT_EDGE_SECRET``.
+        default (str | None): ``DOCINT_DEFAULT_IDENTITY``.
+        sent_secret (str | None): The X-Edge-Secret value sent, ``None`` for none.
+        user (str | None): The X-Auth-User value sent, ``None`` for none.
+        expected (tuple[str, str] | int): ``(name, via)``, or the refusal's status.
+    """
+    for name, value in (("DOCINT_EDGE_SECRET", secret), ("DOCINT_DEFAULT_IDENTITY", default)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    headers: dict[str, str] = {}
+    if sent_secret is not None:
+        headers[EDGE_SECRET_HEADER] = sent_secret
+    if user is not None:
+        headers["X-Auth-User"] = user
+
+    if isinstance(expected, int):
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_principal(_make_request(headers))
+        assert exc_info.value.status_code == expected
+    else:
+        principal = resolve_principal(_make_request(headers))
+        assert (principal.name, principal.via) == expected
+
+
+def test_default_groups_never_apply_under_the_edge_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trusted request without a groups header gets none, not the dev default groups.
+
+    Otherwise a default admin group left set beside the secret would make every
+    gateway user without a groups header an admin.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.setenv("DOCINT_DEFAULT_GROUPS", "admins")
+
+    principal = resolve_principal(_make_request({"X-Auth-User": "alice", EDGE_SECRET_HEADER: _EDGE_SECRET}))
+
+    assert principal.groups == frozenset()
+    assert principal.is_admin is False
+
+    monkeypatch.delenv("DOCINT_EDGE_SECRET")
+    assert resolve_principal(_make_request({"X-Auth-User": "alice"})).is_admin is True
 
 
 @pytest.mark.parametrize("secret_header", [None, _WRONG_SECRET], ids=["missing", "wrong"])
@@ -442,11 +520,11 @@ def test_untrusted_admin_claim_never_gains_admin(monkeypatch: pytest.MonkeyPatch
     if secret_header is not None:
         headers[EDGE_SECRET_HEADER] = secret_header
 
-    principal = resolve_principal(_make_request(headers, query_string=b"owner=alice"))
+    # Neither the forged admin claim nor the default identity authenticates it.
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_principal(_make_request(headers, query_string=b"owner=alice"))
 
-    assert principal.is_admin is False
-    assert principal.groups == frozenset()
-    assert principal.effective_owner == "operator"
+    assert exc_info.value.status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -474,9 +552,10 @@ def test_ignored_identity_headers_are_logged_without_any_value(
     if secret_header is not None:
         headers[EDGE_SECRET_HEADER] = secret_header
 
-    resolve_principal(
-        _make_request(headers, method="POST", path="/collections/select", query_string=b"owner=target-owner")
-    )
+    with pytest.raises(HTTPException):
+        resolve_principal(
+            _make_request(headers, method="POST", path="/collections/select", query_string=b"owner=target-owner")
+        )
 
     messages = [record.getMessage() for record in loguru_caplog.records]
     assert messages == [f"Ignored identity headers on POST '/collections/select': {reason}"]
@@ -496,7 +575,8 @@ def test_untrusted_request_without_identity_headers_is_not_logged(
     monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
     monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
 
-    assert resolve_principal(_make_request({})).name == "operator"
+    with pytest.raises(HTTPException):
+        resolve_principal(_make_request({}))
     assert loguru_caplog.records == []
 
 
@@ -543,6 +623,37 @@ def test_check_principal_config_is_quiet_otherwise(
     check_principal_config()
 
     assert loguru_caplog.records == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("DOCINT_DEFAULT_IDENTITY", "operator"), ("DOCINT_DEFAULT_GROUPS", "admins")],
+    ids=["default-identity", "default-groups"],
+)
+def test_check_principal_config_warns_that_the_defaults_are_ignored_under_the_secret(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: LogCaptureFixture, name: str, value: str
+) -> None:
+    """A dev fallback beside the edge secret: one warning naming the variables, never their values.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (LogCaptureFixture): Loguru records bridged into caplog.
+        name (str): The fallback that is set.
+        value (str): Its value.
+    """
+    monkeypatch.setenv("DOCINT_EDGE_SECRET", _EDGE_SECRET)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_GROUPS", raising=False)
+    monkeypatch.setenv(name, value)
+
+    check_principal_config()
+
+    messages = [record.getMessage() for record in loguru_caplog.records]
+    assert len(messages) == 1
+    for variable in ("DOCINT_DEFAULT_IDENTITY", "DOCINT_EDGE_SECRET"):
+        assert variable in messages[0]
+    for secret in (value, _EDGE_SECRET):
+        assert secret not in loguru_caplog.text
 
 
 def test_check_principal_config_rejects_a_short_secret(monkeypatch: pytest.MonkeyPatch) -> None:

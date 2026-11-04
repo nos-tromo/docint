@@ -11,7 +11,9 @@ Whether those headers are believed at all is decided here as well. With
 ``X-Edge-Secret`` (the edge gateway adds it to every request it proxies)
 may assert an identity. Any other caller is treated as if it had sent no
 identity headers, so another container on a shared network cannot act as
-a user, let alone an admin.
+a user, let alone an admin. The dev fallbacks (``DOCINT_DEFAULT_IDENTITY``,
+``DOCINT_DEFAULT_GROUPS``) apply only while no edge secret is set; with one
+set they are ignored, and such a caller is unauthenticated.
 """
 
 import hmac
@@ -31,13 +33,19 @@ DISPLAY_NAME_HEADER = "X-Auth-Name"
 
 @dataclass(frozen=True)
 class Principal:
-    """The resolved calling identity: principal name, groups, and admin scope."""
+    """The resolved calling identity: principal name, groups, and admin scope.
+
+    ``via`` says how the name was established, in the audit trail's terms:
+    ``edge`` when a trusted identity header carried it, ``system`` when it is
+    the configured default identity (the dev fallback).
+    """
 
     name: str
     groups: frozenset[str] = field(default_factory=frozenset)
     is_admin: bool = False
     requested_owner: str | None = None
     display_name: str | None = None
+    via: str = "edge"
 
     @property
     def effective_owner(self) -> str:
@@ -60,7 +68,9 @@ def check_principal_config() -> PrincipalConfig:
     instead of failing every request. One warning is logged when the
     backend would believe identity headers from any caller that can reach
     it: no edge secret and no default identity, which is the production
-    shape before the gateway's secret is rolled out.
+    shape before the gateway's secret is rolled out. Another is logged when
+    an edge secret is set beside a default identity or default groups, which
+    are then ignored.
 
     Returns:
         PrincipalConfig: The loaded configuration.
@@ -73,6 +83,11 @@ def check_principal_config() -> PrincipalConfig:
         logger.warning(
             "Identity headers are trusted from any caller that can reach the backend. "
             "Set DOCINT_EDGE_SECRET (see edge-plane docs/identity-contract.md)."
+        )
+    if cfg.edge_secret is not None and (cfg.default_identity is not None or cfg.default_groups is not None):
+        logger.warning(
+            "DOCINT_DEFAULT_IDENTITY and DOCINT_DEFAULT_GROUPS are ignored while DOCINT_EDGE_SECRET is set: "
+            "a request without the gateway's identity is unauthenticated."
         )
     return cfg
 
@@ -130,12 +145,13 @@ def resolve_principal(request: Request) -> Principal:
     Resolution order (spec Section 8):
 
     1. If the configured trusted header is present, use its value as the
-       principal name. Otherwise, if a default identity is configured, use
-       it (the dev/pre-auth fallback, also the migration backfill owner).
-       Otherwise fail closed with HTTP 401.
+       principal name. Otherwise, if a default identity is configured and
+       no edge secret is set, use it (the dev/pre-auth fallback, also the
+       migration backfill owner). Otherwise fail closed with HTTP 401.
     2. Groups come from the configured groups header, parsed as a
        comma-separated list; if that header is absent, the configured
-       dev default groups apply. Missing or blank values yield no groups.
+       dev default groups apply, again only while no edge secret is set.
+       Missing or blank values yield no groups.
     3. The principal is an admin iff the configured admin group is among
        its groups.
     4. An optional ``owner`` query param is captured as ``requested_owner``
@@ -156,16 +172,20 @@ def resolve_principal(request: Request) -> Principal:
     trusted = cfg.edge_secret is None or _carries_edge_secret(request, cfg.edge_secret)
     if not trusted:
         _warn_ignored_identity_headers(request, cfg)
+    # The dev fallbacks hold only while no edge secret is enforced: with one, a
+    # request either proves it came through the gateway or is anonymous.
+    fallback_identity = cfg.default_identity if cfg.edge_secret is None else None
+    fallback_groups = cfg.default_groups if cfg.edge_secret is None else None
     header_value = request.headers.get(cfg.header_name) if trusted else None
     if header_value:
         name = header_value
-    elif cfg.default_identity:
-        name = cfg.default_identity
+    elif fallback_identity:
+        name = fallback_identity
     else:
         raise HTTPException(status_code=401, detail="Missing authenticated principal.")
     raw_groups = request.headers.get(cfg.groups_header) if trusted else None
     if raw_groups is None:
-        raw_groups = cfg.default_groups or ""
+        raw_groups = fallback_groups or ""
     groups = frozenset(g.strip() for g in raw_groups.split(",") if g.strip())
     requested_owner = (request.query_params.get("owner") or "").strip() or None
     return Principal(
@@ -174,4 +194,5 @@ def resolve_principal(request: Request) -> Principal:
         is_admin=cfg.admin_group in groups,
         requested_owner=requested_owner,
         display_name=request.headers.get(DISPLAY_NAME_HEADER) if trusted else None,
+        via="edge" if header_value else "system",
     )

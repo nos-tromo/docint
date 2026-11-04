@@ -68,6 +68,7 @@ from docint.core.topics.sample import (
 )
 from docint.core.topics.stopwords import corpus_stop_words, stop_words_digest
 from docint.core.topics.store import TopicLock, TopicRun, TopicStore
+from docint.utils.audit_meter import in_context
 from docint.utils.env_cfg import TopicsConfig
 from docint.utils.topics_client import FitParams, FitResult, TopicsBusy, max_fit_points, texts_limit
 
@@ -1037,8 +1038,12 @@ class TopicsService:
         progress("fitting", 0, 0)
         for attempt in range(1, BUSY_ATTEMPTS + 1):
             future: Future[FitResult] = Future()
+            # In the caller's context, so the fit counts against its audit meter.
             worker = threading.Thread(
-                target=_fill, args=(future, self._deps.fit, texts, vectors, params), name="topics-fit", daemon=True
+                target=in_context(_fill),
+                args=(future, self._deps.fit, texts, vectors, params),
+                name="topics-fit",
+                daemon=True,
             )
             worker.start()
             while not wait([future], timeout=HEARTBEAT_S).done:

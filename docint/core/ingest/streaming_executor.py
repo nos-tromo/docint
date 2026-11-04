@@ -34,6 +34,8 @@ from typing import Any, Generic, TypeVar
 
 from loguru import logger
 
+from docint.utils.audit_meter import in_context
+
 T = TypeVar("T")
 
 
@@ -89,8 +91,9 @@ class ProducerConsumer(Generic[T]):
 
     def __enter__(self) -> ProducerConsumer[T]:
         """Start the producer thread."""
+        # In the caller's context, so the producer's model calls count against its audit meter.
         self._thread = threading.Thread(
-            target=self._run,
+            target=in_context(self._run),
             name="docint-ingest-producer",
             daemon=True,
         )

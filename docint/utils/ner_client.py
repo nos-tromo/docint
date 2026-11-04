@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import NERClientConfig, load_ner_client_env
 
 DEFAULT_NER_LABELS: list[str] = [
@@ -91,6 +92,7 @@ def build_remote_ner_extractor(
         if not text.strip():
             return [], []
 
+        count_transfer("ner", "inference:ner", "gliner")
         try:
             response = client.post(
                 "/gliner",

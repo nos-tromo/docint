@@ -37,6 +37,7 @@ from loguru import logger
 
 from docint.core import collection_writes
 from docint.core.ingest.images_service import ImageAsset, ImageIngestionService, IngestContext
+from docint.utils.audit_meter import in_context
 from docint.utils.env_cfg import load_ingestion_env, load_logging_env, load_nextext_env
 from docint.utils.hashing import compute_file_hash
 from docint.utils.mimetype import get_mimetype
@@ -313,7 +314,8 @@ class PreprocessPool:
         A new task is a write window on its key's collection
         (:mod:`docint.core.collection_writes`), from before it is queued until it settles, however
         it settles. A key naming no collection opens none, and a key already in flight opens no
-        second.
+        second. The task runs in its submitter's context, so its model calls count against the
+        submitter's audit meter (:mod:`docint.utils.audit_meter`).
 
         Args:
             key (str): Dedupe key, from :func:`preprocess_key`.
@@ -333,7 +335,7 @@ class PreprocessPool:
             collection = collection_of_key(key)
             close = collection_writes.begin(collection) if collection else None
             try:
-                future: Future[T] = self._executor_for(key).submit(fn)
+                future: Future[T] = self._executor_for(key).submit(in_context(fn))
             except BaseException:
                 if close is not None:
                     close()

@@ -12,6 +12,9 @@ from typing import Literal, cast
 from dotenv import load_dotenv
 from loguru import logger
 
+from docint.utils.audit_event import ACTIONS as AUDIT_ACTIONS
+from docint.utils.audit_runtime import parse_required_actions, purpose_from_env
+
 load_dotenv()
 
 
@@ -788,6 +791,70 @@ def load_principal_env(
         default_groups=resolved_groups,
         edge_secret=edge_secret,
     )
+
+
+@dataclass(frozen=True)
+class AuditConfig:
+    """Data-protection audit trail settings (``docs/audit.md``).
+
+    Attributes:
+        output (str | None): ``AUDIT_OUTPUT``: unset or ``stdout`` for the
+            process's own stdout, ``container`` for the container's main
+            stdout under the container-wide lock. Validated where the stream
+            is opened, so a misspelt mode stops startup.
+        require_purpose (frozenset[str]): ``AUDIT_REQUIRE_PURPOSE``, parsed:
+            the audit actions that need a stated purpose. Empty by default.
+    """
+
+    output: str | None
+    require_purpose: frozenset[str]
+
+
+def load_audit_env() -> AuditConfig:
+    """Load the audit trail settings from the environment.
+
+    Returns:
+        AuditConfig: The settings.
+
+    Raises:
+        ValueError: If ``AUDIT_REQUIRE_PURPOSE`` names an unknown action, so a
+            misspelt action stops the service instead of switching a
+            requirement off.
+    """
+    return AuditConfig(
+        output=os.getenv("AUDIT_OUTPUT"),
+        require_purpose=parse_required_actions(os.getenv("AUDIT_REQUIRE_PURPOSE"), known=AUDIT_ACTIONS - {"lifecycle"}),
+    )
+
+
+@dataclass(frozen=True)
+class AuditCliConfig:
+    """Who runs a command-line tool, and the purpose they state, for its audit events.
+
+    Attributes:
+        user (str | None): ``AUDIT_CLI_USER``: the operator's host account,
+            which the make targets pass in. ``None`` when unset.
+        case_ref (str | None): ``AUDIT_CASE_REF``.
+        reason (str | None): ``AUDIT_REASON``.
+    """
+
+    user: str | None
+    case_ref: str | None
+    reason: str | None
+
+
+def load_audit_cli_env() -> AuditCliConfig:
+    """Load a command-line run's actor and purpose from the environment.
+
+    Returns:
+        AuditCliConfig: The run's user and stated purpose.
+
+    Raises:
+        PurposeError: If ``AUDIT_CASE_REF`` or ``AUDIT_REASON`` holds control
+            characters or is too long.
+    """
+    case_ref, reason = purpose_from_env(os.environ)
+    return AuditCliConfig(user=(os.getenv("AUDIT_CLI_USER") or "").strip() or None, case_ref=case_ref, reason=reason)
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ import secrets
 import threading
 import time
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
@@ -61,6 +61,20 @@ from docint.agents.turn.probe import probe_tools
 from docint.agents.turn.topics import TOPIC_CHECKS_CHARS, render_topic_checks
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
+from docint.core import audit, audit_ingest
+from docint.core.audit import Operation, audited
+from docint.core.audit_targets import (
+    chunk_target,
+    document_target,
+    entity_target,
+    filter_criteria,
+    graph_target,
+    report_items_target,
+    report_target,
+    session_target,
+    topic_target,
+    unit_target,
+)
 from docint.core.auth.principal import Principal, check_principal_config, resolve_principal
 from docint.core.errors import install_error_handlers
 from docint.core.extract.bundle import build_bundle, build_single
@@ -96,10 +110,14 @@ from docint.core.state.report_render import PdfEngineUnavailableError, html_to_p
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
 from docint.core.topics.store import RUN_ID_PATTERN
+from docint.utils.audit_event import AiCall, Target, sha256_text
+from docint.utils.audit_meter import TransferMeter, metering, staged_meter, take_staged
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
+    PrincipalConfig,
     RetentionConfig,
+    load_audit_env,
     load_corrective_retry_env,
     load_extract_env,
     load_frontend_env,
@@ -153,7 +171,9 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     The principal configuration is checked first, so a ``DOCINT_EDGE_SECRET``
     too short to accept stops startup rather than failing every request
     (``check_principal_config``, which also warns once when identity headers
-    would be trusted from any caller).
+    would be trusted from any caller). The data-protection audit chain starts
+    next, before anything that could record an event, and closes last
+    (``docs/audit.md``).
 
     The session store initializes (and migrates) eagerly here, and a failed
     migration is fatal: unlike Qdrant, an unwritable or stale sessions DB
@@ -190,18 +210,40 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     def _init_session_store() -> None:
         rag.ensure_session_manager().init_session_store_if_needed()
 
-    check_principal_config()
-    retention = load_retention_env()
-    await to_thread.run_sync(_init_session_store)
-    await to_thread.run_sync(rag.probe_qdrant)
-    await to_thread.run_sync(rag.probe_rerank_endpoint)
-    await to_thread.run_sync(rag.reconcile_quantization)
-    state = await to_thread.run_sync(partial(_record_retention_window, retention))
-    application.state.retention_task = _start_retention_sweeper(retention, state)
-    yield
-    await _stop_retention_sweeper(application.state.retention_task)
-    await job_manager.stop()
-    shutdown_preprocess_pool()
+    principal_cfg = check_principal_config()
+    auditor = _start_audit(principal_cfg)
+    audit.install(auditor)
+    try:
+        retention = load_retention_env()
+        await to_thread.run_sync(_init_session_store)
+        await to_thread.run_sync(rag.probe_qdrant)
+        await to_thread.run_sync(rag.probe_rerank_endpoint)
+        await to_thread.run_sync(rag.reconcile_quantization)
+        state = await to_thread.run_sync(partial(_record_retention_window, retention))
+        application.state.retention_task = _start_retention_sweeper(retention, state)
+        yield
+        await _stop_retention_sweeper(application.state.retention_task)
+        await job_manager.stop()
+        shutdown_preprocess_pool()
+    finally:
+        audit.uninstall(auditor)
+        auditor.close()
+
+
+def _start_audit(principal_cfg: PrincipalConfig) -> audit.Auditor:
+    """Start the process's audit chain and record the mode it runs in.
+
+    Runs in the lifespan, after uvicorn forked, never at import: a forked
+    worker would otherwise share the chain. An unknown action in
+    ``AUDIT_REQUIRE_PURPOSE`` or an unusable ``AUDIT_OUTPUT`` stops startup.
+
+    Args:
+        principal_cfg (PrincipalConfig): How far the backend trusts identity headers.
+
+    Returns:
+        audit.Auditor: The started chain.
+    """
+    return audit.open_auditor(load_audit_env(), mode=audit.identity_mode(principal_cfg))
 
 
 #: Seconds from startup to the first retention sweep, and between sweeps.
@@ -342,7 +384,27 @@ def _purge_if_still_expired(row: RetentionClock, months: int, window_set_at: dat
         return False
     if not is_expired(expires_at(current.last_activity_at, months, window_set_at=window_set_at), now):
         return False
-    _purge_collection(current.owner, current.logical, current.physical)
+    # The sweep is the system acting on its own; the owner whose data goes is
+    # named in the criteria, since no request carries them.
+    op = Operation(
+        audit.current(),
+        audit.SYSTEM_CONTEXT,
+        "delete",
+        "retention.purge",
+        container=current.logical,
+        criteria={
+            "owner": current.owner,
+            "window_months": months,
+            "last_activity_at": current.last_activity_at.isoformat() if current.last_activity_at else None,
+        },
+    )
+    target = Target(kind="collection", ids=[current.logical], count=1)
+    try:
+        counts = _purge_collection(current.owner, current.logical, current.physical)
+    except Exception:
+        op.fail(target=target)
+        raise
+    op.record(target=target, criteria=counts)
     return True
 
 
@@ -2147,6 +2209,7 @@ def get_whoami(
 
 @app.get("/collections/list", response_model=list[str] | AdminCollectionsOut, tags=["Collections"])
 def collections_list(
+    request: Request,
     all: bool = False,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> list[str] | AdminCollectionsOut:
@@ -2160,7 +2223,11 @@ def collections_list(
     for non-admins the flag is silently ignored (plain list) so collection
     existence never leaks.
 
+    The caller's own names are not audited; an admin's listing of every other
+    owner's collections is, as an ``admin`` event.
+
     Args:
+        request (Request): The incoming request, for the audit trail.
         all (bool): When true and the caller is an admin, also return every
             other owner's collections grouped by owner. Ignored otherwise.
         principal (Principal): The resolved request principal.
@@ -2174,29 +2241,37 @@ def collections_list(
     Raises:
         HTTPException: If an error occurs while listing collections.
     """
+    everyone = all and principal.is_admin
+    op = audit.begin(request, principal, "admin", "collections.list_all") if everyone else None
+    others: dict[str, list[str]] = {}
     try:
         mgr = rag.ensure_collection_owner_manager()
         mine = mgr.list_for(principal.name)
-        if not (all and principal.is_admin):
-            return mine
-        others: dict[str, list[str]] = {}
-        for owner, logical in mgr.list_all():
-            if owner is None or owner == principal.name:
-                # None-owner legacy rows are unreachable in production
-                # (no default identity => 401 before any resolve).
-                continue
-            others.setdefault(owner, []).append(logical)
-        return AdminCollectionsOut(
-            mine=mine,
-            others=[AdminOwnerCollections(owner=o, collections=c) for o, c in others.items()],
-        )
+        if op is not None:
+            for owner, logical in mgr.list_all():
+                if owner is None or owner == principal.name:
+                    # None-owner legacy rows are unreachable in production
+                    # (no default identity => 401 before any resolve).
+                    continue
+                others.setdefault(owner, []).append(logical)
     except Exception as e:
         logger.opt(exception=e).error("Error listing collections")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    if op is None:
+        return mine
+    op.record(
+        target=Target(kind="collection", count=sum(len(names) for names in others.values())),
+        criteria={"owners": len(others)},
+    )
+    return AdminCollectionsOut(
+        mine=mine,
+        others=[AdminOwnerCollections(owner=o, collections=c) for o, c in others.items()],
+    )
 
 
 @app.get("/collections/retention", response_model=CollectionsRetentionOut, tags=["Collections"])
 def collections_retention(
+    request: Request,
     all: bool = False,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> CollectionsRetentionOut:
@@ -2209,7 +2284,11 @@ def collections_retention(
     ignored. Sorted soonest deadline first; collections that never expire
     come last.
 
+    Like ``/collections/list``, only an admin's listing across owners is
+    audited, as an ``admin`` event.
+
     Args:
+        request (Request): The incoming request, for the audit trail.
         all (bool): When true and the caller is an admin, include every
             other owner's collections. Ignored otherwise.
         principal (Principal): The resolved request principal.
@@ -2223,6 +2302,7 @@ def collections_retention(
     """
     retention = load_retention_env()
     everyone = all and principal.is_admin
+    op = audit.begin(request, principal, "admin", "collections.retention_all") if everyone else None
     now = datetime.now(UTC)
     try:
         mgr = rag.ensure_collection_owner_manager()
@@ -2249,6 +2329,11 @@ def collections_retention(
             )
         )
     entries.sort(key=lambda e: (e.expires_at is None, e.expires_at or now, e.name, e.owner or ""))
+    if op is not None:
+        op.record(
+            target=Target(kind="collection", count=len(entries)),
+            criteria={"owners": len({entry.owner for entry in entries if entry.owner is not None})},
+        )
     return CollectionsRetentionOut(window=retention.window, collections=entries)
 
 
@@ -2284,7 +2369,11 @@ def collections_select(
 
 
 @app.delete("/collections/{name}", tags=["Collections"])
-def collections_delete(name: str, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
+def collections_delete(
+    name: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("delete", "collection.delete")),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
     """Delete a collection resolved under the caller's effective owner.
 
     Deleting a collection the caller's effective owner does not own (or one
@@ -2297,6 +2386,7 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
     Args:
         name (str): The user-visible collection name to delete.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``delete`` operation.
 
     Returns:
         dict[str, bool]: A dictionary indicating success.
@@ -2307,16 +2397,17 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
     """
     physical = _require_owned_collection(name, principal)
     try:
-        _purge_collection(principal.effective_owner, name.strip(), physical)
-        return {"ok": True}
+        counts = _purge_collection(principal.effective_owner, name.strip(), physical)
     except HTTPException:
         raise
     except Exception as e:
         logger.opt(exception=e).error("Error deleting collection")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(target=Target(kind="collection", ids=[name.strip()], count=1), criteria=counts)
+    return {"ok": True}
 
 
-def _purge_collection(owner: str | None, logical: str, physical: str) -> None:
+def _purge_collection(owner: str | None, logical: str, physical: str) -> dict[str, int]:
     """Delete a collection and everything connected to it.
 
     The one cascade a manual delete and the retention sweep share, so the two
@@ -2330,6 +2421,10 @@ def _purge_collection(owner: str | None, logical: str, physical: str) -> None:
         logical (str): The user-visible collection name (reports key on it).
         physical (str): The Qdrant collection name (sessions key on it).
 
+    Returns:
+        dict[str, int]: How many chat sessions and reports went with it, for
+            the audit event.
+
     Raises:
         HTTPException: 409 when the collection is already being deleted.
     """
@@ -2339,7 +2434,11 @@ def _purge_collection(owner: str | None, logical: str, physical: str) -> None:
         report_ids = rag.ensure_report_manager().delete_reports_for_collection(owner, logical)
         _discard_report_pdfs(report_ids)
         rag.ensure_collection_owner_manager().delete(owner, logical)
+    # The staged meter counted upload-time model calls for a run that will
+    # never happen now.
+    take_staged(physical)
     logger.info("Deleted collection '{}' with {} chat session(s) and {} report(s).", logical, sessions, len(report_ids))
+    return {"sessions_deleted": int(sessions or 0), "reports_deleted": len(report_ids)}
 
 
 @app.put("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
@@ -2348,6 +2447,7 @@ def set_session_scope(
     payload: ScopeIn,
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "session.scope.set")),  # noqa: B008 — FastAPI dependency marker
 ) -> ScopeOut:
     """Restrict a session's answers to a hand-picked set of chunks.
 
@@ -2361,6 +2461,7 @@ def set_session_scope(
         payload (ScopeIn): The chunk ids to answer from.
         collection (str | None): Caller's logical collection, owner-gated.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         ScopeOut: The stored scope and its measured cost.
@@ -2381,6 +2482,10 @@ def set_session_scope(
             )
         if not stored:
             raise HTTPException(status_code=404, detail="Not found.")
+        op.record(
+            target=Target(kind="chunk", ids=list(payload.chunk_ids), count=len(payload.chunk_ids)),
+            criteria={"session_id": session_id},
+        )
         return ScopeOut(
             chunk_ids=list(payload.chunk_ids),
             est_tokens=int(measured["est_tokens"]),
@@ -2398,12 +2503,14 @@ def set_session_scope(
 def clear_session_scope(
     session_id: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "session.scope.clear")),  # noqa: B008 — FastAPI dependency marker
 ) -> ScopeOut:
     """Return a session to normal retrieval.
 
     Args:
         session_id (str): The session to unscope.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         ScopeOut: An empty scope.
@@ -2413,6 +2520,7 @@ def clear_session_scope(
     """
     if not rag.ensure_session_manager().clear_scope(session_id, principal.effective_owner):
         raise HTTPException(status_code=404, detail="Not found.")
+    op.record(target=Target(kind="session", ids=[session_id], count=1))
     return ScopeOut()
 
 
@@ -2460,6 +2568,7 @@ def get_session_topic(
 def clear_session_topic(
     session_id: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "session.topic.clear")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, bool]:
     """Remove the topic a session was opened with.
 
@@ -2468,6 +2577,7 @@ def clear_session_topic(
     Args:
         session_id (str): The session to update.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         dict[str, bool]: ``{"ok": True}``.
@@ -2477,6 +2587,7 @@ def clear_session_topic(
     """
     if not rag.ensure_session_manager().clear_topic_focus(session_id, principal.effective_owner):
         raise HTTPException(status_code=404, detail="Not found.")
+    op.record(target=Target(kind="session", ids=[session_id], count=1))
     return {"ok": True}
 
 
@@ -2492,6 +2603,7 @@ def get_search_chunk(
     id: str,
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "search.chunk")),  # noqa: B008 — FastAPI dependency marker
 ) -> ChunkOut:
     """Return one chunk's full text.
 
@@ -2502,6 +2614,7 @@ def get_search_chunk(
         id (str): Qdrant point id from a search hit.
         collection (str | None): Caller's logical collection, owner-gated.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         ChunkOut: The chunk id and its full text.
@@ -2521,6 +2634,7 @@ def get_search_chunk(
         raise HTTPException(status_code=500, detail="Request failed.") from e
     if text is None:
         raise HTTPException(status_code=404, detail="Not found.")
+    op.record(target=Target(kind="chunk", ids=[id], count=1))
     return ChunkOut(id=id, text=text)
 
 
@@ -2528,6 +2642,7 @@ def get_search_chunk(
 def search_collection(
     payload: SearchIn,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "search.fulltext")),  # noqa: B008 — FastAPI dependency marker
 ) -> SearchOut:
     """Return chunks containing every keyword in the query.
 
@@ -2544,6 +2659,8 @@ def search_collection(
     Args:
         payload (SearchIn): Query, optional collection, field, filters and paging.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the parsed keywords
+            are its search criteria.
 
     Returns:
         SearchOut: Hits, exact total, next cursor and index state.
@@ -2555,10 +2672,21 @@ def search_collection(
     # Validate at the boundary rather than deep in the RAG layer: an unusable
     # query should be refused before a collection is even resolved. An empty
     # keyword list would otherwise reach the search as "match everything".
-    if not parse_keywords(payload.question):
+    keywords = parse_keywords(payload.question)
+    if not keywords:
         raise HTTPException(status_code=422, detail="Invalid request.")
     if payload.field not in SEARCH_FIELDS:
         raise HTTPException(status_code=422, detail="Invalid request.")
+    op.container = (payload.collection or "").strip() or None
+    op.criteria.update(
+        {
+            "keywords": keywords,
+            "field": payload.field,
+            "metadata_filters": filter_criteria(payload.metadata_filters),
+            "limit": payload.limit,
+            "page": bool(payload.cursor),
+        }
+    )
 
     try:
         with _scoped_collection(payload.collection, principal):
@@ -2569,7 +2697,7 @@ def search_collection(
                 limit=payload.limit,
                 cursor=payload.cursor,
             )
-        return SearchOut(**data)
+        result = SearchOut(**data)
     except HTTPException:
         raise
     except UnknownSearchFieldError as e:
@@ -2577,6 +2705,8 @@ def search_collection(
     except Exception as e:
         logger.opt(exception=e).error("Error running collection search")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(target=chunk_target(result.hits))
+    return result
 
 
 #: Hard cap on chunk-level search-export rows. `export_search_csv` sorts the
@@ -2600,6 +2730,7 @@ def export_search_csv(
     session_id: str | None = None,
     marked_ids: str = "",
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.search_csv")),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream every matching chunk as CSV.
 
@@ -2641,6 +2772,8 @@ def export_search_csv(
         marked_ids (str): Comma-separated Qdrant point ids to mark, covering a
             selection made before a session exists.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``disclose`` operation, recorded once the
+            rows are gathered and before the file streams.
 
     Returns:
         StreamingResponse: A ``text/csv`` attachment, one row per matching
@@ -2778,6 +2911,17 @@ def export_search_csv(
         raise HTTPException(status_code=500, detail="Request failed.") from e
 
     chunks.sort(key=lambda c: (str(c.get("filename") or ""), c.get("page") or 0, c.get("row") or 0))
+    op.record(
+        target=chunk_target(chunks),
+        criteria={
+            "keywords": keywords,
+            "field": field,
+            "metadata_filters": raw_filters,
+            "session_id": session_id,
+            "marked": len(marked),
+        },
+        recipient="download:csv",
+    )
 
     def row_iter() -> Iterator[dict[str, Any]]:
         for chunk in chunks:
@@ -2794,14 +2938,89 @@ def export_search_csv(
     )
 
 
+def _chat_criteria(payload: QueryIn) -> dict[str, object]:
+    """Return a chat turn's audit criteria: its parameters, never its text.
+
+    Args:
+        payload (QueryIn): The turn's request.
+
+    Returns:
+        dict[str, object]: The question by hash, plus the turn's settings.
+    """
+    return {
+        "question_sha256": sha256_text(payload.question),
+        "session_id": payload.session_id,
+        "retrieval_mode": payload.retrieval_mode,
+        "retrieval_target": payload.retrieval_target,
+        "metadata_filters": filter_criteria(payload.metadata_filters),
+        "scope_chunks": len(payload.scope_chunk_ids) if payload.scope_chunk_ids is not None else None,
+        "topic_id": payload.topic_focus.topic_id if payload.topic_focus is not None else None,
+        "reasoning": payload.reasoning,
+    }
+
+
+def _chat_model_alias() -> str:
+    """Return the chat model a turn asks for, for its ``ai_call`` event.
+
+    Returns:
+        str: The configured text model, ``unknown`` when none is.
+    """
+    return str(getattr(rag, "text_model_id", None) or "unknown")
+
+
+def _record_chat_turn(
+    op: Operation,
+    *,
+    answer: str,
+    sources: Sequence[Any],
+    session_id: str | None,
+    answer_operation: str = "chat.answer",
+) -> None:
+    """Record a finished chat turn: what it showed, then the model call that answered it.
+
+    The ``query`` event names the sources the answer came with; its
+    ``ai_call`` child is the answer's transfer record, with the hash of the
+    answer and the same sources as the model's evidence. The turn's other
+    model calls (query embedding, rerank, validation) went to the same
+    inference service with the same question and passages.
+
+    Args:
+        op (Operation): The turn's open ``query`` operation.
+        answer (str): The answer text, hashed and never stored.
+        sources (Sequence[Any]): The sources returned with it.
+        session_id (str | None): The session the turn belongs to.
+        answer_operation (str): The ``ai_call`` event's operation name.
+    """
+    target = chunk_target(sources)
+    op.record(target=target, criteria={"session_id": session_id})
+    if answer:
+        op.child(
+            "ai_call",
+            answer_operation,
+            target=target,
+            recipient="inference:chat",
+            ai=AiCall(
+                model_alias=_chat_model_alias(),
+                output_sha256=sha256_text(answer),
+                sources=list(target.ids),
+            ),
+        )
+
+
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn, request: Request) -> dict[str, Any]:
+def query(
+    payload: QueryIn,
+    request: Request,
+    op: Operation = Depends(audited("query", "chat.query", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Handle a query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
         request (Request): The incoming request used to resolve the calling principal
             for session-backed chats.
+        op (Operation): The audited ``query`` operation; the answer's model
+            call is its ``ai_call`` child.
 
     Returns:
         QueryOut: The query response containing the answer, sources, and session ID.
@@ -2809,6 +3028,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
     Raises:
         HTTPException: If an error occurs while processing the query.
     """
+    op.container = (payload.collection or "").strip() or None
+    op.criteria.update(_chat_criteria(payload))
     try:
         principal = resolve_principal(request)
         physical = _resolve_request_collection(payload.collection, principal)
@@ -2958,6 +3179,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
             summary_diagnostics=summary_diagnostics_query,
             retrieval_query=retrieval_query_value,
         )
+        _record_chat_turn(op, answer=answer, sources=sources, session_id=session_id)
         return {
             "answer": answer,
             "sources": sources,
@@ -2990,13 +3212,23 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
 
 
 @app.post("/stream_query", tags=["Query"])
-async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
+async def stream_query(
+    payload: QueryIn,
+    request: Request,
+    op: Operation = Depends(audited("query", "chat.query", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
     """Handle a streaming query request.
+
+    The turn's audit events are written when the answer is complete, before
+    the final frame that carries its sources; a failed write ends the stream
+    with the generic error frame instead. A stream that breaks off — an
+    error, a client gone — is recorded as failed.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
         request (Request): The incoming request used to resolve the calling principal
             for session-backed chats.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during the query.
@@ -3004,6 +3236,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
     Raises:
         HTTPException: If an error occurs while processing the streaming query.
     """
+    op.container = (payload.collection or "").strip() or None
+    op.criteria.update(_chat_criteria(payload))
     principal = resolve_principal(request)
     physical = _resolve_request_collection(payload.collection, principal)
 
@@ -3285,6 +3519,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # absent turn_idx: the retry re-enters ``_make_chat_stream``, which
             # only exists on that branch.
             retry_query: str | None = None
+            final_answer, final_sources = answer, sources
             first_trail = payload_out.get("agent") if isinstance(payload_out.get("agent"), dict) else None
             if (
                 payload.retrieval_mode != "stateless"
@@ -3362,6 +3597,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     payload_out.update(validation)
                     payload_out["retried"] = True
                     payload_out["retry_query"] = retry_query
+                    final_answer, final_sources = retry_final, retry_sources
 
             stream_session_id = payload_out.get("session_id")
             if (
@@ -3392,7 +3628,18 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 # reached the retrieval layer (an empty collection, say) still
                 # answered under the requested target.
                 payload_out.setdefault("retrieval_target", payload.retrieval_target)
+                # Before the frame that carries the sources: a write that
+                # fails lands in the generic handler below instead.
+                _record_chat_turn(
+                    op,
+                    answer=final_answer,
+                    sources=final_sources,
+                    session_id=cast("str | None", payload_out.get("session_id") or payload.session_id),
+                )
                 yield f"data: {json.dumps(payload_out)}\n\n"
+            else:
+                # No final payload: the client went away, or the turn produced nothing.
+                audit.settle_quietly(op, criteria={"incomplete": True})
         except EmbeddingEndpointError:
             # Retrieval could not embed the query, so no generation was ever
             # attempted. Reported apart from `generation_failed`, which reads
@@ -3400,15 +3647,18 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             # exception's own message names the endpoint and the env var, and
             # stays in the logs where an internal address belongs.
             logger.exception("Dense embedding endpoint unusable during SSE generation")
+            audit.settle_quietly(op)
             yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'embedding_unavailable'})}\n\n"
         except NoSlot as exc:
             # A started agent turn found no slot for its answer; as for any failure, the action is "try again".
             logger.warning(
                 "A chat turn found no model slot after it began ({}); reported as generation_failed", type(exc).__name__
             )
+            audit.settle_quietly(op)
             yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
         except ValueError as exc:
             msg = str(exc)
+            audit.settle_quietly(op)
             if "context window" in msg.lower() or "context size" in msg.lower():
                 logger.warning("Context window overflow during SSE generation ({}): {}", type(exc).__name__, msg)
                 yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'context_overflow'})}\n\n"
@@ -3417,6 +3667,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
         except Exception as exc:
             logger.exception("Stream error during SSE generation ({})", type(exc).__name__)
+            audit.settle_quietly(op)
             yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
@@ -3430,11 +3681,16 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         Yields:
             str: SSE event lines from the scoped stream body.
         """
-        with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
-            if getattr(rag, "index", None) is None:
-                await to_thread.run_sync(rag.create_index)
-            async for chunk in _stream_body():
-                yield chunk
+        try:
+            with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
+                if getattr(rag, "index", None) is None:
+                    await to_thread.run_sync(rag.create_index)
+                async for chunk in _stream_body():
+                    yield chunk
+        finally:
+            # A stream cancelled mid-answer (the client went away) never
+            # reaches either outcome above.
+            audit.settle_quietly(op, criteria={"incomplete": True})
 
     return StreamingResponse(
         event_generator(),
@@ -3452,6 +3708,7 @@ def get_collection_ner(
     refresh: bool = False,
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "ner.sources_all")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """Get all NER data (entities and relations) for the caller's collection.
 
@@ -3466,6 +3723,7 @@ def get_collection_ner(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of NER sources.
@@ -3476,12 +3734,13 @@ def get_collection_ner(
     try:
         with _scoped_collection(collection, principal):
             sources = rag.get_collection_ner(refresh=refresh)
-            return {"sources": sources}
     except HTTPException:
         raise
     except Exception as e:
         logger.opt(exception=e).error("Error fetching collection NER")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(target=chunk_target(sources), criteria={"refresh": refresh})
+    return {"sources": sources}
 
 
 @app.get("/collections/hate-speech", tags=["Query"])
@@ -3492,6 +3751,7 @@ def get_collection_hate_speech(
     min_confidence: str | None = None,
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "hate_speech.list")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return flagged hate-speech chunks for the caller's collection.
 
@@ -3512,22 +3772,29 @@ def get_collection_hate_speech(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         dict[str, Any]: Either the legacy ``{"results": ...}`` payload or a
         paginated ``{"items": ..., "next_cursor": ...}`` envelope.
     """
     paginated = cursor is not None or limit > 0 or category is not None or min_confidence is not None
+    op.criteria.update(
+        {"category": category, "min_confidence": min_confidence, "limit": limit, "page": cursor is not None}
+    )
     try:
         with _scoped_collection(collection, principal):
             if not paginated:
-                return {"results": rag.get_collection_hate_speech()}
+                results = rag.get_collection_hate_speech()
+                op.record(target=chunk_target(results))
+                return {"results": results}
             items, next_cursor = rag.iter_hate_speech(
                 cursor=cursor,
                 limit=limit or 50,
                 category=category,
                 min_confidence=min_confidence,
             )
+            op.record(target=chunk_target(items))
             return {"items": items, "next_cursor": next_cursor}
     except HTTPException:
         raise
@@ -3548,6 +3815,7 @@ def get_collection_ner_sources(
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "ner.sources")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return one page of NER-bearing source rows for the caller's collection.
 
@@ -3570,6 +3838,8 @@ def get_collection_ner_sources(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the entity filter is
+            its search criteria.
 
     Returns:
         dict[str, Any]: ``{"items": [...], "next_cursor": ...}``.
@@ -3583,6 +3853,17 @@ def get_collection_ner_sources(
                 entity_text=entity_text,
                 entity_type=entity_type,
                 entity_merge_mode=entity_merge_mode,
+            )
+            op.record(
+                target=chunk_target(items),
+                criteria={
+                    "entity_key": entity_key,
+                    "entity_text": entity_text,
+                    "entity_type": entity_type,
+                    "entity_merge_mode": entity_merge_mode,
+                    "limit": limit,
+                    "page": cursor is not None,
+                },
             )
             return {"items": items, "next_cursor": next_cursor}
     except HTTPException:
@@ -3636,6 +3917,7 @@ def get_collection_ner_stats(
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "ner.stats")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Get collection-wide NER statistics for the caller's collection.
 
@@ -3649,6 +3931,8 @@ def get_collection_ner_stats(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the ranked entities
+            are its target.
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
@@ -3658,7 +3942,7 @@ def get_collection_ner_stats(
     """
     try:
         with _scoped_collection(collection, principal):
-            return rag.get_collection_ner_stats(
+            stats = rag.get_collection_ner_stats(
                 top_k=top_k,
                 min_mentions=min_mentions,
                 entity_type=entity_type,
@@ -3670,6 +3954,17 @@ def get_collection_ner_stats(
     except Exception as e:
         logger.opt(exception=e).error("Error fetching collection NER stats")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(
+        target=entity_target(list(stats.get("top_entities") or [])),
+        criteria={
+            "top_k": top_k,
+            "min_mentions": min_mentions,
+            "entity_type": entity_type,
+            "include_relations": include_relations,
+            "entity_merge_mode": entity_merge_mode,
+        },
+    )
+    return stats
 
 
 @app.get("/collections/ner/search", response_model=NERSearchOut, tags=["Query"])
@@ -3680,6 +3975,7 @@ def search_collection_ner_entities(
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "ner.search")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """Search entities across the caller's collection.
 
@@ -3692,6 +3988,7 @@ def search_collection_ner_entities(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; ``q`` is its search criterion.
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
@@ -3701,19 +3998,22 @@ def search_collection_ner_entities(
     """
     try:
         with _scoped_collection(collection, principal):
-            return {
-                "results": rag.search_collection_ner_entities(
-                    q=q,
-                    entity_type=entity_type,
-                    limit=limit,
-                    entity_merge_mode=entity_merge_mode,
-                )
-            }
+            results = rag.search_collection_ner_entities(
+                q=q,
+                entity_type=entity_type,
+                limit=limit,
+                entity_merge_mode=entity_merge_mode,
+            )
     except HTTPException:
         raise
     except Exception as e:
         logger.opt(exception=e).error("Error searching collection entities")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(
+        target=entity_target(results),
+        criteria={"q": q, "entity_type": entity_type, "limit": limit, "entity_merge_mode": entity_merge_mode},
+    )
+    return {"results": results}
 
 
 @app.get("/collections/ner/graph", response_model=NERGraphOut, tags=["Query"])
@@ -3723,6 +4023,7 @@ def get_collection_ner_graph(
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "ner.graph")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return a derived entity graph for the caller's collection.
 
@@ -3744,6 +4045,7 @@ def get_collection_ner_graph(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the graph's nodes are its target.
 
     Returns:
         dict[str, Any]: Graph payload containing ``nodes``, ``edges`` and ``meta``.
@@ -3756,7 +4058,7 @@ def get_collection_ner_graph(
     effective_top_k = min(max(1, requested), cfg.graph_max_top_k)
     try:
         with _scoped_collection(collection, principal):
-            return rag.get_collection_ner_graph(
+            graph = rag.get_collection_ner_graph(
                 top_k_nodes=effective_top_k,
                 min_edge_weight=min_edge_weight,
                 entity_merge_mode=entity_merge_mode,
@@ -3766,12 +4068,49 @@ def get_collection_ner_graph(
     except Exception as e:
         logger.opt(exception=e).error("Error building collection NER graph")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(
+        target=graph_target(list(graph.get("nodes") or [])),
+        criteria={
+            "top_k_nodes": effective_top_k,
+            "min_edge_weight": min_edge_weight,
+            "entity_merge_mode": entity_merge_mode,
+        },
+    )
+    return graph
+
+
+def _run_resolution(op: Operation) -> Any:
+    """Resolve the bound collection's entities as one audited ``combine``.
+
+    The surfaces' embeddings and the tie-break prompts are the operation's
+    transfers, written beneath it.
+
+    Args:
+        op (Operation): The open ``combine`` operation.
+
+    Returns:
+        Any: The resolution summary.
+    """
+    with audit.metered(op) as meter:
+        summary = rag.resolve_entities()
+    op.record(
+        target=Target(kind="entity", count=summary.entities_touched),
+        criteria={
+            "processed": summary.processed,
+            "minted": summary.minted,
+            "attached": summary.attached,
+            "skipped": summary.skipped,
+        },
+    )
+    op.transfers(meter)
+    return summary
 
 
 @app.post("/collections/entities/resolve", tags=["Query"])
 def resolve_collection_entities(
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("combine", "entities.resolve", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, int]:
     """Resolve the caller's collection's entities into durable canonicals.
 
@@ -3785,6 +4124,7 @@ def resolve_collection_entities(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``combine`` operation.
 
     Returns:
         dict[str, int]: Resolution summary counts (``processed``, ``minted``,
@@ -3795,7 +4135,7 @@ def resolve_collection_entities(
     """
     try:
         with _scoped_collection(collection, principal):
-            summary = rag.resolve_entities()
+            summary = _run_resolution(op)
             return {
                 "processed": summary.processed,
                 "minted": summary.minted,
@@ -3816,6 +4156,7 @@ def get_collection_documents(
     limit: int = Query(default=0, ge=0, le=500),
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "documents.list")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return documents in the caller's collection.
 
@@ -3833,17 +4174,22 @@ def get_collection_documents(
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         dict[str, Any]: Either the legacy ``{"documents": ...}`` payload or a
         paginated ``{"items": ..., "next_cursor": ...}`` envelope.
     """
     paginated = cursor is not None or limit > 0
+    op.criteria.update({"limit": limit, "page": cursor is not None})
     try:
         with _scoped_collection(collection, principal):
             if not paginated:
-                return {"documents": rag.list_documents()}
+                documents = rag.list_documents()
+                op.record(target=document_target(documents))
+                return {"documents": documents}
             items, next_cursor = rag.iter_documents(cursor=cursor, limit=limit or 50)
+            op.record(target=document_target(items))
             return {"items": items, "next_cursor": next_cursor}
     except HTTPException:
         raise
@@ -4193,7 +4539,11 @@ def _capture_collection_overview(report_id: int, collection: str, principal: Pri
 
 
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
-def export_documents_csv(name: str, principal: Principal = Depends(resolve_principal)) -> StreamingResponse:  # noqa: B008 — FastAPI dependency marker
+def export_documents_csv(
+    name: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.documents_csv")),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
     """Stream the documents table as CSV.
 
     The endpoint reads from :meth:`docint.core.rag.RAG.list_documents` (cached
@@ -4210,6 +4560,7 @@ def export_documents_csv(name: str, principal: Principal = Depends(resolve_princ
 
     with _scoped_collection(name, principal):
         docs = rag.list_documents()
+    op.record(target=document_target(docs), recipient="download:csv")
 
     def row_iter() -> Iterator[dict[str, Any]]:
         for doc in docs:
@@ -4230,6 +4581,7 @@ def export_entities_csv(
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.entities_csv")),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream the top entities by mention frequency as CSV.
 
@@ -4252,6 +4604,16 @@ def export_entities_csv(
             entity_merge_mode=entity_merge_mode,
         )
     entities = list(stats.get("top_entities") or [])
+    op.record(
+        target=entity_target(entities),
+        criteria={
+            "top_k": top_k,
+            "min_mentions": min_mentions,
+            "entity_type": entity_type,
+            "entity_merge_mode": entity_merge_mode,
+        },
+        recipient="download:csv",
+    )
 
     def row_iter() -> Iterator[dict[str, Any]]:
         for idx, entity in enumerate(entities, start=1):
@@ -4272,6 +4634,7 @@ def export_ner_sources_csv(
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.ner_sources_csv")),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream entity findings (per-source rows) as CSV.
 
@@ -4297,6 +4660,7 @@ def export_ner_sources_csv(
     entity_label = f"{entity_text} [{label_type}]" if entity_text else ""
 
     rows: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
     with _scoped_collection(name, principal):
         cursor: str | None = None
         while True:
@@ -4308,9 +4672,15 @@ def export_ner_sources_csv(
                 entity_merge_mode=entity_merge_mode,
             )
             for source in page:
+                sources.append(source)
                 rows.append(ner_source_row(source, entity_label=entity_label))
             if cursor is None:
                 break
+    op.record(
+        target=chunk_target(sources),
+        criteria={"entity_text": entity_text, "entity_type": entity_type, "entity_merge_mode": entity_merge_mode},
+        recipient="download:csv",
+    )
 
     return StreamingResponse(
         stream_csv(iter(rows), NER_SOURCE_COLUMNS),
@@ -4325,6 +4695,7 @@ def export_hate_speech_csv(
     category: str | None = None,
     min_confidence: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.hate_speech_csv")),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream the hate-speech findings table as CSV.
 
@@ -4343,6 +4714,11 @@ def export_hate_speech_csv(
             category=category,
             min_confidence=min_confidence,
         )
+    op.record(
+        target=chunk_target(findings),
+        criteria={"category": category, "min_confidence": min_confidence},
+        recipient="download:csv",
+    )
 
     def row_iter() -> Iterator[dict[str, Any]]:
         for finding in findings:
@@ -4359,6 +4735,7 @@ def export_hate_speech_csv(
 def list_sessions(
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "sessions.list")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """List the calling principal's chat sessions, optionally scoped to a collection.
 
@@ -4373,9 +4750,12 @@ def list_sessions(
     sidebar. When ``collection`` is omitted, every session the caller owns
     is returned (backward compatible).
 
+    Audited because a session's title is drawn from its first question.
+
     Args:
         collection (str | None): Optional logical collection name to scope to.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         dict[str, list[dict[str, Any]]]: A dictionary containing the list of sessions.
@@ -4385,17 +4765,18 @@ def list_sessions(
     """
     try:
         sm = rag.ensure_session_manager()
+        sessions: list[dict[str, Any]] = []
         if collection is not None:
             physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, collection)
-            if physical is None:
-                return {"sessions": []}
-            sessions = sm.list_sessions(principal.effective_owner, collection=physical)
+            if physical is not None:
+                sessions = sm.list_sessions(principal.effective_owner, collection=physical)
         else:
             sessions = sm.list_sessions(principal.effective_owner)
-        return {"sessions": sessions}
     except Exception as e:
         logger.opt(exception=e).error("Error listing sessions")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(target=session_target(sessions))
+    return {"sessions": sessions}
 
 
 @app.get(
@@ -4407,6 +4788,7 @@ def get_session_history(
     session_id: str,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "session.history")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """Get history for a session owned by the calling principal, from its own collection.
 
@@ -4421,6 +4803,8 @@ def get_session_history(
         session_id (str): The ID of the session.
         collection (str): The caller's active logical collection.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the turns' cited
+            sources are its target.
 
     Returns:
         dict[str, list[dict[str, Any]]]: A dictionary containing the session messages.
@@ -4445,13 +4829,15 @@ def get_session_history(
     # which collapses to 404 here; acceptable for Plan 1 (see Plan 2).
     if not messages:
         raise HTTPException(status_code=404, detail="Session not found.")
+    cited = [source for message in messages for source in (message.get("sources") or [])]
+    op.record(target=chunk_target(cited), criteria={"session_id": session_id, "messages": len(messages)})
     return {"messages": messages}
 
 
-def _collect_session_source_files(session_id: str, principal: str) -> list[tuple[str, Path]]:
+def _collect_session_source_files(session_id: str, principal: str) -> list[tuple[str, tuple[str, Path]]]:
     """Return the unique source files referenced by a session's citations.
 
-    Each entry is ``(filename_in_zip, path_on_disk)``. Files that can't be
+    Each entry is ``(file_hash, (filename_in_zip, path_on_disk))``. Files that can't be
     resolved on disk are skipped — the ZIP is best-effort and surfaces only
     files the backend can still serve. Collection is resolved from each
     source's ``collection`` field when present and falls back to the session's
@@ -4464,7 +4850,8 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
             another principal yield an empty result (404 at the endpoint).
 
     Returns:
-        list[tuple[str, Path]]: Pairs ready for :meth:`zipfile.ZipFile.write`.
+        list[tuple[str, tuple[str, Path]]]: Each file's hash with the pair
+            :meth:`zipfile.ZipFile.write` takes.
     """
     sm = rag.ensure_session_manager()
     messages = sm.get_session_history(session_id, principal)
@@ -4499,11 +4886,15 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
                 counter += 1
             used_arcnames.add(arcname)
             selected[str(file_hash)] = (arcname, path)
-    return list(selected.values())
+    return list(selected.items())
 
 
 @app.get("/sessions/{session_id}/sources.zip", tags=["Sessions"])
-def export_session_sources_zip(session_id: str, principal: Principal = Depends(resolve_principal)) -> StreamingResponse:  # noqa: B008 — FastAPI dependency marker
+def export_session_sources_zip(
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.session_sources")),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
     """Stream a ZIP bundle of every source file cited in a session.
 
     Resolves each citation's ``file_hash`` to an on-disk file using the same
@@ -4516,6 +4907,8 @@ def export_session_sources_zip(session_id: str, principal: Principal = Depends(r
     Args:
         session_id (str): The session ID to package.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``disclose`` operation; the files written
+            into the archive, by hash, are its target.
 
     Returns:
         StreamingResponse: ``application/zip`` payload with an
@@ -4535,13 +4928,20 @@ def export_session_sources_zip(session_id: str, principal: Principal = Depends(r
         raise HTTPException(status_code=404, detail="No source files found for this session")
 
     buffer = io.BytesIO()
+    written: list[str] = []
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for arcname, path in files:
+        for file_hash, (arcname, path) in files:
             try:
                 zf.write(path, arcname=arcname)
+                written.append(file_hash)
             except OSError as exc:
                 logger.warning("Skipping unreadable source {}: {}", path, exc)
     buffer.seek(0)
+    op.record(
+        target=Target(kind="document", ids=written, count=len(written)),
+        criteria={"session_id": session_id},
+        recipient="download:zip",
+    )
 
     def iter_chunks(chunk_size: int = 64 * 1024) -> Iterator[bytes]:
         while True:
@@ -4559,7 +4959,11 @@ def export_session_sources_zip(session_id: str, principal: Principal = Depends(r
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
-def delete_session(session_id: str, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
+def delete_session(
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("delete", "session.delete")),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
     """Delete a session owned by the calling principal.
 
     A session that does not exist or is owned by another principal is
@@ -4568,6 +4972,7 @@ def delete_session(session_id: str, principal: Principal = Depends(resolve_princ
     Args:
         session_id (str): The ID of the session to delete.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``delete`` operation.
 
     Returns:
         dict[str, bool]: A dictionary indicating whether the deletion
@@ -4586,20 +4991,27 @@ def delete_session(session_id: str, principal: Principal = Depends(resolve_princ
         raise HTTPException(status_code=500, detail="Request failed.") from e
     if not success:
         raise HTTPException(status_code=404, detail="Session not found.")
+    op.record(target=Target(kind="session", ids=[session_id], count=1))
     return {"ok": success}
 
 
 @app.post("/reports", tags=["Reports"])
-def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
+def create_report(
+    payload: ReportCreateIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.create")),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Create a new, empty report owned by the calling principal.
 
     Args:
         payload (ReportCreateIn): Title, collection, and optional session.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         dict[str, Any]: The created report.
     """
+    op.container = payload.collection_name.strip() or None
     try:
         report = rag.ensure_report_manager().create_report(
             title=payload.title,
@@ -4616,12 +5028,15 @@ def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolv
     # Default-on document overview: capture once at create. Fail-soft — a Qdrant
     # hiccup must not fail report creation; the snapshot stays null until a
     # successful refresh.
+    overview = False
     try:
         enriched = _capture_collection_overview(report["id"], payload.collection_name, principal)
         if enriched is not None:
             report = enriched
+            overview = True
     except Exception as e:
         logger.warning("Collection-overview capture failed for report {}: {}", report["id"], e)
+    op.record(target=report_target([report]), criteria={"collection_overview": overview})
     return report
 
 
@@ -4629,24 +5044,29 @@ def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolv
 def list_reports(
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "reports.list")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """List the caller's reports in their active collection.
 
     A report is reachable only from its own collection, so there is no listing
-    across collections.
+    across collections. Audited because a report's title and case metadata are
+    the investigator's own text.
 
     Args:
         collection (str): The caller's active logical collection.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         dict[str, list[dict[str, Any]]]: The caller's report summaries.
     """
     try:
-        return {"reports": rag.ensure_report_manager().list_reports(principal.effective_owner, collection)}
+        reports = rag.ensure_report_manager().list_reports(principal.effective_owner, collection)
     except Exception as e:
         logger.opt(exception=e).error("Error listing reports")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(target=report_target(reports))
+    return {"reports": reports}
 
 
 # Declared before /reports/{report_id}, which would otherwise take the path
@@ -4654,6 +5074,7 @@ def list_reports(
 @app.get("/reports/unassigned", response_model=ReportListOut, tags=["Reports"])
 def list_unassigned_reports(
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "reports.list_unassigned")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """List the caller's reports that belong to no collection.
 
@@ -4663,15 +5084,18 @@ def list_unassigned_reports(
 
     Args:
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         dict[str, list[dict[str, Any]]]: The caller's unassigned report summaries.
     """
     try:
-        return {"reports": rag.ensure_report_manager().list_unassigned_reports(principal.effective_owner)}
+        reports = rag.ensure_report_manager().list_unassigned_reports(principal.effective_owner)
     except Exception as e:
         logger.opt(exception=e).error("Error listing unassigned reports")
         raise HTTPException(status_code=500, detail="Request failed.") from e
+    op.record(target=report_target(reports))
+    return {"reports": reports}
 
 
 @app.post("/reports/unassigned/{report_id}/assign", tags=["Reports"])
@@ -4679,6 +5103,7 @@ def assign_report_collection(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.assign")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Place a report that belongs to no collection into one of the caller's collections.
 
@@ -4691,6 +5116,7 @@ def assign_report_collection(
         report_id (int): The report id.
         collection (str): The caller's active logical collection, to place it in.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         dict[str, Any]: The report, now in ``collection``.
@@ -4704,12 +5130,15 @@ def assign_report_collection(
     report = rag.ensure_report_manager().assign_collection(report_id, principal.effective_owner, name)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    overview = False
     try:
         captured = _capture_collection_overview(report_id, name, principal)
         if captured is not None:
             report = captured
+            overview = True
     except Exception as e:
         logger.warning("Collection-overview capture failed for report {}: {}", report_id, e)
+    op.record(target=Target(kind="report", ids=[str(report_id)], count=1), criteria={"collection_overview": overview})
     return report
 
 
@@ -4718,6 +5147,7 @@ def get_report(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "report.get")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return a report (with items) owned by the calling principal.
 
@@ -4725,6 +5155,8 @@ def get_report(
         report_id (int): The report id.
         collection (str): The caller's active collection, re-checked on the read.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the report's items
+            are its target.
 
     Returns:
         dict[str, Any]: The report and its ordered items.
@@ -4732,7 +5164,9 @@ def get_report(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    return _get_owned_report(report_id, principal.effective_owner, collection)
+    report = _get_owned_report(report_id, principal.effective_owner, collection)
+    op.record(target=report_items_target(report), criteria={"report_id": report_id})
+    return report
 
 
 @app.patch("/reports/{report_id}", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
@@ -4741,6 +5175,7 @@ def update_report(
     payload: ReportUpdateIn,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.update")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Update a report (title, case metadata, or contents toggle) owned by the caller.
 
@@ -4749,6 +5184,8 @@ def update_report(
         payload (ReportUpdateIn): Fields to update; only non-null fields apply.
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation; it names the fields
+            changed, never their values.
 
     Returns:
         dict[str, Any]: The updated report.
@@ -4768,6 +5205,10 @@ def update_report(
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    op.record(
+        target=Target(kind="report", ids=[str(report_id)], count=1),
+        criteria={"fields": sorted(payload.model_dump(exclude_none=True))},
+    )
     return report
 
 
@@ -4776,6 +5217,7 @@ def refresh_report_collection_overview(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.overview_refresh")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Recapture a report's document-overview snapshot from its collection.
 
@@ -4789,6 +5231,7 @@ def refresh_report_collection_overview(
         report_id (int): The report id.
         collection (str): The caller's active collection.
         principal (Principal): The resolved request principal (owner).
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         dict[str, Any]: The report with its refreshed ``collection_overview`` snapshot.
@@ -4807,6 +5250,7 @@ def refresh_report_collection_overview(
         raise HTTPException(status_code=502, detail="Failed to build the document overview.") from e
     if updated is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    op.record(target=Target(kind="report", ids=[str(report_id)], count=1))
     return updated
 
 
@@ -4815,6 +5259,7 @@ def delete_report(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("delete", "report.delete")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, bool]:
     """Delete a report (and its items) owned by the calling principal.
 
@@ -4822,6 +5267,7 @@ def delete_report(
         report_id (int): The report id.
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``delete`` operation.
 
     Returns:
         dict[str, bool]: ``{"ok": True}`` on success.
@@ -4832,6 +5278,7 @@ def delete_report(
     if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner, collection=collection):
         raise HTTPException(status_code=404, detail="Report not found.")
     _discard_report_pdfs([report_id])
+    op.record(target=Target(kind="report", ids=[str(report_id)], count=1))
     return {"ok": True}
 
 
@@ -4841,6 +5288,7 @@ def add_report_item(
     payload: ReportItemIn,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.item_add")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add a snapshotted artifact to a report (idempotent by dedupe key).
 
@@ -4850,6 +5298,8 @@ def add_report_item(
             optional note.
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation; the item's dedupe
+            key is its target.
 
     Returns:
         dict[str, Any]: The added (or pre-existing) item.
@@ -4870,6 +5320,10 @@ def add_report_item(
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    op.record(
+        target=Target(kind="report_item", ids=[payload.dedupe_key], count=1),
+        criteria={"report_id": report_id, "artifact_type": payload.artifact_type},
+    )
     return item
 
 
@@ -4879,6 +5333,7 @@ def add_report_items(
     payload: ReportItemBatchIn,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.items_add")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add many snapshotted artifacts to a report in one request.
 
@@ -4898,6 +5353,8 @@ def add_report_items(
         payload (ReportItemBatchIn): The items to add.
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation; every requested
+            item's dedupe key is its target.
 
     Returns:
         dict[str, Any]: ``{"added", "skipped", "updated", "item_count"}``.
@@ -4933,6 +5390,15 @@ def add_report_items(
         result["updated"],
         result["skipped"],
     )
+    op.record(
+        target=Target(kind="report_item", ids=[item.dedupe_key for item in payload.items], count=len(payload.items)),
+        criteria={
+            "report_id": report_id,
+            "added": result["added"],
+            "updated": result["updated"],
+            "skipped": result["skipped"],
+        },
+    )
     return result
 
 
@@ -4943,6 +5409,7 @@ def annotate_report_item(
     payload: ReportItemNoteIn,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.item_note")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Set or clear the note on a report item.
 
@@ -4952,6 +5419,8 @@ def annotate_report_item(
         payload (ReportItemNoteIn): The new note (``None`` clears it).
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation; the note itself is
+            never recorded.
 
     Returns:
         dict[str, Any]: The updated item.
@@ -4964,6 +5433,10 @@ def annotate_report_item(
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Report or item not found.")
+    op.record(
+        target=Target(kind="report_item", ids=[str(item.get("dedupe_key") or item_id)], count=1),
+        criteria={"report_id": report_id, "item_id": item_id, "cleared": payload.note is None},
+    )
     return item
 
 
@@ -4973,6 +5446,7 @@ def remove_report_item(
     item_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("delete", "report.item_remove")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, bool]:
     """Remove a single item from a report owned by the calling principal.
 
@@ -4981,6 +5455,8 @@ def remove_report_item(
         item_id (int): The item id.
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``delete`` operation: the item's frozen
+            snapshot is erased with it.
 
     Returns:
         dict[str, bool]: ``{"ok": True}`` on success.
@@ -4992,6 +5468,7 @@ def remove_report_item(
         report_id, principal.effective_owner, item_id, collection=collection
     ):
         raise HTTPException(status_code=404, detail="Report or item not found.")
+    op.record(target=Target(kind="report_item", ids=[str(item_id)], count=1), criteria={"report_id": report_id})
     return {"ok": True}
 
 
@@ -5001,6 +5478,7 @@ def reorder_report_items(
     payload: ReportReorderIn,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("modify", "report.items_reorder")),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Reorder a report's items to match the supplied id order.
 
@@ -5009,6 +5487,7 @@ def reorder_report_items(
         payload (ReportReorderIn): Desired item id order.
         collection (str): The caller's active collection, re-checked with the write.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``modify`` operation.
 
     Returns:
         dict[str, Any]: The reordered report.
@@ -5021,7 +5500,23 @@ def reorder_report_items(
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    op.record(target=Target(kind="report", ids=[str(report_id)], count=1), criteria={"items": len(payload.item_ids)})
     return report
+
+
+def _record_report_export(op: Operation, report: dict[str, Any], fmt: str) -> None:
+    """Record a rendered report export before it is sent.
+
+    Args:
+        op (Operation): The export's open ``disclose`` operation.
+        report (dict[str, Any]): The report as rendered; its items are the target.
+        fmt (str): The download format.
+    """
+    op.record(
+        target=report_items_target(report),
+        criteria={"report_id": report.get("id")},
+        recipient=f"download:{fmt}",
+    )
 
 
 @app.get("/reports/{report_id}/export.md", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
@@ -5029,13 +5524,16 @@ def export_report_markdown(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.report_md")),  # noqa: B008 — FastAPI dependency marker
 ) -> Response:
     """Export a report as a single Markdown document (attachment download)."""
     from docint.core.state.report_render import render_markdown
 
     report = _get_owned_report(report_id, principal.effective_owner, collection)
+    content = render_markdown(report)
+    _record_report_export(op, report, "md")
     return Response(
-        content=render_markdown(report),
+        content=content,
         media_type="text/markdown; charset=utf-8",
         headers=_download_headers(_report_stem(report), "md"),
     )
@@ -5046,13 +5544,16 @@ def export_report_html(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.report_html")),  # noqa: B008 — FastAPI dependency marker
 ) -> Response:
     """Export a report as a self-contained HTML document (served inline)."""
     from docint.core.state.report_render import render_html
 
     report = _get_owned_report(report_id, principal.effective_owner, collection)
+    content = render_html(report)
+    _record_report_export(op, report, "html")
     return Response(
-        content=render_html(report),
+        content=content,
         media_type="text/html; charset=utf-8",
         headers=_download_headers(_report_stem(report), "html", inline=True),
     )
@@ -5063,13 +5564,16 @@ def export_report_json(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.report_json")),  # noqa: B008 — FastAPI dependency marker
 ) -> Response:
     """Export the full report (with snapshots) as JSON (attachment download)."""
     from docint.core.state.report_render import render_json
 
     report = _get_owned_report(report_id, principal.effective_owner, collection)
+    content = render_json(report)
+    _record_report_export(op, report, "json")
     return Response(
-        content=render_json(report),
+        content=content,
         media_type="application/json",
         headers=_download_headers(_report_stem(report), "json"),
     )
@@ -5080,13 +5584,16 @@ def export_report_zip(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.report_zip")),  # noqa: B008 — FastAPI dependency marker
 ) -> Response:
     """Export a report as a ZIP bundle of per-type CSVs (attachment download)."""
     from docint.core.state.report_render import report_csv_bundle
 
     report = _get_owned_report(report_id, principal.effective_owner, collection)
+    content = report_csv_bundle(report)
+    _record_report_export(op, report, "zip")
     return Response(
-        content=report_csv_bundle(report),
+        content=content,
         media_type="application/zip",
         headers=_download_headers(_report_stem(report), "zip"),
     )
@@ -5097,6 +5604,7 @@ def export_report_pdf(
     report_id: int,
     collection: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "export.report_pdf")),  # noqa: B008 — FastAPI dependency marker
 ) -> Response:
     """Export a report as a real paginated PDF rendered by WeasyPrint.
 
@@ -5111,6 +5619,7 @@ def export_report_pdf(
     except PdfEngineUnavailableError as e:
         logger.opt(exception=e).error("PDF export engine unavailable")
         raise HTTPException(status_code=503, detail="PDF export is not available.") from e
+    _record_report_export(op, report, "pdf")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -5118,14 +5627,55 @@ def export_report_pdf(
     )
 
 
+def _agent_criteria(payload: AgentChatIn) -> dict[str, object]:
+    """Return an agent turn's audit criteria: its parameters, never its text.
+
+    Args:
+        payload (AgentChatIn): The turn's request.
+
+    Returns:
+        dict[str, object]: The message by hash, plus the turn's settings.
+    """
+    return {
+        "question_sha256": sha256_text(payload.message),
+        "session_id": payload.session_id,
+        "reasoning": payload.reasoning,
+    }
+
+
+def _record_clarification(op: Operation, session_id: str | None) -> None:
+    """Record an agent turn that asked back instead of answering.
+
+    Nothing was retrieved; the message went to the chat model for intent
+    analysis when one is configured.
+
+    Args:
+        op (Operation): The turn's open ``query`` operation.
+        session_id (str | None): The session the turn belongs to.
+    """
+    op.record(target=Target(kind="chunk", count=0), criteria={"session_id": session_id, "clarification": True})
+    if getattr(rag, "text_model_id", None):
+        op.child(
+            "ai_call",
+            "agent.understand",
+            recipient="inference:chat",
+            ai=AiCall(model_alias=_chat_model_alias()),
+        )
+
+
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
-def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
+def agent_chat(
+    payload: AgentChatIn,
+    request: Request,
+    op: Operation = Depends(audited("query", "agent.query", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
+) -> AgentChatOut:
     """Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
 
     Args:
         payload (AgentChatIn): Message, optional session id, and optional
             logical collection (owner-gated; falls back to the process default).
         request (Request): The incoming request used to resolve the calling principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         AgentChatOut: Clarification prompt or answer with sources.
@@ -5134,6 +5684,8 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
         HTTPException: 400/404 from collection resolution; 409 when the session
             is pinned to a different collection.
     """
+    op.container = (payload.collection or "").strip() or None
+    op.criteria.update(_agent_criteria(payload))
     owner = resolve_principal(request)
     physical = _resolve_request_collection(payload.collection, owner)
 
@@ -5156,6 +5708,7 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     if result.clarification is not None and result.clarification.needed:
         if ctx:
             ctx.clarifications += 1
+        _record_clarification(op, session_id)
         return AgentChatOut(
             status="clarification",
             message=result.clarification.message,
@@ -5169,6 +5722,13 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     if retrieval is None:
         raise HTTPException(status_code=500, detail="No retrieval result available")
 
+    _record_chat_turn(
+        op,
+        answer=str(retrieval.answer or ""),
+        sources=list(retrieval.sources or []),
+        session_id=retrieval.session_id or session_id,
+        answer_operation="agent.answer",
+    )
     return AgentChatOut(
         status="answer",
         answer=retrieval.answer,
@@ -5186,8 +5746,17 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     )
 
 
+#: The synchronous ingest route's audit gate: the run collects, and may also
+#: call models and join a social export's postings with their comments and media.
+_INGEST_AUDIT = audited("collect", "ingest.run", also=("ai_call", "combine"))
+
+
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
-def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
+def ingest(
+    payload: IngestIn,
+    request: Request,
+    op: Operation = Depends(_INGEST_AUDIT),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool | str]:
     """Trigger ingestion for the caller's collection using the configured data directory.
 
     The ``collection`` in the payload is the caller's *logical* name. Ingestion
@@ -5198,6 +5767,8 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
     Args:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
         request (Request): The incoming request used to resolve the calling principal.
+        op (Operation): The audited ``collect`` operation; the social
+            linker's joins and the run's model calls are its children.
 
     Returns:
         dict[str, bool | str]: A dictionary with keys ``ok``, ``collection``, ``data_dir``,
@@ -5232,37 +5803,42 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
     # whole request, model loading included — this endpoint is synchronous, so
     # the request *is* the run (unlike the job API, which times its own).
     started_ticks = time.monotonic()
+    op.container = name
+    op.criteria.update({"source": "data_dir", "hybrid": payload.hybrid})
+    stats: IngestStats | None = None
+    empty = False
     try:
-        ingest_module.ingest_docs(
-            physical,
-            data_dir,
-            hybrid=payload.hybrid,
-        )
-    except EmptyIngestionError as exc:
-        logger.warning(
-            "Ingestion produced no content for '{}'; returning empty response.",
-            exc.collection_name,
-        )
-        return {
-            "ok": True,
-            "collection": name,
-            "data_dir": str(data_dir),
-            "hybrid": resolved_hybrid,
-            "empty": True,
-        }
-    except NoSupportedFilesError:
-        logger.warning("No ingestable files for collection '{}'; returning empty response.", name)
-        return {
-            "ok": True,
-            "collection": name,
-            "data_dir": str(data_dir),
-            "hybrid": resolved_hybrid,
-            "empty": True,
-        }
+        with audit.metered(op, prefix="ingest") as meter:
+            try:
+                stats = ingest_module.ingest_docs(
+                    physical,
+                    data_dir,
+                    hybrid=payload.hybrid,
+                )
+            except EmptyIngestionError as exc:
+                logger.warning(
+                    "Ingestion produced no content for '{}'; returning empty response.",
+                    exc.collection_name,
+                )
+                empty = True
+            except NoSupportedFilesError:
+                logger.warning("No ingestable files for collection '{}'; returning empty response.", name)
+                empty = True
+    except audit.AUDIT_FAILURES:
+        raise
     except Exception as exc:
         logger.opt(exception=exc).error(f"Unexpected error during ingestion of '{name}'")
         raise HTTPException(status_code=500, detail="Request failed.") from exc
 
+    audit_ingest.record_run(op, stats, _with_staged(meter, physical), empty=empty)
+    if empty:
+        return {
+            "ok": True,
+            "collection": name,
+            "data_dir": str(data_dir),
+            "hybrid": resolved_hybrid,
+            "empty": True,
+        }
     logger.info("Ingestion complete in {}.", format_elapsed(time.monotonic() - started_ticks))
     return {
         "ok": True,
@@ -5273,13 +5849,21 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
 
 
 @app.post("/agent/chat/stream", tags=["Agent"])
-async def agent_chat_stream(payload: AgentChatIn, request: Request) -> StreamingResponse:
+async def agent_chat_stream(
+    payload: AgentChatIn,
+    request: Request,
+    op: Operation = Depends(audited("query", "agent.query", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
     """Streaming variant of agent chat with token events and final metadata.
+
+    The turn is recorded before the ``done`` frame that carries its sources,
+    and as failed when the stream breaks off before it.
 
     Args:
         payload (AgentChatIn): Message, optional session id, and optional logical
             collection (owner-gated; falls back to the process default).
         request (Request): The incoming request used to resolve the calling principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         StreamingResponse: SSE stream with clarification or answer tokens and metadata.
@@ -5288,6 +5872,8 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
         HTTPException: 400/404 from collection resolution; 409 when the session
             is pinned to a different collection.
     """
+    op.container = (payload.collection or "").strip() or None
+    op.criteria.update(_agent_criteria(payload))
     owner = resolve_principal(request)
     physical = _resolve_request_collection(payload.collection, owner)
     # Up-front collection-pin check so a mismatch is a clean 409 rather than an
@@ -5300,16 +5886,11 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
                 detail="Session is pinned to a different collection.",
             )
 
-    async def event_generator() -> AsyncIterator[str]:
-        """Generate SSE events for the agent chat stream.
-
-        The request's physical collection is bound for the whole generator (so
-        it propagates into the anyio worker threads spawned for analysis and
-        generation), and the resolved session id is threaded explicitly into
-        ``stream_chat`` so the turn persists under the right conversation.
+    async def _agent_frames() -> AsyncGenerator[str, None]:
+        """Produce the agent chat stream's frames inside the request's collection scope.
 
         Yields:
-            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+            str: SSE frames.
         """
         with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
 
@@ -5347,6 +5928,7 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
                     "confidence": analysis.confidence,
                     "session_id": session_id,
                 }
+                _record_clarification(op, session_id)
                 yield _format_sse("clarification", payload_out)
                 return
 
@@ -5366,8 +5948,10 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
                 )
 
             # Tokens
+            streamed = ""
             async for chunk in _aiter_sync_gen(_make_agent_stream, request):
                 if isinstance(chunk, str):
+                    streamed += chunk
                     yield _format_sse("token", {"token": chunk})
                 elif isinstance(chunk, dict):
                     meta = {
@@ -5378,7 +5962,35 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
                         "confidence": analysis.confidence,
                         "tool_used": "rag_chat",
                     }
+                    _record_chat_turn(
+                        op,
+                        answer=str(chunk.get("response") or chunk.get("answer") or "") or streamed,
+                        sources=list(meta["sources"] or []),
+                        session_id=cast("str | None", meta["session_id"]),
+                        answer_operation="agent.answer",
+                    )
                     yield _format_sse("done", meta)
+
+    async def event_generator() -> AsyncIterator[str]:
+        """Generate SSE events for the agent chat stream.
+
+        The request's physical collection is bound for the whole generator (so
+        it propagates into the anyio worker threads spawned for analysis and
+        generation), and the resolved session id is threaded explicitly into
+        ``stream_chat`` so the turn persists under the right conversation.
+
+        Yields:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+        """
+        frames = _agent_frames()
+        try:
+            async for frame in frames:
+                yield frame
+        finally:
+            # Closed at once, so the collection scope ends with the stream.
+            await frames.aclose()
+            # A stream that broke off (an error, a client gone) never recorded its turn.
+            audit.settle_quietly(op, criteria={"incomplete": True})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -5452,46 +6064,64 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """
     if state.batch_dir is None:
         raise RuntimeError("Ingest jobs always carry a batch_dir.")
+    op = _job_operation(
+        state,
+        "collect",
+        "ingest.run",
+        criteria={
+            "source": "upload",
+            "hybrid": state.hybrid,
+            "ner": state.ner,
+            "hate_speech": state.hate_speech,
+            "summary": state.summary,
+            "topics": state.topics,
+        },
+    )
     if not state.batch_dir.is_dir():
         # Nothing was staged (e.g. every upload batch failed, or finalize was
         # called with nothing ever uploaded). Report a soft empty completion
         # instead of letting the reader fail on a missing directory.
         push("warning", {"message": f"No staged files found for '{state.logical_name}'."})
+        audit_ingest.record_run(op, None, _with_staged(TransferMeter(), state.physical), empty=True)
         return {"empty": True, "resolution": None}
 
     empty = False
     stats: IngestStats | None = None
-    try:
-        stats = ingest_module.ingest_docs(
-            state.physical,
-            state.batch_dir,
-            state.hybrid,
-            lambda msg: push(
-                "warning" if msg.strip().lower().startswith("warning:") else "ingestion_progress",
-                {"message": msg},
-            ),
-            ner=state.ner,
-            hate_speech=state.hate_speech,
-        )
-    except EmptyIngestionError:
-        # Never forward str(exc)/exc.collection_name here: both carry the
-        # physical, owner-namespaced collection name (see EmptyIngestionError's
-        # construction sites in rag.py), and this message is caller-facing —
-        # snapshot() promises only the logical name is ever echoed.
-        push(
-            "warning",
-            {
-                "message": f"No content was ingested into '{state.logical_name}'.",
-                "collection": state.logical_name,
-            },
-        )
-        return {"empty": True, "resolution": None}
-    except NoSupportedFilesError:
-        # The staged directory held nothing ingestable (e.g. only audio/video
-        # with Nextext unconfigured, which the pre-passes cannot claim). A
-        # soft empty ingest, not a hard failure.
-        logger.warning("No ingestable files for collection '{}'; completing as empty.", state.logical_name)
-        push("warning", {"message": f"No ingestable files found for '{state.logical_name}'."})
+    with audit.metered(op, prefix="ingest", on_error=_job_error_criteria) as meter:
+        try:
+            stats = ingest_module.ingest_docs(
+                state.physical,
+                state.batch_dir,
+                state.hybrid,
+                lambda msg: push(
+                    "warning" if msg.strip().lower().startswith("warning:") else "ingestion_progress",
+                    {"message": msg},
+                ),
+                ner=state.ner,
+                hate_speech=state.hate_speech,
+            )
+        except EmptyIngestionError:
+            # Never forward str(exc)/exc.collection_name here: both carry the
+            # physical, owner-namespaced collection name (see EmptyIngestionError's
+            # construction sites in rag.py), and this message is caller-facing —
+            # snapshot() promises only the logical name is ever echoed.
+            push(
+                "warning",
+                {
+                    "message": f"No content was ingested into '{state.logical_name}'.",
+                    "collection": state.logical_name,
+                },
+            )
+            empty = True
+        except NoSupportedFilesError:
+            # The staged directory held nothing ingestable (e.g. only audio/video
+            # with Nextext unconfigured, which the pre-passes cannot claim). A
+            # soft empty ingest, not a hard failure.
+            logger.warning("No ingestable files for collection '{}'; completing as empty.", state.logical_name)
+            push("warning", {"message": f"No ingestable files found for '{state.logical_name}'."})
+            empty = True
+    audit_ingest.record_run(op, stats, _with_staged(meter, state.physical), empty=empty)
+    if empty:
         return {"empty": True, "resolution": None}
 
     # The topics stage reads the chunks this run wrote and writes only their
@@ -5534,12 +6164,97 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     # ``stats`` rides the result dict as a plain mapping of ints so
     # ``core/jobs.py`` can render it on the run-summary line without
     # importing a docint domain type — the property that keeps the job
-    # registry testable without Qdrant or models.
+    # registry testable without Qdrant or models. The file hashes are the
+    # audit event's, not the log line's.
     return {
         "empty": empty,
         "resolution": resolution,
-        "stats": asdict(stats) if stats is not None else None,
+        "stats": audit_ingest.stats_counts(stats),
     }
+
+
+def _job_operation(
+    state: IngestJobState, action: str, operation: str, *, criteria: Mapping[str, object] | None = None
+) -> Operation:
+    """Open an audited operation for a job, with the context its request carried.
+
+    Args:
+        state (IngestJobState): The job.
+        action (str): The operation's primary action.
+        operation (str): The operation name.
+        criteria (Mapping[str, object] | None): The job's parameters.
+
+    Returns:
+        Operation: The open operation.
+    """
+    return Operation(
+        audit.current(),
+        audit.job_context(state.audit),
+        action,
+        operation,
+        container=state.logical_name or None,
+        criteria={"job_id": state.job_id, **(criteria or {})},
+    )
+
+
+def _job_error_criteria(exc: BaseException) -> dict[str, object] | None:
+    """Name how a job's operation ended, for its failure event.
+
+    Only static codes, never an exception's text.
+
+    Args:
+        exc (BaseException): What ended it.
+
+    Returns:
+        dict[str, object] | None: ``cancelled`` for a cancel, the refusal or
+            endpoint code of a topics run, else nothing.
+    """
+    if isinstance(exc, JobCancelled):
+        return {"cancelled": True}
+    if isinstance(exc, TopicsRefused):
+        return {"refused": exc.code}
+    if isinstance(exc, TopicsEndpointError):
+        return {"endpoint_error": exc.code}
+    return None
+
+
+def _record_topics(op: Operation, outcome: Any, meter: TransferMeter) -> None:
+    """Record a finished topics run: the topics it wrote, then what went to inference.
+
+    Args:
+        op (Operation): The run's open ``modify`` operation.
+        outcome (Any): The topics service's outcome.
+        meter (TransferMeter): The run's model calls.
+    """
+    op.record(
+        target=Target(kind="topic", count=int(getattr(outcome, "topics", 0) or 0)),
+        criteria={
+            "run_id": getattr(outcome, "run_id", None),
+            "added": getattr(outcome, "added", None),
+            "assigned": getattr(outcome, "assigned", None),
+            "deferred": bool(getattr(outcome, "deferred", False)),
+        },
+    )
+    op.transfers(meter)
+
+
+def _with_staged(meter: TransferMeter, physical: str) -> TransferMeter:
+    """Fold the model calls made on a collection's uploads into a run's meter.
+
+    The run is what consumes them: work started at upload belongs to no run
+    until one is finalized.
+
+    Args:
+        meter (TransferMeter): The run's meter.
+        physical (str): The collection.
+
+    Returns:
+        TransferMeter: The same meter, with the staged counts added.
+    """
+    staged = take_staged(physical)
+    if staged is not None:
+        meter.merge(staged)
+    return meter
 
 
 def _resolve_after_ingest(state: IngestJobState, push: PushEvent) -> dict[str, Any] | None:
@@ -5556,9 +6271,12 @@ def _resolve_after_ingest(state: IngestJobState, push: PushEvent) -> dict[str, A
     if not state.resolve:
         return None
     push("ingestion_progress", {"message": "Resolving entities..."})
+    op = _job_operation(state, "combine", "entities.resolve")
     try:
         with rag.collection_scope(state.physical):
-            summary = rag.resolve_entities()
+            summary = _run_resolution(op)
+    except audit.AUDIT_FAILURES:
+        raise
     except Exception:
         logger.exception("Auto-resolution after ingest failed for '{}'", state.logical_name)
         push("warning", {"message": "Entity resolution failed."})
@@ -5593,12 +6311,41 @@ def _summarize_after_ingest(state: IngestJobState, push: PushEvent) -> None:
     push("ingestion_progress", {"message": "Building collection summary..."})
     try:
         with rag.collection_scope(state.physical):
-            rag.build_tree_summary(
-                progress=lambda mapped, total: push("ingestion_progress", _summary_progress_payload(mapped, total))
+            _build_summary(
+                _job_operation(state, "modify", "summary.build"),
+                progress=lambda mapped, total: push("ingestion_progress", _summary_progress_payload(mapped, total)),
             )
+    except audit.AUDIT_FAILURES:
+        raise
     except Exception:
         logger.exception("Summary stage after ingest failed for '{}'", state.logical_name)
         push("warning", {"message": "Collection summary generation failed."})
+
+
+def _build_summary(op: Operation, *, progress: Callable[[int, int], None]) -> dict[str, Any]:
+    """Build the bound collection's summary as one audited ``modify``.
+
+    The map-reduce model calls are the operation's transfers; the summary's
+    sources are its target.
+
+    Args:
+        op (Operation): The open ``modify`` operation.
+        progress (Callable[[int, int], None]): Per-unit progress callback.
+
+    Returns:
+        dict[str, Any]: The summary payload.
+    """
+    with audit.metered(op, on_error=_job_error_criteria) as meter:
+        payload = rag.build_tree_summary(progress=progress)
+    raw_sources = (payload or {}).get("sources")
+    sources: list[Any] = raw_sources if isinstance(raw_sources, list) else []
+    diagnostics = (payload or {}).get("summary_diagnostics")
+    op.record(
+        target=chunk_target(sources),
+        criteria={"llm_calls": diagnostics.get("llm_calls")} if isinstance(diagnostics, dict) else None,
+    )
+    op.transfers(meter)
+    return payload or {}
 
 
 #: The frame that closes an ingest's topics run, whatever its outcome, so the
@@ -5679,15 +6426,18 @@ def _run_topics_after_ingest(state: IngestJobState, push: PushEvent) -> None:
         push("warning", {"message": message, "code": code})
 
     _progress("starting", 0, 0)
+    op = _job_operation(state, "modify", "topics.build", criteria={"trigger": "ingest"})
     try:
-        outcome = rag.topics_service().run_on_ingest(
-            state.physical,
-            logical=state.logical_name,
-            owner_created_at=lambda: rag.collection_created_at(state.physical),
-            progress=_progress,
-            warn=_warn,
-        )
-    except JobCancelled:
+        with audit.metered(op, on_error=_job_error_criteria) as meter:
+            outcome = rag.topics_service().run_on_ingest(
+                state.physical,
+                logical=state.logical_name,
+                owner_created_at=lambda: rag.collection_created_at(state.physical),
+                progress=_progress,
+                warn=_warn,
+            )
+        _record_topics(op, outcome, meter)
+    except (JobCancelled, *audit.AUDIT_FAILURES):
         raise
     except TopicsRefused as exc:
         # A collection replaced mid-run has nothing left to report on.
@@ -5717,13 +6467,18 @@ def _align_topics_after_ingest(state: IngestJobState, push: PushEvent) -> None:
     Raises:
         JobCancelled: When the job is cancelled or ends during the stage.
     """
+    op = _job_operation(state, "modify", "topics.align", criteria={"trigger": "ingest"})
     try:
-        outcome = rag.topics_service().align_on_ingest(
-            state.physical,
-            owner_created_at=lambda: rag.collection_created_at(state.physical),
-            progress=lambda done, total: push("ingestion_progress", progress_payload("aligning", done, total)),
-        )
-    except JobCancelled:
+        with audit.metered(op, on_error=_job_error_criteria) as meter:
+            outcome = rag.topics_service().align_on_ingest(
+                state.physical,
+                owner_created_at=lambda: rag.collection_created_at(state.physical),
+                progress=lambda done, total: push("ingestion_progress", progress_payload("aligning", done, total)),
+            )
+        # No active run to align with: nothing was read or written.
+        if outcome is not None:
+            _record_topics(op, outcome, meter)
+    except (JobCancelled, *audit.AUDIT_FAILURES):
         raise
     except Exception:
         logger.exception("Topic alignment after ingest failed for '{}'", state.logical_name)
@@ -5757,8 +6512,8 @@ def _run_summary_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         push("summary_progress", _summary_progress_payload(mapped, total))
 
     with rag.collection_scope(state.physical):
-        payload = rag.build_tree_summary(progress=_progress)
-    empty = not str((payload or {}).get("response") or "").strip()
+        payload = _build_summary(_job_operation(state, "modify", "summary.build"), progress=_progress)
+    empty = not str(payload.get("response") or "").strip()
     return {"empty": empty, "resolution": None}
 
 
@@ -5876,27 +6631,30 @@ def _run_report_pdf_job(state: IngestJobState, push: PushEvent) -> dict[str, Any
     # The first push is the cancel checkpoint for a job stopped while it queued.
     push("report_pdf_progress", {"message": _PDF_STAGE_MESSAGES["preparing"], "stage": "preparing", "page": None})
     report_id = int(state.target or 0)
-    manager = rag.ensure_report_manager()
-    report = manager.get_report(report_id, state.owner)
-    if report is None or _report_pdf_key(report) != state.physical:
-        return {"empty": True, "resolution": None}
-    pdf = render_pdf(report, progress=_report_pdf_progress(push))
-    push("report_pdf_progress", {"message": "Saving the PDF", "stage": "finishing", "page": None})
-    pages = _pdf_page_count(pdf)
-    store = _report_pdf_store()
-    record = store.write(
-        report_id,
-        pdf,
-        report_created_at=str(report["created_at"]),
-        report_updated_at=str(report["updated_at"]),
-        filename=f"{_report_stem(report)}.pdf",
-        pages=pages,
-        now=datetime.now(tz=UTC),
-    )
-    live = manager.get_report_meta(report_id, state.owner)
-    if live is None or live["created_at"] != report["created_at"]:
-        store.delete(report_id, report_created_at=str(report["created_at"]))
-        return {"empty": True, "resolution": None}
+    op = _job_operation(state, "disclose", "report.pdf_render", criteria={"report_id": report_id})
+    with audit.metered(op, on_error=_job_error_criteria):
+        manager = rag.ensure_report_manager()
+        report = manager.get_report(report_id, state.owner)
+        if report is None or _report_pdf_key(report) != state.physical:
+            return {"empty": True, "resolution": None}
+        pdf = render_pdf(report, progress=_report_pdf_progress(push))
+        push("report_pdf_progress", {"message": "Saving the PDF", "stage": "finishing", "page": None})
+        pages = _pdf_page_count(pdf)
+        store = _report_pdf_store()
+        record = store.write(
+            report_id,
+            pdf,
+            report_created_at=str(report["created_at"]),
+            report_updated_at=str(report["updated_at"]),
+            filename=f"{_report_stem(report)}.pdf",
+            pages=pages,
+            now=datetime.now(tz=UTC),
+        )
+        live = manager.get_report_meta(report_id, state.owner)
+        if live is None or live["created_at"] != report["created_at"]:
+            store.delete(report_id, report_created_at=str(report["created_at"]))
+            return {"empty": True, "resolution": None}
+    op.record(target=report_items_target(report), criteria={"pages": pages}, recipient="file:report_pdf")
     stats = {"items": len(report.get("items") or []), "pages": pages, "bytes": len(pdf)}
     return {"empty": False, "resolution": None, "artifact": dict(record), "stats": stats}
 
@@ -5943,36 +6701,49 @@ def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             {"message": f"Rendering {rendered}/{total}", "rendered": rendered, "total_units": total},
         )
 
-    with rag.collection_scope(state.physical):
-        units = _gather_units(state.physical, state.target)
-    if not units:
-        return {"empty": True, "resolution": None}
-
-    cfg = load_extract_env()
-    now = datetime.now(tz=UTC)
-    bundle = build_bundle(
-        units,
-        collection=state.logical_name,
-        cfg=cfg,
-        pdf=html_to_pdf,
-        now=now,
-        progress=_progress,
-        reference_number=state.reference_number,
-        operator=state.operator,
+    op = _job_operation(
+        state,
+        "disclose",
+        "extract.build",
+        criteria={"target": state.target, "reference_number": state.reference_number, "operator": state.operator},
     )
-    store = _extract_store()
-    record = store.write(
-        state.physical,
-        zip_bytes=bundle.zip_bytes,
-        meta={
-            "collection": state.logical_name,
-            "target": state.target,
-            "counts": bundle.counts,
-            "pdf_skipped": bundle.pdf_skipped,
-            "reference_number": state.reference_number,
-            "operator": state.operator,
-        },
-        now=now,
+    with audit.metered(op, on_error=_job_error_criteria):
+        with rag.collection_scope(state.physical):
+            units = _gather_units(state.physical, state.target)
+        if not units:
+            return {"empty": True, "resolution": None}
+
+        cfg = load_extract_env()
+        now = datetime.now(tz=UTC)
+        bundle = build_bundle(
+            units,
+            collection=state.logical_name,
+            cfg=cfg,
+            pdf=html_to_pdf,
+            now=now,
+            progress=_progress,
+            reference_number=state.reference_number,
+            operator=state.operator,
+        )
+        store = _extract_store()
+        record = store.write(
+            state.physical,
+            zip_bytes=bundle.zip_bytes,
+            meta={
+                "collection": state.logical_name,
+                "target": state.target,
+                "counts": bundle.counts,
+                "pdf_skipped": bundle.pdf_skipped,
+                "reference_number": state.reference_number,
+                "operator": state.operator,
+            },
+            now=now,
+        )
+    # Written for the caller to download: the archive is what leaves.
+    op.record(
+        target=unit_target(units),
+        criteria={"extract_id": record.get("extract_id"), "counts": bundle.counts},
+        recipient="file:extract",
     )
     store.prune(
         state.physical,
@@ -6033,15 +6804,18 @@ def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         """
         push("warning", {"message": message, "code": code})
 
+    action = state.action or "build"
+    op = _job_operation(state, "modify", f"topics.{action}")
     try:
-        outcome = rag.topics_service().run(
-            cast(Action, state.action or "build"),
-            state.physical,
-            logical=state.logical_name,
-            owner_created_at=lambda: rag.collection_created_at(state.physical),
-            progress=_progress,
-            warn=_warn,
-        )
+        with audit.metered(op, on_error=_job_error_criteria) as meter:
+            outcome = rag.topics_service().run(
+                cast(Action, action),
+                state.physical,
+                logical=state.logical_name,
+                owner_created_at=lambda: rag.collection_created_at(state.physical),
+                progress=_progress,
+                warn=_warn,
+            )
     except TopicsRefused as exc:
         # A sample too small to fit says how many chunks it held and needs.
         push("warning", {"message": exc.message, "code": exc.code, **exc.counts()})
@@ -6049,6 +6823,7 @@ def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     except TopicsEndpointError as exc:
         _warn(exc.code, _TOPICS_ENDPOINT_MESSAGES.get(exc.code, "Topics run failed."))
         raise
+    _record_topics(op, outcome, meter)
     return {
         "empty": outcome.empty,
         "resolution": None,
@@ -6152,12 +6927,36 @@ def _cached_summary_payload(physical: str) -> dict[str, Any] | None:
     }
 
 
+def _record_summary_read(op: Operation, payload: dict[str, Any]) -> None:
+    """Record a read of a collection's cached summary.
+
+    The summary's sources are the ``query`` event's target. Reading runs the
+    response validator, a model call over the summary and its sources, so
+    that call is the event's ``ai_call`` child when it ran.
+
+    Args:
+        op (Operation): The read's open ``query`` operation.
+        payload (dict[str, Any]): The summary payload being returned.
+    """
+    target = chunk_target(list(payload.get("sources") or []))
+    op.record(target=target)
+    if payload.get("validation_checked"):
+        op.child(
+            "ai_call",
+            "summary.validate",
+            target=target,
+            recipient="inference:chat",
+            ai=AiCall(model_alias=_chat_model_alias(), sources=list(target.ids)),
+        )
+
+
 @app.post("/summarize", response_model=None, tags=["Query"])
 async def summarize(
     refresh: bool = Query(False),
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
     jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "summary.read", also=("modify", "ai_call"))),  # noqa: B008 — FastAPI dependency marker
 ) -> Response:
     """Serve the cached collection summary, or queue a rebuild job.
 
@@ -6188,6 +6987,8 @@ async def summarize(
             process-default active collection.
         principal (Principal): The resolved request principal.
         jobs (IngestJobManager): The shared job registry.
+        op (Operation): The audited read; a queued build carries its context
+            and records its own ``modify`` event when it ends.
 
     Returns:
         Response: 200 ``SummarizeOut`` JSON on a cache hit, 202 ``{"job_id"}``
@@ -6202,6 +7003,7 @@ async def summarize(
     if not refresh:
         payload = await to_thread.run_sync(_cached_summary_payload, physical)
         if payload is not None:
+            _record_summary_read(op, payload)
             return JSONResponse(payload)
 
     logical_name = (collection or "").strip()
@@ -6215,6 +7017,7 @@ async def summarize(
         logical_name=logical_name,
         physical=physical,
         kind="summary",
+        audit=op.context,
     )
     if not created:
         raise HTTPException(
@@ -6228,6 +7031,7 @@ async def summarize(
 def summarize_cached(
     collection: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 -- FastAPI dependency marker
+    op: Operation = Depends(audited("query", "summary.read", also=("ai_call",))),  # noqa: B008 -- FastAPI dependency marker
 ) -> Response:
     """Serve the cached collection summary, or report that there is none.
 
@@ -6256,6 +7060,7 @@ def summarize_cached(
             fallback in ``_resolve_request_collection`` is safe here, unlike
             the POST's queue path which 400s without it.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited read; a miss returns nothing and records nothing.
 
     Returns:
         Response: 200 ``SummarizeOut`` JSON on a hit; 204 with no body on a miss.
@@ -6266,6 +7071,7 @@ def summarize_cached(
     payload = _cached_summary_payload(_resolve_request_collection(collection, principal))
     if payload is None:
         return Response(status_code=204)
+    _record_summary_read(op, payload)
     return JSONResponse(payload)
 
 
@@ -6274,6 +7080,7 @@ async def ingest_upload(
     request: Request,
     collection: str = Form(...),
     files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("collect", "ingest.upload", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Upload and stage files for a collection, streaming save progress as SSE events.
 
@@ -6291,6 +7098,9 @@ async def ingest_upload(
         request (Request): The incoming request, used to resolve the principal.
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
+        op (Operation): The audited ``collect`` operation, recorded once the
+            batch is on disk and before ``upload_complete``; model calls the
+            files start now are counted for the run that finalizes them.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events while
@@ -6310,11 +7120,16 @@ async def ingest_upload(
     # logical name keep separate Qdrant collections and source-file stores.
     principal = resolve_principal(request)
     physical = _register_collection(principal, name)
+    op.container = name
+    preprocess = load_ingestion_env().ingest_preprocess_on_upload
+    op.criteria.update({"preprocess": preprocess})
+    # Hashes of the files this request staged, for the batch's audit event.
+    saved: list[str] = []
 
     # We use a persistent directory for uploads to support previewing files later.
     # The files are ingested into Qdrant and kept in the collection directory.
 
-    async def event_stream() -> AsyncIterator[str]:
+    async def event_stream() -> AsyncGenerator[str, None]:
         """Stream SSE events during the ingestion process.
 
         Returns:
@@ -6370,12 +7185,15 @@ async def ingest_upload(
                 file_hash = await to_thread.run_sync(partial(compute_file_hash, partial_dest))
                 os.replace(partial_dest, dest)
                 staged_bytes += bytes_written
-                if load_ingestion_env().ingest_preprocess_on_upload:
+                saved.append(file_hash)
+                if preprocess:
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
                     # still uploading; the finalize job joins it or finds it done.
+                    # Its model calls count for that run (the staged meter).
                     try:
-                        submit_file(dest, physical, file_hash=file_hash)
+                        with metering(staged_meter(physical)):
+                            submit_file(dest, physical, file_hash=file_hash)
                     except Exception as exc:
                         logger.warning("Preprocess submit skipped for '{}': {}", filename, exc)
                 yield _format_sse(
@@ -6388,6 +7206,8 @@ async def ingest_upload(
                 )
             except Exception as exc:
                 logger.opt(exception=exc).error("Error saving uploaded file {}", filename)
+                # What did land is staged: recorded, with the batch as failed.
+                audit.settle_quietly(op, target=Target(kind="document", ids=saved, count=len(saved)))
                 # `filename` travels as a structured field (client-supplied
                 # name, echoed) so the SPA can validate it against its own
                 # upload list before display; the message itself stays static.
@@ -6412,12 +7232,46 @@ async def ingest_upload(
             len(files),
             format_bytes(staged_bytes),
         )
+        try:
+            op.record(
+                target=Target(kind="document", ids=saved, count=len(saved)),
+                criteria={"bytes": staged_bytes},
+            )
+        except audit.AUDIT_FAILURES:
+            # The batch is not complete without its audit record.
+            logger.exception("Audit event for an upload batch to '{}' could not be written", name)
+            yield _format_sse("error", {"message": "Failed to save file.", "code": "save_failed"})
+            return
         yield _format_sse(
             "upload_complete",
             {"collection": name, "files_saved": len(files)},
         )
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    async def guarded_stream() -> AsyncIterator[str]:
+        """Stream the upload, recording a batch the client abandoned mid-way.
+
+        The inner stream is closed here, at once: left to the garbage collector,
+        its cleanup of a cut-off attempt's temp file would run late.
+
+        Yields:
+            str: The upload's SSE frames.
+        """
+        frames = event_stream()
+        try:
+            async for frame in frames:
+                yield frame
+        finally:
+            await frames.aclose()
+            audit.settle_quietly(
+                op, target=Target(kind="document", ids=saved, count=len(saved)), criteria={"incomplete": True}
+            )
+
+    return StreamingResponse(guarded_stream(), media_type="text/event-stream")
+
+
+#: The finalize route's audit gate: the run it queues collects, and may also
+#: call models, resolve entities and rebuild the summary and topics.
+_FINALIZE_AUDIT = audited("collect", "ingest.run", also=("ai_call", "combine", "modify"))
 
 
 @app.post("/ingest/finalize", status_code=202, tags=["Ingestion"])
@@ -6425,6 +7279,7 @@ async def ingest_finalize(
     payload: IngestFinalizeIn,
     request: Request,
     jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(_FINALIZE_AUDIT),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, str]:
     """Queue an ingest job over a collection's already-staged upload batches.
 
@@ -6439,6 +7294,8 @@ async def ingest_finalize(
             duration at the moment the user started rather than here.
         request (Request): The incoming request, for principal resolution.
         jobs (IngestJobManager): The ingest job registry.
+        op (Operation): The audit gate; the job carries its context and
+            records the run's events when it ends.
 
     Returns:
         dict[str, str]: ``{"job_id": ...}``.
@@ -6468,6 +7325,7 @@ async def ingest_finalize(
         topics=payload.topics,
         resolve=_auto_resolve_requested(payload.ner),
         upload_lead_s=(payload.upload_elapsed_ms or 0.0) / 1000.0,
+        audit=op.context,
     )
     if not created:
         raise HTTPException(
@@ -6483,6 +7341,7 @@ async def create_extract(
     payload: ExtractIn | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
     jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "extract.build")),  # noqa: B008 - FastAPI dependency marker
 ) -> Response:
     """Queue a written extract of a collection, or of one source in it.
 
@@ -6497,6 +7356,8 @@ async def create_extract(
             plus the appendix's case file and operator.
         principal (Principal): The resolved request principal.
         jobs (IngestJobManager): The shared job registry.
+        op (Operation): The audit gate; the job records the ``disclose``
+            event with this request's context once the archive is stored.
 
     Returns:
         Response: 202 ``{"job_id"}``.
@@ -6514,6 +7375,7 @@ async def create_extract(
         target=(payload.target if payload else None),
         reference_number=(payload.reference_number if payload else None),
         operator=(payload.operator if payload else None),
+        audit=op.context,
     )
     if not created:
         raise HTTPException(
@@ -6546,6 +7408,7 @@ def download_extract(
     name: str,
     extract_id: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "extract.download")),  # noqa: B008 - FastAPI dependency marker
 ) -> FileResponse:
     """Download one stored extract bundle.
 
@@ -6553,6 +7416,7 @@ def download_extract(
         name (str): The caller's logical collection name.
         extract_id (str): The build's id.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``disclose`` operation.
 
     Returns:
         FileResponse: The ZIP archive.
@@ -6566,6 +7430,11 @@ def download_extract(
     record = store.get(physical, extract_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Extract not found.")
+    op.record(
+        target=Target(kind="extract", ids=[extract_id], count=1),
+        criteria={"source": record.get("target"), "counts": record.get("counts")},
+        recipient="download:zip",
+    )
     stem = str(record.get("filename") or f"{name}-extract.zip").removesuffix(".zip")
     return FileResponse(
         store.path(physical, extract_id),
@@ -6579,6 +7448,7 @@ def delete_extract(
     name: str,
     extract_id: str,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("delete", "extract.delete")),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, bool]:
     """Delete one stored extract.
 
@@ -6586,6 +7456,7 @@ def delete_extract(
         name (str): The caller's logical collection name.
         extract_id (str): The build's id.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``delete`` operation.
 
     Returns:
         dict[str, bool]: ``{"ok": True}``.
@@ -6596,6 +7467,7 @@ def delete_extract(
     physical = _require_owned_collection(name, principal)
     if not _extract_store().delete(physical, extract_id):
         raise HTTPException(status_code=404, detail="Extract not found.")
+    op.record(target=Target(kind="extract", ids=[extract_id], count=1))
     return {"ok": True}
 
 
@@ -6611,6 +7483,7 @@ def _require_topics_enabled() -> None:
 
 @app.post("/collections/{name}/topics", response_model=None, tags=["Query"])
 async def create_topics(
+    request: Request,
     name: str,
     payload: TopicsIn | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
@@ -6624,6 +7497,8 @@ async def create_topics(
 
     Args:
         name (str): The caller's logical collection name.
+        request (Request): The incoming request, for the audit gate. The job
+            records the run's ``modify`` event with this request's context.
         payload (TopicsIn | None): The action, ``build`` when omitted.
         principal (Principal): The resolved request principal.
         jobs (IngestJobManager): The shared job registry.
@@ -6637,8 +7512,10 @@ async def create_topics(
             when a topics run for this collection is already in flight.
     """
     _require_topics_enabled()
-    physical = _require_owned_collection(name, principal)
     action = payload.action if payload is not None else "build"
+    # Before the ownership gate, as on every audited route.
+    op = audit.begin(request, principal, "modify", f"topics.{action}", also=("ai_call",))
+    physical = _require_owned_collection(name, principal)
     if action != "build" and await jobs.active_for(principal.effective_owner, physical, "topics") is None:
         if await to_thread.run_sync(rag._active_topic_run, physical) is None:
             raise HTTPException(status_code=400, detail="Build topics first.")
@@ -6648,6 +7525,7 @@ async def create_topics(
         physical=physical,
         kind="topics",
         action=action,
+        audit=op.context,
     )
     if not created:
         raise HTTPException(
@@ -6658,12 +7536,19 @@ async def create_topics(
 
 
 @app.get("/collections/{name}/topics", response_model=None, tags=["Query"])
-def get_topics(name: str, principal: Principal = Depends(resolve_principal)) -> Response | dict[str, Any]:  # noqa: B008 - FastAPI dependency marker
+def get_topics(
+    name: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("query", "topics.overview")),  # noqa: B008 - FastAPI dependency marker
+) -> Response | dict[str, Any]:
     """Describe a collection's topics: the run, its coverage and its topics by size.
+
+    Audited because a topic's label, keywords and summary are drawn from its passages.
 
     Args:
         name (str): The caller's logical collection name.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         Response | dict[str, Any]: 200 with the overview, or 204 when the
@@ -6682,6 +7567,7 @@ def get_topics(name: str, principal: Principal = Depends(resolve_principal)) -> 
         raise HTTPException(status_code=500, detail="Request failed.") from e
     if overview is None:
         return Response(status_code=204)
+    op.record(target=topic_target(list(overview.get("topics") or [])), criteria={"run_id": overview.get("run_id")})
     return overview
 
 
@@ -6692,6 +7578,7 @@ def get_topic_evidence(
     limit: int = Query(default=5, ge=1, le=20),
     run_id: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("query", "topics.evidence")),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return a topic's passages nearest its centre.
 
@@ -6701,6 +7588,7 @@ def get_topic_evidence(
         limit (int): Most passages (1-20).
         run_id (str | None): Expected active run; a mismatch returns 404.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the passages are its target.
 
     Returns:
         dict[str, Any]: ``{"topic", "sources"}``.
@@ -6718,6 +7606,7 @@ def get_topic_evidence(
         raise HTTPException(status_code=500, detail="Request failed.") from e
     if sources is None:
         raise HTTPException(status_code=404, detail="Topic not found.")
+    op.record(target=chunk_target(sources), criteria={"topic_id": topic_id, "run_id": run_id, "limit": limit})
     return {"topic": topic_id, "sources": sources}
 
 
@@ -6728,6 +7617,7 @@ def get_topic_documents(
     limit: int = Query(default=50, ge=1, le=500),
     run_id: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("query", "topics.documents")),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, Any]:
     """Count a topic's passages per source file.
 
@@ -6737,6 +7627,7 @@ def get_topic_documents(
         limit (int): Most files (1-500).
         run_id (str | None): Expected active run; a mismatch returns 404.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the files are its target.
 
     Returns:
         dict[str, Any]: ``{"documents", "more"}``.
@@ -6754,6 +7645,10 @@ def get_topic_documents(
         raise HTTPException(status_code=500, detail="Request failed.") from e
     if result is None:
         raise HTTPException(status_code=404, detail="Topic not found.")
+    op.record(
+        target=document_target(list(result.get("documents") or [])),
+        criteria={"topic_id": topic_id, "run_id": run_id, "limit": limit},
+    )
     return result
 
 
@@ -6765,6 +7660,7 @@ def get_topic_chunks(
     limit: int = Query(default=50, ge=1, le=200),
     run_id: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("query", "topics.chunks")),  # noqa: B008 - FastAPI dependency marker
 ) -> dict[str, Any]:
     """Read one page of a topic's passages.
 
@@ -6775,6 +7671,7 @@ def get_topic_chunks(
         limit (int): Page size (1-200).
         run_id (str | None): Expected active run; a mismatch returns 404.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the passages are its target.
 
     Returns:
         dict[str, Any]: ``{"items", "next_cursor"}``.
@@ -6795,6 +7692,10 @@ def get_topic_chunks(
         raise HTTPException(status_code=500, detail="Request failed.") from e
     if page is None:
         raise HTTPException(status_code=404, detail="Topic not found.")
+    op.record(
+        target=chunk_target(list(page.get("items") or [])),
+        criteria={"topic_id": topic_id, "run_id": run_id, "limit": limit, "page": cursor is not None},
+    )
     return page
 
 
@@ -6847,6 +7748,7 @@ async def queue_report_pdf(
     report_id: int,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
     jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "report.pdf_render")),  # noqa: B008 - FastAPI dependency marker
 ) -> Response:
     """Queue a render of a report's PDF as a background job.
 
@@ -6860,6 +7762,8 @@ async def queue_report_pdf(
         report_id (int): The report id.
         principal (Principal): The resolved request principal.
         jobs (IngestJobManager): The shared job registry.
+        op (Operation): The audit gate; the render job records the
+            ``disclose`` event with this request's context.
 
     Returns:
         Response: 202 ``{"job_id"}``.
@@ -6877,6 +7781,7 @@ async def queue_report_pdf(
         physical=_report_pdf_key(meta),
         kind="report_pdf",
         target=str(report_id),
+        audit=op.context,
     )
     if not created:
         raise HTTPException(
@@ -6890,12 +7795,14 @@ async def queue_report_pdf(
 def download_report_pdf(
     report_id: int,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "report.pdf_download")),  # noqa: B008 - FastAPI dependency marker
 ) -> FileResponse:
     """Download a report's newest rendered PDF.
 
     Args:
         report_id (int): The report id.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``disclose`` operation.
 
     Returns:
         FileResponse: The PDF, named as it was when it rendered.
@@ -6911,6 +7818,11 @@ def download_report_pdf(
         raise HTTPException(status_code=404, detail="No rendered PDF.")
     if meta.get("collection_name"):
         _record_activity(owner, str(meta["collection_name"]))
+    op.record(
+        target=Target(kind="report", ids=[str(report_id)], count=1),
+        criteria={"pages": record.get("pages"), "rendered_at": record.get("created_at")},
+        recipient="download:pdf",
+    )
     return FileResponse(
         store.path(report_id, str(meta["created_at"])),
         media_type="application/pdf",
@@ -6963,6 +7875,7 @@ async def export_source_extract(
     reference_number: str | None = None,
     operator: str | None = None,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("disclose", "extract.source")),  # noqa: B008 - FastAPI dependency marker
 ) -> Response:
     """Render one source's extract and return it immediately.
 
@@ -6979,6 +7892,7 @@ async def export_source_extract(
         reference_number (str | None): Case file the appendix is filed under.
         operator (str | None): Who asked for it.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``disclose`` operation.
 
     Returns:
         Response: The rendered document.
@@ -7019,6 +7933,11 @@ async def export_source_extract(
     except PdfEngineUnavailableError as exc:
         logger.exception("PDF export engine unavailable")
         raise HTTPException(status_code=503, detail="PDF export is not available.") from exc
+    op.record(
+        target=unit_target(units),
+        criteria={"source": source_id, "reference_number": reference_number, "operator": operator},
+        recipient=f"download:{fmt}",
+    )
     return Response(content=body, media_type=media_type, headers=_download_headers(f"{name}-{source_id[:12]}", fmt))
 
 
@@ -7233,7 +8152,12 @@ async def delete_ingest_job(
 
 
 @app.get("/sources/preview", tags=["Sources"])
-def preview_source(collection: str, file_hash: str, principal: Principal = Depends(resolve_principal)) -> FileResponse:  # noqa: B008 — FastAPI dependency marker
+def preview_source(
+    collection: str,
+    file_hash: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "source.preview")),  # noqa: B008 — FastAPI dependency marker
+) -> FileResponse:
     """Serve a previously ingested source file resolved under the caller's effective owner.
 
     ``collection`` is the caller's *logical* name; it is resolved to its
@@ -7248,6 +8172,7 @@ def preview_source(collection: str, file_hash: str, principal: Principal = Depen
         collection (str): The caller's logical collection name.
         file_hash (str): The hash of the file to preview.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
 
     Returns:
         FileResponse: A response containing the requested file.
@@ -7260,6 +8185,7 @@ def preview_source(collection: str, file_hash: str, principal: Principal = Depen
     path = _resolve_source_file_path(physical, file_hash)
     if path is None:
         raise HTTPException(status_code=404, detail="File not found")
+    op.record(target=Target(kind="document", ids=[file_hash], count=1))
     # Browsers refuse to *display* text/markdown and text/csv — they hand both
     # to the download manager, in a tab and in the preview dialog's iframe
     # alike. This endpoint exists to show a source, so serve those as plain
@@ -7270,7 +8196,12 @@ def preview_source(collection: str, file_hash: str, principal: Principal = Depen
 
 
 @app.get("/sources/thumbnail", tags=["Sources"])
-def source_thumbnail(collection: str, image_id: str, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
+def source_thumbnail(
+    collection: str,
+    image_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "source.thumbnail")),  # noqa: B008 — FastAPI dependency marker
+) -> Response:
     """Serve the picture behind an image finding, addressed by the image itself.
 
     ``/sources/preview`` serves the file a finding came from, and for a video
@@ -7285,6 +8216,8 @@ def source_thumbnail(collection: str, image_id: str, principal: Principal = Depe
         collection (str): The caller's logical collection name.
         image_id (str): The image's content hash.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation, recorded before
+            either form of the picture is returned.
 
     Returns:
         Response: The thumbnail, or the image file it would have been made from.
@@ -7294,6 +8227,7 @@ def source_thumbnail(collection: str, image_id: str, principal: Principal = Depe
             image has no picture to show.
     """
     physical = _require_owned_collection(collection, principal)
+    thumbnail: Response | None = None
     try:
         points, _ = rag.qdrant_client.scroll(
             collection_name=rag._image_collection_name(physical),
@@ -7308,19 +8242,27 @@ def source_thumbnail(collection: str, image_id: str, principal: Principal = Depe
         stored = payload.get("thumbnail_b64")
         if isinstance(stored, str) and stored:
             mime = str(payload.get("thumbnail_mime") or "")
-            return Response(
+            thumbnail = Response(
                 base64.b64decode(stored, validate=True), media_type=mime if mime.startswith("image/") else "image/jpeg"
             )
     except Exception as exc:
         logger.warning("Stored thumbnail of image '{}' unavailable: {}", image_id, exc)
+    if thumbnail is not None:
+        op.record(target=Target(kind="image", ids=[image_id], count=1), criteria={"stored_thumbnail": True})
+        return thumbnail
     path = _resolve_source_file_path(physical, image_id)
     if path is None or not (mimetypes.guess_type(path.name)[0] or "").startswith("image/"):
         raise HTTPException(status_code=404, detail="Image not found")
+    op.record(target=Target(kind="image", ids=[image_id], count=1), criteria={"stored_thumbnail": False})
     return FileResponse(path)
 
 
 @app.post("/translate", tags=["Translate"])
-def translate_text(payload: TranslateIn, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
+def translate_text(
+    payload: TranslateIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("ai_call", "translate.snippet")),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Translate a client-supplied snippet into the operator's locale.
 
     Authenticated for consistency, but not collection-scoped: it translates text
@@ -7329,14 +8271,36 @@ def translate_text(payload: TranslateIn, principal: Principal = Depends(resolve_
     Text already in the operator's locale returns ``ok: true`` with
     ``same_language: true`` and no translation.
 
+    The snippet still goes to the chat model, so the call is an ``ai_call``:
+    by the snippet's length and hash, never its text.
+
     Args:
         payload (TranslateIn): The snippet to translate.
         principal (Principal): The resolved request principal.
+        op (Operation): The audited ``ai_call`` operation.
 
     Returns:
         dict[str, Any]: ``{ok, translation, model, target_lang, error, same_language}``.
     """
-    result = translate(payload.text)
+    with metering() as meter:
+        result = translate(payload.text)
+    op.record(
+        target=Target(kind="text", count=1),
+        criteria={
+            "text_sha256": sha256_text(payload.text),
+            "chars": len(payload.text),
+            "target_lang": result.target_lang,
+            "same_language": result.same_language,
+            # A cached translation sent nothing to the model this time.
+            "cached": not meter,
+        },
+        recipient="inference:chat",
+        ai=AiCall(
+            model_alias=str(result.model or "unknown"),
+            output_sha256=sha256_text(result.translation) if result.translation else None,
+        ),
+        outcome="ok" if result.ok else "error",
+    )
     return {
         "ok": result.ok,
         "translation": result.translation,

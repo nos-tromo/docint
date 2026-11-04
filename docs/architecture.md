@@ -240,14 +240,14 @@ or `202` with a `job_id` and lets the caller follow the build on
 ingestion, not token streaming.
 
 The two are not fed the same way. `_stream_simulated_text()`
-(`docint/core/api.py:659`) replays an **already complete** answer as SSE
+(`docint/core/api.py:1342`) replays an **already complete** answer as SSE
 tokens with a fixed delay (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`), and is
 used on exactly one path: a lookup turn on `/stream_query` with
 `retrieval_mode="stateless"`, where `RAG.run_query_async()` produces the
 whole answer before streaming starts. Every session path — `/stream_query`
 with the default mode, and `/agent/chat/stream` — streams from
 `RAG.stream_chat()` through `_aiter_sync_gen()`
-(`docint/core/api.py:673`), and so does a stateless agent turn,
+(`docint/core/api.py:1356`), and so does a stateless agent turn,
 through `RAG.stream_stateless_agent_turn()`; those tokens arrive as the
 model produces them rather than on a timer. An agent turn's stream also
 carries an `agent` frame per step, and a `note` step withdraws the text

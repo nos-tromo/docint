@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Callable
 
 import pytest
 
@@ -137,6 +139,25 @@ def test_strip_reasoning_removes_stray_harmony_tokens() -> None:
     clean, _ = strip_reasoning(text)
 
     assert clean == "answer body"
+
+
+def test_strip_reasoning_reads_an_open_tag_to_its_first_angle_bracket() -> None:
+    """An open tag runs from ``<think`` to the first ``>``, across lines; with no ``>`` it is text."""
+    assert strip_reasoning('<think\nmode="plan">step</think>answer') == ("answer", "step")
+    assert strip_reasoning("answer <think mode") == ("answer <think mode", None)
+
+
+def test_strip_reasoning_ends_a_block_at_the_first_close_tag_after_its_open_tag() -> None:
+    """An open tag inside a block is part of its reasoning; the block ends at the first close tag."""
+    assert strip_reasoning("a<think>x<think>y</think>b") == ("ab", "x<think>y")
+
+
+def test_strip_reasoning_ends_a_harmony_body_at_the_first_stop_token_in_any_case() -> None:
+    """A channel body runs to the first stop token or channel head after it, in any case, or to the end."""
+    text = "<|channel|>analysis<|message|>r1<|END|>x<|channel|>analysis<|message|>r2<|Channel|>final<|message|>answer"
+
+    assert strip_reasoning(text) == ("answer", "r1\nr2")
+    assert strip_reasoning("x<|channel|>analysis<|message|>r<|return|>y") == ("xy", "r")
 
 
 def test_looks_like_no_image_refusal_positive_phrases() -> None:
@@ -330,3 +351,44 @@ def test_reasoning_stripper_opened_in_reasoning_reads_all_held_text_as_reasoning
 
     assert stripper.feed("first, <think>then</think>answer") == "answer"
     assert (stripper.flush(), stripper.reasoning) == ("", "first, then")
+
+
+def _stream_whole(text: str) -> tuple[str, str | None]:
+    """Stream ``text`` to a fresh stripper in one piece.
+
+    Args:
+        text (str): The reply.
+
+    Returns:
+        tuple[str, str | None]: The visible text and the reasoning.
+    """
+    stripper = ReasoningStripper()
+    return stripper.feed(text) + stripper.flush(), stripper.reasoning
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<think>" * 20_000,
+        "<think x" * 40_000,
+        "<|channel|>final<|message|>" + "<|channel|>final<|message|>a" * 40_000,
+        "<|channel|>analysis<|message|>" + "<|channel|>analysis<|message|>a" * 40_000,
+    ],
+    ids=["open-tags-never-closed", "open-tags-never-ended", "harmony-final-heads", "harmony-analysis-heads"],
+)
+@pytest.mark.parametrize("run", [strip_reasoning, _stream_whole], ids=["batch", "stream"])
+def test_reasoning_is_stripped_in_linear_time(text: str, run: Callable[[str], tuple[str, str | None]]) -> None:
+    """A reply full of tags that never close costs time in proportion to its length.
+
+    A regex that scans to the end again from every open tag takes seconds on these
+    replies, and the text reaching the sanitizer has no length limit. The bound leaves
+    a wide margin for a slow runner.
+
+    Args:
+        text (str): A hostile reply.
+        run (Callable[[str], tuple[str, str | None]]): The batch or the streaming stripper.
+    """
+    started = time.perf_counter()
+    run(text)
+
+    assert time.perf_counter() - started < 1.0

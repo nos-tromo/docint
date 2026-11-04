@@ -267,6 +267,10 @@ class IngestJobState:
     operator: str | None = None
     #: A topics job's action: ``build``, ``discover`` or ``align``.
     action: str | None = None
+    #: The audit context (actor, stated purpose, request id) of the request
+    #: that created the job, which the job's audit events are recorded with.
+    #: Opaque here; the runner reads it.
+    audit: Any = field(default=None, repr=False)
     #: The stored artifact a finished extract job produced, if any.
     artifact: dict[str, Any] | None = None
     batch_dir: Path | None = None
@@ -535,6 +539,7 @@ class IngestJobManager:
         operator: str | None = None,
         action: str | None = None,
         upload_lead_s: float = 0.0,
+        audit: Any = None,
     ) -> IngestJobState:
         """Register a job and dispatch its worker, unconditionally.
 
@@ -575,6 +580,8 @@ class IngestJobManager:
             upload_lead_s (float): Seconds the run had already spent before
                 this job existed (an ingest's upload leg). Folded into the
                 duration the job logs and reports.
+            audit (Any): The creating request's audit context, carried into
+                the job's audit events.
 
         Returns:
             IngestJobState: The newly registered job.
@@ -596,6 +603,7 @@ class IngestJobManager:
             operator=operator,
             action=action,
             upload_lead_s=upload_lead_s,
+            audit=audit,
         )
         async with self._lock:
             self._jobs[state.job_id] = state
@@ -621,6 +629,7 @@ class IngestJobManager:
         operator: str | None = None,
         action: str | None = None,
         upload_lead_s: float = 0.0,
+        audit: Any = None,
     ) -> tuple[IngestJobState, bool]:
         """Atomically check for an in-flight job and create one only if idle.
 
@@ -677,6 +686,8 @@ class IngestJobManager:
                 duration the job logs and reports. Ignored when an in-flight
                 job is adopted instead of created — that run's own lead
                 already stands.
+            audit (Any): The creating request's audit context, carried into
+                the job's audit events.
 
         Returns:
             tuple[IngestJobState, bool]: ``(state, created)``. When
@@ -706,6 +717,7 @@ class IngestJobManager:
                 operator=operator,
                 action=action,
                 upload_lead_s=upload_lead_s,
+                audit=audit,
             )
             self._jobs[state.job_id] = state
         self._dispatch_worker(state)
@@ -730,6 +742,7 @@ class IngestJobManager:
         operator: str | None = None,
         action: str | None = None,
         upload_lead_s: float = 0.0,
+        audit: Any = None,
     ) -> IngestJobState:
         """Build a fresh, unregistered job state.
 
@@ -763,6 +776,7 @@ class IngestJobManager:
                 this job existed. Clamped here — it reaches the server as a
                 client-reported number, and it bounds a log line, so it must
                 not be able to express a negative or absurd run.
+            audit (Any): The creating request's audit context.
 
         Returns:
             IngestJobState: A new, not-yet-registered job state.
@@ -791,6 +805,7 @@ class IngestJobManager:
             topics=topics,
             resolve=resolve,
             upload_lead_s=_clamp_lead(upload_lead_s),
+            audit=audit,
         )
 
     def _dispatch_worker(self, state: IngestJobState) -> None:

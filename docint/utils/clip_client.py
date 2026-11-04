@@ -28,6 +28,7 @@ from typing import cast
 import httpx
 from loguru import logger
 
+from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import CLIPClientConfig, load_clip_client_env
 
 
@@ -103,6 +104,7 @@ class RemoteCLIPBackend:
             ValueError: Server returned a malformed payload.
         """
         payload = {"image_b64": base64.b64encode(image_bytes).decode("ascii")}
+        count_transfer("clip", "inference:clip", "clip", kind="image")
         response = self._client.post("/clip/embed_image", json=payload)
         response.raise_for_status()
         data = response.json()
@@ -124,6 +126,7 @@ class RemoteCLIPBackend:
             httpx.HTTPError: Network, timeout, or non-2xx response.
             ValueError: Server returned a malformed payload.
         """
+        count_transfer("clip", "inference:clip", "clip")
         response = self._client.post("/clip/embed_text", json={"text": text})
         response.raise_for_status()
         data = response.json()

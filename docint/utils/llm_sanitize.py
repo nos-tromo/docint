@@ -19,35 +19,41 @@ It also understands gpt-oss Harmony channels
 (``<|channel|>analysis<|message|>...<|end|>``). When a paired ``final``
 channel is present its body replaces the rest; otherwise ``analysis``
 channels are removed in place.
+
+Each function reads its text in time linear in the text's length. The text
+has no length limit and can carry a user's own words, so a pattern that scans
+to the end again from every tag it finds would make a reply full of unclosed
+tags cost quadratic time.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Literal
 
-_THINK_PAIRED_RE: re.Pattern[str] = re.compile(
-    r"<think\b[^>]*>(.*?)</think\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
-_OPEN_THINK_RE: re.Pattern[str] = re.compile(
-    r"<think\b[^>]*>",
+# An open tag runs from ``<think`` to the first ``>`` after it: see :func:`_find_open_think`.
+_OPEN_THINK_START_RE: re.Pattern[str] = re.compile(
+    r"<think\b",
     re.IGNORECASE,
 )
 _CLOSE_THINK_RE: re.Pattern[str] = re.compile(
     r"</think\s*>",
     re.IGNORECASE,
 )
-_HARMONY_ANALYSIS_RE: re.Pattern[str] = re.compile(
-    r"<\|channel\|>\s*analysis\s*<\|message\|>(.*?)"
-    r"(?=<\|end\|>|<\|return\|>|<\|channel\|>|\Z)",
-    re.IGNORECASE | re.DOTALL,
+# A Harmony channel's head. Its body runs to the first stop token or channel
+# head after it, or to the end: see :func:`_harmony_blocks`.
+_HARMONY_ANALYSIS_HEAD_RE: re.Pattern[str] = re.compile(
+    r"<\|channel\|>\s*analysis\s*<\|message\|>",
+    re.IGNORECASE,
 )
-_HARMONY_FINAL_RE: re.Pattern[str] = re.compile(
-    r"<\|channel\|>\s*final\s*<\|message\|>(.*?)"
-    r"(?=<\|end\|>|<\|return\|>|<\|channel\|>|\Z)",
-    re.IGNORECASE | re.DOTALL,
+_HARMONY_FINAL_HEAD_RE: re.Pattern[str] = re.compile(
+    r"<\|channel\|>\s*final\s*<\|message\|>",
+    re.IGNORECASE,
+)
+_HARMONY_BODY_END_RE: re.Pattern[str] = re.compile(
+    r"<\|(?:end|return|channel)\|>",
+    re.IGNORECASE,
 )
 _HARMONY_STOP_TOKEN_RE: re.Pattern[str] = re.compile(
     r"<\|(?:end|return|start|constrain)\|>",
@@ -116,14 +122,7 @@ def strip_reasoning(
     reasoning_parts: list[str] = []
 
     clean = _reduce_harmony_channels(text, reasoning_parts)
-
-    def _paired_sub(match: re.Match[str]) -> str:
-        body = match.group(1).strip()
-        if body:
-            reasoning_parts.append(body)
-        return ""
-
-    clean = _THINK_PAIRED_RE.sub(_paired_sub, clean)
+    clean = _strip_paired_think_blocks(clean, reasoning_parts)
     clean = _strip_orphaned_think_tags(clean, reasoning_parts)
 
     if extra_patterns:
@@ -159,21 +158,97 @@ def _reduce_harmony_channels(text: str, reasoning_parts: list[str]) -> str:
         str: The text with Harmony analysis removed (or replaced by
         the final-channel body).
     """
-    final_match = _HARMONY_FINAL_RE.search(text)
-    if final_match:
-        for m in _HARMONY_ANALYSIS_RE.finditer(text):
-            body = m.group(1).strip()
-            if body:
-                reasoning_parts.append(body)
-        return final_match.group(1).strip()
-
-    def _analysis_sub(match: re.Match[str]) -> str:
-        body = match.group(1).strip()
+    final = next(_harmony_blocks(text, _HARMONY_FINAL_HEAD_RE), None)
+    analysis = list(_harmony_blocks(text, _HARMONY_ANALYSIS_HEAD_RE))
+    for _, body_start, body_end in analysis:
+        body = text[body_start:body_end].strip()
         if body:
             reasoning_parts.append(body)
-        return ""
+    if final is not None:
+        return text[final[1] : final[2]].strip()
 
-    return _HARMONY_ANALYSIS_RE.sub(_analysis_sub, text)
+    kept: list[str] = []
+    pos = 0
+    for start, _, body_end in analysis:
+        kept.append(text[pos:start])
+        pos = body_end
+    kept.append(text[pos:])
+    return "".join(kept)
+
+
+def _harmony_blocks(text: str, head: re.Pattern[str]) -> Iterator[tuple[int, int, int]]:
+    """Yield the Harmony channel blocks that *head* opens, in order.
+
+    A body runs to the first stop token or channel head after it, or to the
+    end of the text. Blocks never overlap, so each search starts where the
+    last body ended and the text is read once.
+
+    Args:
+        text (str): Input text.
+        head (re.Pattern[str]): The channel head to look for.
+
+    Yields:
+        tuple[int, int, int]: Each block's start, its body's start and its body's end.
+    """
+    pos = 0
+    while (opening := head.search(text, pos)) is not None:
+        stop = _HARMONY_BODY_END_RE.search(text, opening.end())
+        end = len(text) if stop is None else stop.start()
+        yield opening.start(), opening.end(), end
+        pos = end
+
+
+def _find_open_think(text: str, pos: int = 0) -> tuple[int, int] | None:
+    """Find the first ``<think ...>`` open tag at or after *pos*.
+
+    The tag runs from ``<think`` to the first ``>`` after it. When no ``>``
+    follows the first ``<think``, none follows a later one either, so one
+    look settles it; a regex search would scan to the end again from every
+    later ``<think``.
+
+    Args:
+        text (str): The text to search.
+        pos (int): Where to start.
+
+    Returns:
+        tuple[int, int] | None: The tag's start and end, or ``None`` when there is none.
+    """
+    start = _OPEN_THINK_START_RE.search(text, pos)
+    if start is None:
+        return None
+    bracket = text.find(">", start.end())
+    if bracket < 0:
+        return None
+    return start.start(), bracket + 1
+
+
+def _strip_paired_think_blocks(text: str, reasoning_parts: list[str]) -> str:
+    """Remove paired ``<think>...</think>`` blocks from *text*, capturing their bodies.
+
+    A block runs from an open tag to the first close tag after it, so an open
+    tag inside a block is part of its reasoning. Once an open tag has no close
+    tag after it, no later one has either, and the scan ends there.
+
+    Args:
+        text (str): Input text.
+        reasoning_parts (list[str]): Accumulator appended in place.
+
+    Returns:
+        str: The text without its paired blocks.
+    """
+    kept: list[str] = []
+    pos = 0
+    while (opening := _find_open_think(text, pos)) is not None:
+        close = _CLOSE_THINK_RE.search(text, opening[1])
+        if close is None:
+            break
+        body = text[opening[1] : close.start()].strip()
+        if body:
+            reasoning_parts.append(body)
+        kept.append(text[pos : opening[0]])
+        pos = close.end()
+    kept.append(text[pos:])
+    return "".join(kept)
 
 
 def _strip_orphaned_think_tags(text: str, reasoning_parts: list[str]) -> str:
@@ -192,20 +267,20 @@ def _strip_orphaned_think_tags(text: str, reasoning_parts: list[str]) -> str:
         str: The text with orphan reasoning spans removed.
     """
     close_match = _CLOSE_THINK_RE.search(text)
-    open_match = _OPEN_THINK_RE.search(text)
+    opening = _find_open_think(text)
 
-    if close_match and (open_match is None or close_match.start() < open_match.start()):
+    if close_match and (opening is None or close_match.start() < opening[0]):
         before = text[: close_match.start()].strip()
         if before:
             reasoning_parts.append(before)
         text = text[close_match.end() :]
-        open_match = _OPEN_THINK_RE.search(text)
+        opening = _find_open_think(text)
 
-    if open_match:
-        tail = text[open_match.end() :].strip()
+    if opening is not None:
+        tail = text[opening[1] :].strip()
         if tail:
             reasoning_parts.append(tail)
-        text = text[: open_match.start()]
+        text = text[: opening[0]]
 
     return text
 
@@ -342,14 +417,14 @@ class ReasoningStripper:
                 self._think = ""
                 self._buffer, self._state = self._buffer[close.end() :], "text"
             else:
-                opening = _OPEN_THINK_RE.search(self._buffer)
+                opening = _find_open_think(self._buffer)
                 if opening is None:
                     cut = _tail_start(self._buffer, _OPEN_THINK_TAIL_RE)
                     out.append(self._visible(self._buffer[:cut]))
                     self._buffer = self._buffer[cut:]
                     break
-                out.append(self._visible(self._buffer[: opening.start()]))
-                self._buffer, self._state = self._buffer[opening.end() :], "think"
+                out.append(self._visible(self._buffer[: opening[0]]))
+                self._buffer, self._state = self._buffer[opening[1] :], "think"
         return "".join(out)
 
     def _end_held(self, held: str) -> None:
@@ -359,11 +434,11 @@ class ReasoningStripper:
             held (str): The held content. If the model wrote its own open tag in it, the tag
                 is no part of the reasoning and the block counts as a paired one.
         """
-        opening = _OPEN_THINK_RE.search(held)
+        opening = _find_open_think(held)
         if opening is None:
             self._dangling = held.strip()
             return
-        body = (held[: opening.start()] + held[opening.end() :]).strip()
+        body = (held[: opening[0]] + held[opening[1] :]).strip()
         if body:
             self._paired.append(body)
 

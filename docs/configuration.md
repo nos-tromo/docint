@@ -21,7 +21,7 @@ environment variables they read, and the defaults baked into each factory.
 
 ## Inference endpoint — `OpenAIConfig`
 
-Loaded by `load_openai_env()` (`env_cfg.py:1771`). Controls the
+Loaded by `load_openai_env()` (`env_cfg.py:2016`). Controls the
 OpenAI-compatible client used for chat, embeddings, and vision.
 
 | Variable | Default | Description |
@@ -71,7 +71,7 @@ When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI pro
 
 ## Models — `ModelConfig`
 
-Loaded by `load_model_env()` (`env_cfg.py:1105`). Resolves model
+Loaded by `load_model_env()` (`env_cfg.py:1329`). Resolves model
 identifiers, with provider-specific fallbacks.
 
 | Variable | Default (by provider) | Description |
@@ -107,7 +107,7 @@ engine, against the same endpoint, under the same budget.
 
 ## Host endpoints — `HostConfig`
 
-Loaded by `load_host_env()` (`env_cfg.py:530`).
+Loaded by `load_host_env()` (`env_cfg.py:554`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -131,38 +131,53 @@ Requires Qdrant server ≥ 1.18 (the data-plane stack ships v1.18.3).
 
 ## Identity and authentication — `PrincipalConfig`
 
-Loaded by `load_principal_env()` (`env_cfg.py:717`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
+Loaded by `load_principal_env()` (`env_cfg.py:720`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
 
 | Variable | Default | Description |
 |---|---|---|
 | `DOCINT_AUTH_HEADER` | `X-Auth-User` | Trusted header carrying the authenticated principal's username. Set by the gateway (`edge-plane`); in dev, falls back to `DOCINT_DEFAULT_IDENTITY`. |
-| `DOCINT_DEFAULT_IDENTITY` | *unset* | Dev-only fallback identity when the trusted header is absent. Production must leave this unset so requests without `X-Auth-User` are rejected (401). Also backfills the owner for pre-existing collection and session rows (legacy migration). |
+| `DOCINT_DEFAULT_IDENTITY` | *unset* | Dev-only fallback identity when the trusted header is absent — honoured **only while `DOCINT_EDGE_SECRET` is unset**. With the secret set it is ignored (one startup warning), so a request without the gateway's identity gets 401 either way. Production must leave this unset so requests without `X-Auth-User` are rejected (401). Also backfills the owner for pre-existing collection and session rows (legacy migration), whether or not the secret is set. A request answered by it is recorded in the audit log with `via: "system"` ([audit.md](audit.md#how-an-event-is-shaped)). |
 | `DOCINT_EDGE_SECRET` | *unset* | Shared secret the gateway sends in `X-Edge-Secret` on every request it proxies — the same value as edge-plane's own `DOCINT_EDGE_SECRET`, generated with `make secret` there. Set, the identity headers (`DOCINT_AUTH_HEADER`, `DOCINT_GROUPS_HEADER` and the decorative `X-Auth-Name`) are believed only from a request carrying it; any other request resolves as if it sent none of them, so it can claim neither a user nor the admin group. Unset or blank: believed from any caller that can reach the backend, as before, with one startup warning when `DOCINT_DEFAULT_IDENTITY` is unset too. Must be at least 32 characters, or the backend refuses to start. |
-| `DOCINT_GROUPS_HEADER` | `X-Auth-Groups` | Trusted header carrying the principal's group memberships (comma-separated). Set by the gateway; in dev, falls back to `DOCINT_DEFAULT_GROUPS`. |
-| `DOCINT_ADMIN_GROUP` | `admins` | Group name that grants admin-level access. Members of this group (from `X-Auth-Groups`) can access collections, chat sessions, and reports owned by other principals via the `owner` query parameter; non-admin principals are unaffected and cross-owner access remains 404. |
-| `DOCINT_DEFAULT_GROUPS` | *unset* | Dev-only fallback group memberships (comma-separated) when the trusted header is absent. E.g. `DOCINT_DEFAULT_GROUPS=admins,devs` makes the dev principal an admin and member of devs. |
+| `DOCINT_GROUPS_HEADER` | `X-Auth-Groups` | Trusted header carrying the principal's group memberships (comma-separated). Set by the gateway; in dev, falls back to `DOCINT_DEFAULT_GROUPS` (only while `DOCINT_EDGE_SECRET` is unset). |
+| `DOCINT_ADMIN_GROUP` | `admins` | Group name that grants admin-level access. Members of this group (from `X-Auth-Groups`) can access collections, chat sessions, and reports owned by other principals via the `owner` query parameter, recorded in the audit log as acting on that owner's behalf. A non-admin's `owner` naming someone else is refused (403) on every audited route and recorded as `denied` ([audit.md](audit.md#how-an-event-is-shaped)); elsewhere it is ignored, and cross-owner names remain 404. |
+| `DOCINT_DEFAULT_GROUPS` | *unset* | Dev-only fallback group memberships (comma-separated) when the trusted header is absent. E.g. `DOCINT_DEFAULT_GROUPS=admins,devs` makes the dev principal an admin and member of devs. Like `DOCINT_DEFAULT_IDENTITY`, ignored while `DOCINT_EDGE_SECRET` is set — a gateway request without `X-Auth-Groups` then has no groups, so a dev admin default left in `.env` can never make a gateway user an admin. |
 
 **The edge secret.** The backend sits on the shared `inference-net` and
 `data-net`, so without `DOCINT_EDGE_SECRET` any container there can send
 `X-Auth-User`/`X-Auth-Groups` itself and act as any user, an admin included.
 With it set, a request whose `X-Edge-Secret` is missing or wrong (compared in
-constant time) gets exactly what a request without identity headers gets:
-`DOCINT_DEFAULT_IDENTITY` and `DOCINT_DEFAULT_GROUPS` when set, else 401. When
-such a request did carry identity headers, a warning names its method and path
-(no query string) and whether the secret was missing or did not match — never
-a header value. The frontend's nginx forwards request headers unchanged, the SSE
-locations included, so only the gateway and the backend hold the secret. A
-caller that reaches the backend directly, such as a script, must send
-`X-Edge-Secret` as well or it is anonymous.
+constant time) gets exactly what a request without identity headers gets, and
+with the secret set that is a 401: the dev fallbacks `DOCINT_DEFAULT_IDENTITY`
+and `DOCINT_DEFAULT_GROUPS` are ignored, and startup warns once when either is
+set beside the secret. When such a request did carry identity headers, a
+warning names its method and path (no query string) and whether the secret was
+missing or did not match — never a header value. The frontend's nginx forwards
+request headers unchanged, the SSE locations included, so only the gateway and
+the backend hold the secret. A caller that reaches the backend directly, such
+as a script, must send `X-Edge-Secret` as well or it is anonymous.
 
 Roll it out gateway first: set the secret in edge-plane's `.env` and restart
 the gateway, then set the same value here and restart the backend. docint
 enforces it the moment it is set, so the reverse order makes every request
 anonymous (401 in production) until the gateway catches up.
 
+## Data-protection audit log — `AuditConfig`, `AuditCliConfig`
+
+Loaded by `load_audit_env()` (`env_cfg.py:813`) and, for the command-line
+tools, `load_audit_cli_env()` (`env_cfg.py:846`). What the audit log records,
+and how, is [audit.md](audit.md).
+
+| Variable | Dataclass | Default | Description |
+|---|---|---|---|
+| `AUDIT_OUTPUT` | `AuditConfig` | *unset* | Where audit lines go: `stdout` (or unset) for the process's own stdout, `container` for the container's main stdout under one container-wide lock, so a command run with `docker compose exec` writes into the backend's own log. `docker/compose.yaml` sets `container` on the backend. Any other value stops startup. |
+| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty* | Comma-separated audit actions that need a stated purpose (`X-Audit-Purpose` on a request, `AUDIT_CASE_REF`/`AUDIT_REASON` on a command): any of `collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`. A request without one is answered 428, a command exits with code 2; both are recorded as `denied`. Parsed once at startup; an unknown name stops startup. Empty in this release — the SPA does not send the header yet. |
+| `AUDIT_CLI_USER` | `AuditCliConfig` | *unset* | The operator's host account, recorded as a command's actor (`via: "cli"`). The make targets pass `$SUDO_USER`, else `id -un`. |
+| `AUDIT_CASE_REF` | `AuditCliConfig` | *unset* | A command run's case reference. Per run (`make … CASE_REF=…`) — never in `.env`, where it would be stated for every run. A blank value states nothing; a value with control characters or over 256 characters ends the run with exit code 2. |
+| `AUDIT_REASON` | `AuditCliConfig` | *unset* | A command run's reason. Per run (`make … REASON=…`), under the same rules as `AUDIT_CASE_REF`. |
+
 ## Retrieval — `RetrievalConfig`
 
-Loaded by `load_retrieval_env()` (`env_cfg.py:2177`).
+Loaded by `load_retrieval_env()` (`env_cfg.py:2577`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -238,7 +253,7 @@ sources you do not control.
 
 ## Dense embedding client — `EmbedClientConfig`
 
-Loaded by `load_embed_client_env()` (`env_cfg.py:1705`). Dense embeddings
+Loaded by `load_embed_client_env()` (`env_cfg.py:1950`). Dense embeddings
 go through an OpenAI-compatible endpoint on every provider; these knobs
 only need to change on a CPU dev host that wants dense embeddings routed
 to a dedicated container instead of the default OpenAI-style base.
@@ -254,8 +269,8 @@ request timeout is `EMBED_TIMEOUT_SECONDS`, documented under
 
 ## Sparse encoder & hybrid retrieval — `SparseClientConfig`
 
-Loaded by `load_sparse_client_env()` (`env_cfg.py:1650`) and
-`resolve_enable_hybrid()` (`env_cfg.py:1169`). Sparse embedding is a
+Loaded by `load_sparse_client_env()` (`env_cfg.py:1895`) and
+`resolve_enable_hybrid()` (`env_cfg.py:1393`). Sparse embedding is a
 remote HTTP call on every provider — `RemoteSparseEncoder` POSTs to
 `{SPARSE_API_BASE}/pooling` (`task: token_classify`) and
 `{SPARSE_API_BASE}/tokenize`. Its wire format is frozen: production
@@ -375,7 +390,7 @@ image sets its own bind in the container CMD.
 
 ## Pipeline — `PipelineConfig`
 
-Loaded by `load_pipeline_config()` (`env_cfg.py:2001`). Controls the
+Loaded by `load_pipeline_config()` (`env_cfg.py:2270`). Controls the
 page-level PDF pipeline in `docint/core/readers/documents/`.
 
 | Variable | Default | Description |
@@ -418,7 +433,7 @@ document was fully read.
 
 ## Ingestion — `IngestionConfig`
 
-Loaded by `load_ingestion_env()` (`env_cfg.py:919`). Controls chunking
+Loaded by `load_ingestion_env()` (`env_cfg.py:1114`). Controls chunking
 sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 
 | Variable | Default | Description |
@@ -462,7 +477,7 @@ The default supported file extensions (hard-coded in
 
 ## Image ingestion — `ImageIngestionConfig`
 
-Loaded by `load_image_ingestion_config()` (`env_cfg.py:785`).
+Loaded by `load_image_ingestion_config()` (`env_cfg.py:921`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -561,7 +576,7 @@ German query in an English-locale deployment is not translated.
 
 ## NER — `NERConfig`
 
-Loaded by `load_ner_env()` (`env_cfg.py:1219`).
+Loaded by `load_ner_env()` (`env_cfg.py:1443`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -604,7 +619,7 @@ chunks carrying the earlier types.
 
 ## Hate-speech detection — `HateSpeechConfig`
 
-Loaded by `load_hate_speech_env()` (`env_cfg.py:457`).
+Loaded by `load_hate_speech_env()` (`env_cfg.py:462`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -620,7 +635,7 @@ that serves less rejects them or silently truncates them. See
 
 ## Graph-RAG — `GraphRAGConfig`
 
-Loaded by `load_graphrag_env()` (`env_cfg.py:401`).
+Loaded by `load_graphrag_env()` (`env_cfg.py:413`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -632,7 +647,7 @@ Loaded by `load_graphrag_env()` (`env_cfg.py:401`).
 
 ## Summarisation — `SummaryConfig`
 
-Loaded by `load_summary_env()` (`env_cfg.py:2377`).
+Loaded by `load_summary_env()` (`env_cfg.py:2777`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -682,7 +697,7 @@ concurrency semaphore, read by `load_summary_concurrency()`:
 
 ## Sessions — `SessionConfig`
 
-Loaded by `load_session_env()` (`env_cfg.py:2338`).
+Loaded by `load_session_env()` (`env_cfg.py:2738`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -691,7 +706,7 @@ Loaded by `load_session_env()` (`env_cfg.py:2338`).
 
 ## Frontend — `FrontendConfig`
 
-Loaded by `load_frontend_env()` (`env_cfg.py:346`).
+Loaded by `load_frontend_env()` (`env_cfg.py:352`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -712,7 +727,7 @@ Loaded by `load_logging_env()` (`docint/utils/env_cfg.py`), applied by
 
 | Variable | Default | Description |
 |---|---|---|
-| `LOG_LEVEL` | `INFO` | Minimum level for the single stderr sink. There is no file sink; under Docker the compose `local` driver owns retention (50 MB × 5, compressed). |
+| `LOG_LEVEL` | `INFO` | Minimum level for the single stderr sink. There is no file sink; under Docker the compose `local` driver owns retention (50 MB × 5, compressed). stdout carries the data-protection audit log alone ([audit.md](audit.md)), so nothing else may write there. |
 | `LOG_PROGRESS_INTERVAL_S` | `30` | Seconds between heartbeat lines while one long job stage repeats the same progress message. Stage changes and a stage's final count always log regardless. `0` disables throttling and logs every progress message — the debug setting; on a large ingest it is thousands of lines. |
 
 **Queries, answers and document text are never logged** — only their shapes
@@ -857,7 +872,7 @@ unchanged across languages.
 
 ## Response validation — `ResponseValidationConfig`
 
-Loaded by `load_response_validation_env()` (`env_cfg.py:2109`).
+Loaded by `load_response_validation_env()` (`env_cfg.py:2374`).
 
 | Variable | Default | Description |
 |---|---|---|

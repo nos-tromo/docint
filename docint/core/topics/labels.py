@@ -20,6 +20,7 @@ from typing import Any
 from loguru import logger
 
 from docint.core.ingest.hate_speech import is_structured_output_rejection
+from docint.utils.audit_meter import in_context
 from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.prompt_loader import load_localized_prompt
 
@@ -299,7 +300,7 @@ class TopicLabeller:
         executor = ThreadPoolExecutor(max_workers=self._max_in_flight)
         try:
             futures: dict[Future[TopicLabel], int] = {
-                executor.submit(self._label_one, request): request.topic_id for request in requests
+                executor.submit(in_context(self._label_one), request): request.topic_id for request in requests
             }
             pending = set(futures)
             done = 0
