@@ -1,4 +1,4 @@
-"""Link a ``me-dossier/1`` social export: posting and comment rows, media joined to their posts.
+"""Link a social export: posting and comment rows, media joined to their posts.
 
 A crawler export holds one ``dossier.json`` per profile folder. It carries the
 account's postings, the comments each one received, the other profiles' posts
