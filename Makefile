@@ -26,6 +26,9 @@ include make/common.mk
 # collector sees it and its audit lines would be lost. The operator is the
 # host account; CASE_REF=<ref> and REASON=<text> state the purpose, which the
 # command refuses to run without (exit code 2) when AUDIT_REQUIRE_PURPOSE asks.
+# Under the compose default (query,disclose) that is `extract`, which writes a
+# disclosure, and `topics` with OP=status (the default OP), which queries;
+# resolve, search-index[-all] and the topics build/align/discover runs need none.
 AUDIT_EXEC_ENV = -e AUDIT_CLI_USER="$${SUDO_USER:-$$(id -un)}" -e AUDIT_CASE_REF="$(CASE_REF)" -e AUDIT_REASON="$(REASON)"
 
 help:
@@ -43,12 +46,15 @@ help:
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make health     check backend dependency status (Qdrant reachability); chain as 'make up health'"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
-	@echo "  make extract    write a collection's data extract to RESULTS_PATH (COLLECTION=<name> optional)"
-	@echo "  make topics     build, extend or inspect a collection's topics (OP=build|align|discover|status, COLLECTION=<name> optional)"
+	@echo "  make extract    write a collection's data extract to RESULTS_PATH (COLLECTION=<name> optional; needs CASE_REF= or REASON=)"
+	@echo "  make topics     build, extend or inspect a collection's topics (OP=build|align|discover|status, COLLECTION=<name> optional;"
+	@echo "                  status, the default OP, needs CASE_REF= or REASON=)"
 	@echo "  make search-index  build the full-text search index (COLLECTION=<name> optional)"
 	@echo "  make search-index-all  build it for every collection on this host (one-time backport)"
 	@echo "                  (the five above run in the running backend and are audited;"
-	@echo "                   CASE_REF=<ref> REASON=<text> state the purpose)"
+	@echo "                   CASE_REF=<ref> REASON=<text> state the purpose, e.g."
+	@echo "                   make extract COLLECTION=mydocs CASE_REF=case-0001;"
+	@echo "                   AUDIT_REQUIRE_PURPOSE= in .env requires none)"
 	@echo "  make retention-report  show what COLLECTION_RETENTION deletes, and when (WINDOW=6m optional; read-only)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"

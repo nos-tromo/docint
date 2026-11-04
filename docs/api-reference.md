@@ -43,7 +43,7 @@ The audit gate adds these responses to every audited route:
 |---|---|---|
 | `400` | `X-Audit-Purpose` is malformed, oversized or ambiguous. Body `{"detail": "Invalid request."}`. | Nothing: no operation was started. |
 | `403` | A non-admin's `owner` parameter names someone else. Body `{"detail": "Forbidden."}`. On routes that are not audited the parameter is ignored, as before. | One `denied` event naming the owner asked for. |
-| `428` | `AUDIT_REQUIRE_PURPOSE` lists an action the route's operation records and no purpose is stated. Body `{"detail": "A stated purpose is required for this request."}`. Empty by default, so no route answers it unless an operator sets the knob. | One `denied` event. |
+| `428` | `AUDIT_REQUIRE_PURPOSE` lists an action the route's operation records and no purpose is stated. Body `{"detail": "A stated purpose is required for this request."}`. Empty in the code; the compose default `query,disclose` makes every query and disclosure answer it without a purpose. `GET /config` lists the actions in force (`require_purpose`). | One `denied` event. |
 
 **Fail closed.** When an event cannot be written, the request fails with the
 generic `500` (`{"detail": "Request failed."}` or `"Internal server error."`)

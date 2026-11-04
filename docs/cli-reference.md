@@ -377,7 +377,7 @@ clock, or serve the API, which records its own.
 | `AUDIT_CLI_USER` | The operator, recorded as the actor (`via: "cli"`). The make targets pass `$SUDO_USER`, else `id -un`. |
 | `AUDIT_CASE_REF`, `AUDIT_REASON` | The run's stated purpose. Set them per run (`make … CASE_REF=… REASON=…`), never in `.env`. |
 | `AUDIT_OUTPUT` | `container` in the backend container (compose sets it): the chain goes to the container's own log under one lock. Unset on a `uv run` host: the process's stdout. |
-| `AUDIT_REQUIRE_PURPOSE` | Actions that need a stated purpose; a run that needs one and has none exits with code `2`. Empty by default. |
+| `AUDIT_REQUIRE_PURPOSE` | Actions that need a stated purpose; a run that needs one and has none exits with code `2`. Inside the backend container it is the compose default `query,disclose`, so `extract`, `topics status`, `query` and `query-eval` need `CASE_REF=`/`REASON=` (`AUDIT_CASE_REF`/`AUDIT_REASON`) there; `resolve`, `search-index[-all]`, `topics build`/`discover`/`align`, `ingest` and `verify --repair` do not. Empty on a `uv run` host unless set. |
 
 The make targets for the audited commands run them inside the **running**
 backend (`docker compose exec`), so `make up` first: a one-off container can
@@ -385,11 +385,17 @@ exit before the log collector has found it, and its audit lines would be
 lost. `retention-report` keeps its one-off container.
 
 ```bash
-make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"
-make extract COLLECTION=mydocs CASE_REF=case-0001
+make extract COLLECTION=mydocs CASE_REF=case-0001                  # disclose: needs a purpose
+make topics COLLECTION=mydocs REASON="Review of the topic labels"   # status (query): needs one
+make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"  # combine: optional
 docker compose --env-file .env -f docker/compose.yaml \
   exec -e AUDIT_CLI_USER="$(id -un)" -e AUDIT_CASE_REF=case-0001 backend query --collection mydocs --all
 ```
+
+Without one, a command that needs it stops before it opens the collection:
+`Refused: 'extract' needs a stated purpose. Set AUDIT_CASE_REF or AUDIT_REASON.`
+on stderr, exit code `2` — `CASE_REF=` and `REASON=` are what the make targets
+pass as those two.
 
 An audit write that fails ends the command with a non-zero exit code; the
 work does not finish unrecorded.

@@ -37,6 +37,7 @@ from docint.utils.translate_client import TranslateResult
 
 ALICE = {"X-Auth-User": "alice"}
 ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FailingStream(io.StringIO):
@@ -378,6 +379,94 @@ def test_the_config_advertises_no_purpose_rule_by_default(client: TestClient) ->
         client (TestClient): The running app.
     """
     assert client.get("/config").json()["require_purpose"] == []
+
+
+def test_a_deployment_requires_a_purpose_for_queries_and_disclosures() -> None:
+    """Compose requires a purpose for ``query`` and ``disclose`` unless the variable is set, even to empty.
+
+    ``${VAR-default}`` substitutes only for an unset variable, so
+    ``AUDIT_REQUIRE_PURPOSE=`` in ``.env`` switches the requirement off;
+    ``${VAR:-default}`` would bring the default back for an empty value and
+    leave no way to require nothing. The dev overlay must not override it.
+    """
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
+    overlay = (REPO_ROOT / "docker" / "compose.override.yaml").read_text(encoding="utf-8")
+
+    assert compose.count("AUDIT_REQUIRE_PURPOSE: ${AUDIT_REQUIRE_PURPOSE-query,disclose}") == 1
+    assert "${AUDIT_REQUIRE_PURPOSE:-" not in compose
+    assert "AUDIT_REQUIRE_PURPOSE" not in overlay
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("GET", "/collections/documents?collection=alpha", None),
+        ("POST", "/search", {"question": "Alice Example", "collection": "alpha"}),
+        ("POST", "/stream_query", {"question": "Who wrote it?", "collection": "alpha"}),
+        ("GET", "/sessions/list?collection=alpha", None),
+        ("GET", "/sources/thumbnail?collection=alpha&image_id=i1", None),
+        ("GET", "/collections/alpha/export/documents.csv", None),
+        ("GET", "/sessions/s1/sources.zip", None),
+    ],
+)
+def test_the_deployment_default_refuses_queries_and_disclosures_without_a_purpose(
+    rag: DummyRAG, monkeypatch: pytest.MonkeyPatch, audit_stream: io.StringIO, method: str, url: str, body: Any
+) -> None:
+    """Under ``query,disclose`` every read and every download the SPA makes needs the bar's purpose.
+
+    Args:
+        rag (DummyRAG): The RAG double.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        audit_stream (io.StringIO): The test's audit stream.
+        method (str): The request method.
+        url (str): The route.
+        body (Any): The JSON body, if any.
+    """
+    monkeypatch.setenv("AUDIT_REQUIRE_PURPOSE", "query,disclose")
+    with TestClient(api_module.app) as client:
+        refused = client.request(method, url, json=body, headers=ALICE)
+
+    assert refused.status_code == 428
+    assert [event["outcome"] for event in _ops(audit_stream)] == ["denied"]
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("POST", "/ingest/finalize", {"collection": "alpha"}),
+        ("DELETE", "/sessions/s1/scope", None),
+        ("POST", "/reports", {"title": "Case", "collection_name": "alpha"}),
+        ("DELETE", "/sessions/s1", None),
+        ("POST", "/translate", {"text": "Hallo"}),
+    ],
+)
+def test_the_deployment_default_lets_other_work_through_without_a_purpose(
+    rag: DummyRAG, monkeypatch: pytest.MonkeyPatch, method: str, url: str, body: Any
+) -> None:
+    """Collection, alteration, erasure and model calls are not refused for want of a purpose.
+
+    They still carry one when it is stated; ``query,disclose`` only makes it
+    mandatory for reads and disclosures. A queued run lands on a manager of
+    the test's own whose runner does nothing, so none is left behind on the
+    application's.
+
+    Args:
+        rag (DummyRAG): The RAG double.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        method (str): The request method.
+        url (str): The route.
+        body (Any): The JSON body, if any.
+    """
+    monkeypatch.setenv("AUDIT_REQUIRE_PURPOSE", "query,disclose")
+    manager = IngestJobManager(runner=lambda _state, _push: {})
+    api_module.app.dependency_overrides[api_module.get_job_manager] = lambda: manager
+    try:
+        with TestClient(api_module.app, raise_server_exceptions=False) as client:
+            response = client.request(method, url, json=body, headers=ALICE)
+    finally:
+        api_module.app.dependency_overrides.pop(api_module.get_job_manager, None)
+
+    assert response.status_code != 428
 
 
 def test_requiring_ai_call_gates_a_chat_turn(

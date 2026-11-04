@@ -237,10 +237,18 @@ generic detail and records nothing. A purpose is *stated* when at least one
 field is set; it is recorded on every event of the operation, and never in
 the operational log — it is personal data in its own right.
 
-`AUDIT_REQUIRE_PURPOSE` lists the actions that need a stated purpose. It is
-**empty in the code** (tests, a bare `uvicorn`); the SPA states the purpose
-through its purpose bar ([below](#how-the-spa-sends-the-purpose)). When it is
-set, a route is refused (428, one `denied` event) when *any* action its
+`AUDIT_REQUIRE_PURPOSE` lists the actions that need a stated purpose. **A
+deployment requires one for `query` and `disclose`**: `docker/compose.yaml`
+sets `${AUDIT_REQUIRE_PURPOSE-query,disclose}` on the backend, because §76
+BDSG Abs. 2 asks the reason for queries and disclosures. Every search, chat
+turn, listing, preview and download is then refused until a purpose is
+stated; collecting, changing, combining and erasing data, and a translation's
+model call, are recorded with the purpose when one is stated but not refused
+without one. The default applies only while the variable is unset: set
+`AUDIT_REQUIRE_PURPOSE=` (empty) in `.env` to require none, or list other
+actions. The code default is empty (tests, a bare `uvicorn`). The SPA states
+the purpose through its purpose bar ([below](#how-the-spa-sends-the-purpose)).
+A route is refused (428, one `denied` event) when *any* action its
 operation may record is listed — a chat turn records `query` and `ai_call`, a
 finalize `collect`, `ai_call`, `combine` and `modify`, a summary request
 `query`, `modify` and `ai_call`. A job runs with the purpose of the request
@@ -316,10 +324,12 @@ one is stated, and it is recorded, but they are not refused without one.
 The admin owner context (`?owner=`) is added by `apiFetch` too, so a download
 an admin makes in another owner's namespace is recorded `on_behalf_of` that
 owner like any other request — the session sources ZIP, which used to go out
-without it, included. The routes the SPA reads that record nothing (`/config`,
-`/version`, `/whoami`, the job status routes and stream, the PDF status,
-extract listings, document counts and summary, the session's topic) carry the
-purpose too, and ignore it.
+without it, included. The routes the SPA calls that record nothing
+(`/config`, `/config/ingest-defaults`, `/version`, `/whoami`,
+`POST /collections/select`, `POST /collections/ner/warm`, `GET /ingest/staged`,
+the job routes and their stream, the PDF status, extract listings, document
+counts and summary, the session's topic, the non-admin collection listings)
+carry the purpose too, and ignore it.
 
 ## Routes
 
@@ -575,11 +585,21 @@ The make targets run the commands inside the running backend with
 `docker compose exec`, so their lines land in the backend's log
 (`AUDIT_OUTPUT=container`): a one-off container can exit before the log
 collector has found it, and its lines would be lost without a trace. The
-backend must be up. They pass the operator's host account and the purpose:
+backend must be up. They pass the operator's host account and the purpose.
+
+Inside the backend the compose default `query,disclose` applies, so the
+commands that read or hand out collection data need `CASE_REF=` or `REASON=`
+and exit with code 2 without one: `extract` (`disclose`), `topics status` —
+`make topics`' default `OP` (`query`) — and `query` / `query-eval` (`query` and
+`disclose`). `resolve` (`combine`), `search-index` / `search-index-all`
+(`modify`), `topics build` / `discover` / `align` (`modify`), `ingest`
+(`collect`) and `verify --repair` (`delete`) need none, and record one when it
+is given:
 
 ```bash
-make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"
 make extract COLLECTION=mydocs CASE_REF=case-0001
+make topics COLLECTION=mydocs REASON="Review of the topic labels"
+make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"
 ```
 
 `AUDIT_CLI_USER` is `$SUDO_USER`, else `id -un`, on the host; an empty
@@ -591,7 +611,7 @@ one-off container: it reads only the retention clock.
 | Variable | Read by | Default | Description |
 |---|---|---|---|
 | `AUDIT_OUTPUT` | `AuditConfig` | *unset* | `stdout` (or unset) for the process's own stdout; `container` for the container's main stdout under the container-wide lock. Compose sets `container` on the backend. Any other value stops startup. |
-| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty* | Comma-separated actions that need a stated purpose (`collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`). Empty in this release. An unknown name stops startup. |
+| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty*; `query,disclose` in `docker/compose.yaml` while unset | Comma-separated actions that need a stated purpose (`collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`). Set it empty in `.env` to require none. An unknown name stops startup. `GET /config` names the actions in force (`require_purpose`). |
 | `AUDIT_CLI_USER` | `AuditCliConfig` | *unset* | The operator's host account, for a command's actor. The make targets set it. |
 | `AUDIT_CASE_REF` | `AuditCliConfig` | *unset* | A command's case reference. Per run (`make … CASE_REF=…`), never in `.env`. |
 | `AUDIT_REASON` | `AuditCliConfig` | *unset* | A command's reason. Per run (`make … REASON=…`), never in `.env`. |

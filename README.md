@@ -119,7 +119,10 @@ sets `DOCINT_EDGE_SECRET` so the header is believed only from the gateway. See
 `resolve`, `topics`, `extract`, `search-index` and `search-index-all` run
 inside the running backend (`make up` first) and record a data-protection
 audit chain; `CASE_REF=` and `REASON=` state the purpose
-([docs/audit.md](docs/audit.md)).
+([docs/audit.md](docs/audit.md)). A deployment requires a purpose for every
+query and disclosure (`AUDIT_REQUIRE_PURPOSE=query,disclose`, the compose
+default): `extract` and `topics` (`status`) refuse to run without one, and the
+SPA asks for it in its header's purpose bar.
 
 The twelve console scripts — `docint`, `ingest`, `query`, `query-eval`,
 `resolve`, `extract`, `topics`, `search-index`, `search-index-all`,
