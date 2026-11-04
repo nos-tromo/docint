@@ -436,8 +436,8 @@ def test_document_counts_facet_file_hash_within_a_topic(client: QdrantClient) ->
     ids = _seed(client)
     write_assignments(client, COLL, "r1", {0: ids[:5], 1: ids[5:]})
     # Indices 0..4 carry hashes h0,h1,h0,h1,h0.
-    assert document_counts(client, COLL, "r1", 0, limit=10) == [("h0", 3), ("h1", 2)]
-    assert document_counts(client, COLL, "r1", 1, limit=10) == [("h1", 1)]
+    assert document_counts(client, COLL, "r1", (0,), limit=10) == [("h0", 3), ("h1", 2)]
+    assert document_counts(client, COLL, "r1", (1,), limit=10) == [("h1", 1)]
 
 
 def test_central_points_rank_by_closeness_within_the_topic_and_the_extra_filter(client: QdrantClient) -> None:
@@ -450,11 +450,13 @@ def test_central_points_rank_by_closeness_within_the_topic_and_the_extra_filter(
     write_assignments(client, COLL, "r1", {0: ids[:4]})
     dense = dense_vector(client, COLL)
     centre = np.asarray(_vec(2), dtype=np.float32)
-    got = central_points(client, COLL, centre=centre, dense=dense, run_id="r1", topic_id=0, limit=3)
+    got = central_points(client, COLL, centre=centre, dense=dense, run_id="r1", topic_ids=(0,), limit=3)
     assert str(got[0].id) == ids[2]
     assert {str(p.id) for p in got} <= set(ids[:4])
     only_h1 = models.Filter(must=[models.FieldCondition(key=FILE_HASH_FIELD, match=models.MatchValue(value="h1"))])
-    narrowed = central_points(client, COLL, centre=centre, dense=dense, run_id="r1", topic_id=0, limit=3, extra=only_h1)
+    narrowed = central_points(
+        client, COLL, centre=centre, dense=dense, run_id="r1", topic_ids=(0,), limit=3, extra=only_h1
+    )
     assert {str(p.id) for p in narrowed} == {ids[1], ids[3]}
 
 
@@ -469,7 +471,7 @@ def test_member_page_pages_with_the_scroll_offset(client: QdrantClient) -> None:
     seen: list[str] = []
     offset: Any = None
     while True:
-        points, offset = member_page(client, COLL, run_id="r1", topic_id=0, offset=offset, limit=2)
+        points, offset = member_page(client, COLL, run_id="r1", topic_ids=(0,), offset=offset, limit=2)
         seen.extend(str(p.id) for p in points)
         if offset is None:
             break
@@ -493,3 +495,21 @@ def test_ids_and_text_helpers() -> None:
     merged = and_filters(topic_filter("r", 1), None, pending_filter("r"))
     assert isinstance(merged.must, list) and len(merged.must) == 2
     assert isinstance(merged.must_not, list) and len(merged.must_not) == 1
+
+
+def test_a_topic_filter_over_several_leaves_selects_their_union(client: QdrantClient) -> None:
+    """One id matches by value; several match any of their values, as one group reads.
+
+    Args:
+        client: Qdrant client.
+    """
+    ids = _seed(client)
+    write_assignments(client, COLL, "r1", {0: ids[:2], 1: ids[2:5], 2: ids[5:6]})
+    single = topic_filter("r1", 1)
+    assert isinstance(single.must, list) and isinstance(single.must[0], models.FieldCondition)
+    assert isinstance(single.must[0].match, models.MatchValue)
+    assert topic_filter("r1", [1]).must == single.must
+    union = topic_filter("r1", (0, 2))
+    assert isinstance(union.must, list) and isinstance(union.must[0], models.FieldCondition)
+    assert union.must[0].match == models.MatchAny(any=["r1:0", "r1:2"])
+    assert count(client, COLL, union) == 3
