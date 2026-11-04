@@ -25,6 +25,8 @@ from docint.utils.retry import is_transient_qdrant_error, retry_with_backoff
 
 TOPIC_FIELD = "docint_topic"
 RUN_FIELD = "docint_topic_run"
+#: The run that placed a point only under a lowered admission bar (see ``TopicsService`` ``relax``), else ``""``.
+RELAXED_FIELD = "docint_topic_relaxed"
 FILE_HASH_FIELD = "file_hash"
 UNASSIGNED = -1
 PAGE_SIZE = 256
@@ -33,7 +35,7 @@ TIMESTAMP_KEYS = ("reference_metadata.timestamp", "reference_metadata.posting_ti
 _DENSE_NAME = "text-dense"
 _SEARCH_TEXT = "search_text"
 _FALLBACK_TEXT_KEYS = ["text", "chunk_text", "chunk", "content", "_node_content"]
-_INDEXED_KEYS = (TOPIC_FIELD, RUN_FIELD, FILE_HASH_FIELD)
+_INDEXED_KEYS = (TOPIC_FIELD, RUN_FIELD, RELAXED_FIELD, FILE_HASH_FIELD)
 
 
 def topic_value(run_id: str, topic_id: int) -> str:
@@ -143,7 +145,7 @@ def dense_vector(client: Any, collection: str) -> DenseVector:
 
 
 def ensure_topic_indexes(client: Any, collection: str) -> None:
-    """Give the three topic keys a KEYWORD index, replacing a wrong-kind one.
+    """Give the topic keys and the file hash a KEYWORD index, replacing a wrong-kind one.
 
     Args:
         client: Qdrant client.
@@ -408,33 +410,96 @@ def iter_rows(
         yield [PointRow(str(p.id), dense.of(p), p.payload or {}) for p in page]
 
 
-def write_assignments(client: Any, collection: str, run_id: str, groups: Mapping[int, Sequence[str]]) -> int:
-    """Stamp points with their topic, one operation per topic.
+def write_assignments(
+    client: Any,
+    collection: str,
+    run_id: str,
+    groups: Mapping[int, Sequence[str]],
+    *,
+    relaxed: Mapping[int, Sequence[str]] | None = None,
+) -> int:
+    """Stamp points with their topic, one operation per topic and kind of admission.
 
     Points are selected by id filter, not a points list, so one deleted
-    meanwhile is skipped instead of failing the batch.
+    meanwhile is skipped instead of failing the batch. Every write sets the
+    relaxed key too: the run's id on a point admitted only under a lowered
+    bar, else empty, so no write leaves an earlier placement's marker behind
+    (a rebuild cancelled after writing a point would otherwise hand it back to
+    the old run still marked, and undoing that run's relaxation would empty a
+    point placed by the rule).
 
     Args:
         client: Qdrant client.
         collection: Physical collection name.
         run_id: Run id.
-        groups: Topic id to the point ids placed in it.
+        groups: Topic id to the point ids placed in it by the rule.
+        relaxed: Topic id to the point ids placed in it only under a lowered bar.
 
     Returns:
         The number of ids written.
     """
+    batches = ((groups, ""), (relaxed or {}, run_id))
     operations = [
         models.SetPayloadOperation(
             set_payload=models.SetPayload(
-                payload={TOPIC_FIELD: topic_value(run_id, topic_id), RUN_FIELD: run_id},
+                payload={TOPIC_FIELD: topic_value(run_id, topic_id), RUN_FIELD: run_id, RELAXED_FIELD: marker},
                 filter=models.Filter(must=[models.HasIdCondition(has_id=[as_point_id(i) for i in ids])]),
             )
         )
-        for topic_id, ids in groups.items()
+        for chosen, marker in batches
+        for topic_id, ids in chosen.items()
         if ids
     ]
     if not operations:
         return 0
+    _update(client, collection, operations)
+    written = sum(len(ids) for chosen, _ in batches for ids in chosen.values())
+    logger.debug("Topic assignments written | topics={} points={}", len(operations), written)
+    return written
+
+
+def relaxed_filter(run_id: str) -> models.Filter:
+    """Select the points a run placed only under a lowered admission bar.
+
+    Args:
+        run_id: Run id.
+
+    Returns:
+        Points the run placed, marked with its id.
+    """
+    return models.Filter(
+        must=[
+            models.FieldCondition(key=RELAXED_FIELD, match=models.MatchValue(value=run_id)),
+            models.FieldCondition(key=RUN_FIELD, match=models.MatchValue(value=run_id)),
+        ]
+    )
+
+
+def revert_relaxed(client: Any, collection: str, run_id: str) -> None:
+    """Return every point a run placed only under a lowered bar to its unassigned pool, in one filtered write.
+
+    Args:
+        client: Qdrant client.
+        collection: Physical collection name.
+        run_id: Run id.
+    """
+    operation = models.SetPayloadOperation(
+        set_payload=models.SetPayload(
+            payload={TOPIC_FIELD: topic_value(run_id, UNASSIGNED), RELAXED_FIELD: ""},
+            filter=relaxed_filter(run_id),
+        )
+    )
+    _update(client, collection, [operation])
+
+
+def _update(client: Any, collection: str, operations: Sequence[Any]) -> None:
+    """Apply payload operations, waiting for them and retrying transient failures.
+
+    Args:
+        client: Qdrant client.
+        collection: Physical collection name.
+        operations: The operations, applied in order.
+    """
     retry_with_backoff(
         "topics_write",
         lambda: client.batch_update_points(collection_name=collection, update_operations=operations, wait=True),
@@ -443,9 +508,6 @@ def write_assignments(client: Any, collection: str, run_id: str, groups: Mapping
         max_backoff=4.0,
         is_retryable=is_transient_qdrant_error,
     )
-    written = sum(len(ids) for ids in groups.values())
-    logger.debug("Topic assignments written | topics={} points={}", len(operations), written)
-    return written
 
 
 def count(client: Any, collection: str, flt: models.Filter) -> int:

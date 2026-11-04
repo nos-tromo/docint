@@ -116,12 +116,27 @@ def _build(client: Any, root: Path, name: str = COLL) -> TopicRun:
     Returns:
         The active run.
     """
-    store = TopicStore(root)
-    service = TopicsService(
+    _job(client, root, "build", name)
+    run = TopicStore(root).active(name, owner_created_at=CREATED)
+    assert run is not None
+    return run
+
+
+def _job(client: Any, root: Path, action: Any, name: str = COLL, **options: Any) -> None:
+    """Run one topics job with the scripted fit and no labeller.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        action: The action.
+        name: Collection name.
+        **options: The job's settings.
+    """
+    TopicsService(
         TopicsDeps(
             client=client,
             fit=FakeFit(BLOBS),
-            store=store,
+            store=TopicStore(root),
             labeller=None,
             config=_cfg(),
             embed_model=EMBED,
@@ -129,18 +144,15 @@ def _build(client: Any, root: Path, name: str = COLL) -> TopicRun:
             stop_words_sha256="0" * 64,
             sleep=lambda _s: None,
         )
-    )
-    service.run(
-        "build",
+    ).run(
+        action,
         name,
         logical="docs",
         owner_created_at=lambda: CREATED,
         progress=lambda _stage, _done, _total: None,
         warn=lambda _code, _message: None,
+        **options,
     )
-    run = store.active(name, owner_created_at=CREATED)
-    assert run is not None
-    return run
 
 
 def _source(point: Any) -> dict[str, Any]:
@@ -468,6 +480,41 @@ def test_tuning_shows_every_topic_unreduced_with_the_tree_and_the_written_labels
     assert out["groups"] == [[0, 2]]
     assert out["group_labels"] == {"0,2": "Zero and two"}
     json.dumps(out)
+
+
+def test_tuning_reports_the_last_relax_and_when_the_pool_has_moved_on(client: QdrantClient, tmp_path: Path) -> None:
+    """Before a relax there is no histogram; after one it is current until the pool it measured changes.
+
+    Args:
+        client: Qdrant client.
+        tmp_path: Per-test directory.
+    """
+    root = tmp_path / "topics"
+    run = _build(client, root)
+
+    def relax_state() -> dict[str, Any]:
+        """Read the tuning view's relax block for the stored run.
+
+        Returns:
+            The block.
+        """
+        stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+        out = views.tuning(client, stored, COLL, ensure_indexes=_no_ensure)
+        assert out is not None
+        return out["relax"]
+
+    assert relax_state() == {"threshold": None, "histogram": None, "applied": 0, "stale": True}
+
+    _job(client, root, "relax", run_id=run.run_id, threshold=None)
+    measured = relax_state()
+    assert measured["stale"] is False and measured["applied"] == 0 and measured["threshold"] is None
+    assert measured["histogram"] is not None and sum(measured["histogram"]) == OUTLIERS
+
+    far = np.zeros(DIM)
+    far[DIM - 1] = 1.0
+    add_points(client, COLL, [(pid, far, {"search_text": _text(pid, "far")}) for pid in uuid_ids(2000)[1990:]])
+    _job(client, root, "align")
+    assert relax_state()["stale"] is True
 
 
 def _rag(client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, created: str) -> RAG:

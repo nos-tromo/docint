@@ -618,6 +618,65 @@ def test_a_reduce_reaches_its_job_with_its_run_and_groups(
     ]
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "relax", "threshold": 0.4},
+        {"action": "relax", "run_id": RUN, "threshold": 0.0},
+        {"action": "relax", "run_id": RUN, "threshold": 1.0},
+        {"action": "relax", "run_id": RUN, "groups": [[0, 1]]},
+        {"action": "build", "threshold": 0.4},
+        {"action": "reduce", "run_id": RUN, "groups": [], "threshold": 0.4},
+    ],
+)
+def test_a_relax_needs_its_run_and_a_bar_within_range(client: TestClient, body: dict[str, Any]) -> None:
+    """A relax names its run and a bar from 0.01 to 0.99, or none; no other action takes a bar.
+
+    Args:
+        client: The client.
+        body: The request body.
+    """
+    assert client.post("/collections/docs/topics", json=body).status_code == 422
+
+
+def test_a_relax_reaches_its_job_with_its_bar_or_none(
+    make_client: Callable[[JobRunner], TestClient], fake: _TopicsRAG
+) -> None:
+    """A relax is queued with its run and bar; without a bar it is queued to undo and measure.
+
+    Args:
+        make_client: The client factory.
+        fake: The RAG stand-in.
+    """
+    seen: list[dict[str, Any] | None] = []
+
+    def recording(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Record the job's settings.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        seen.append(state.topics_options)
+        return {"empty": True, "resolution": None}
+
+    client = make_client(recording)
+    fake.store.run = object()
+    bodies: list[dict[str, Any]] = [
+        {"action": "relax", "run_id": RUN, "threshold": 0.42},
+        {"action": "relax", "run_id": RUN, "threshold": None},
+    ]
+    for body in bodies:
+        res = client.post("/collections/docs/topics", json=body)
+        assert res.status_code == 202
+        _await_terminal(client, res.json()["job_id"])
+
+    assert seen == [{"run_id": RUN, "threshold": 0.42}, {"run_id": RUN}]
+
+
 def test_a_jobs_audit_criteria_name_its_settings_by_number_only() -> None:
     """A reduce's groups are recorded as their count, never their ids; other settings as given."""
     criteria = api_module._topics_job_criteria({"run_id": RUN, "groups": [[0, 1], [2, 3]], "min_topic_size": 9})

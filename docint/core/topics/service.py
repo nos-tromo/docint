@@ -12,6 +12,7 @@ collection stops before it touches a new collection of the same name.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -28,6 +29,7 @@ from qdrant_client import models
 from docint.core.topics.gather import (
     PAGE_SIZE,
     TIMESTAMP_KEYS,
+    UNASSIGNED,
     DenseVector,
     PointRow,
     and_filters,
@@ -39,7 +41,9 @@ from docint.core.topics.gather import (
     iter_rows,
     pending_filter,
     point_text,
+    relaxed_filter,
     retrieve_candidates,
+    revert_relaxed,
     scan_ids,
     topic_filter,
     write_assignments,
@@ -55,7 +59,15 @@ from docint.core.topics.model import (
     kept_members,
     merge_new,
 )
-from docint.core.topics.reduce import GROUPS_KEY, LABELS_KEY, check_groups, group_key, group_label, view_of
+from docint.core.topics.reduce import (
+    GROUPS_KEY,
+    LABELS_KEY,
+    RELAX_KEY,
+    check_groups,
+    group_key,
+    group_label,
+    view_of,
+)
 from docint.core.topics.sample import (
     MAX_DF,
     MIN_DF,
@@ -76,7 +88,7 @@ from docint.utils.audit_meter import in_context
 from docint.utils.env_cfg import TopicsConfig
 from docint.utils.topics_client import FitParams, FitResult, TopicsBusy, max_fit_points, texts_limit
 
-Action = Literal["build", "discover", "align", "reduce"]
+Action = Literal["build", "discover", "align", "reduce", "relax"]
 STAGES = ("starting", "waiting", "scanning", "sampling", "fitting", "labelling", "assigning", "aligning")
 HEARTBEAT_S = 5.0
 LOCK_POLL_S = 1.0
@@ -87,7 +99,9 @@ Progress = Callable[[str, int, int], None]
 Warn = Callable[[str, str], None]
 FitFn = Callable[[Sequence[str], np.ndarray, FitParams], FitResult]
 
-_ACTIONS = ("build", "discover", "align", "reduce")
+_ACTIONS = ("build", "discover", "align", "reduce", "relax")
+#: Bins of a relax's cosine histogram, each 1/100 wide over [0, 1); a relax bar is a bin's lower edge.
+RELAX_BINS = 100
 
 _PROGRESS_COPY = {
     "starting": "Starting topics run",
@@ -511,11 +525,12 @@ class TopicsService:
         min_topic_size: int | None = None,
         run_id: str | None = None,
         groups: Sequence[Sequence[int]] | None = None,
+        threshold: float | None = None,
     ) -> TopicsOutcome:
         """Run one job under the collection's lock, waiting for it if needed.
 
         Args:
-            action: ``build``, ``discover``, ``align`` or ``reduce``.
+            action: ``build``, ``discover``, ``align``, ``reduce`` or ``relax``.
             physical: Physical collection name.
             logical: Logical collection name, for the refusal log line.
             owner_created_at: Reads the ownership row's ``created_at`` now.
@@ -523,8 +538,10 @@ class TopicsService:
             warn: Receives ``(code, message)`` for a job that finds nothing.
             min_topic_size: For a build, the smallest topic in place of the
                 configured or automatic size.
-            run_id: For a reduce, the run its groups were drawn up against.
+            run_id: For a reduce or a relax, the run it was asked against.
             groups: For a reduce, the groups of topic ids; empty for none.
+            threshold: For a relax, the lowered admission bar; ``None`` to
+                undo a relax and only measure the pool.
 
         Returns:
             The outcome.
@@ -548,6 +565,7 @@ class TopicsService:
                 min_topic_size=min_topic_size,
                 run_id=run_id,
                 groups=groups,
+                threshold=threshold,
             )
         except TopicsRefused as exc:
             counts = "".join(f" {key}={value}" for key, value in exc.counts().items())
@@ -777,6 +795,7 @@ class TopicsService:
         min_topic_size: int | None = None,
         run_id: str | None = None,
         groups: Sequence[Sequence[int]] | None = None,
+        threshold: float | None = None,
     ) -> TopicsOutcome:
         """Dispatch a job once the lock is held.
 
@@ -791,15 +810,16 @@ class TopicsService:
             warn: The warning channel.
             job: What the job has written.
             min_topic_size: For a build, the smallest topic in place of the configured or automatic size.
-            run_id: For a reduce, the run its groups were drawn up against.
+            run_id: For a reduce or a relax, the run it was asked against.
             groups: For a reduce, the groups of topic ids.
+            threshold: For a relax, the lowered admission bar, ``None`` for none.
 
         Returns:
             The outcome.
 
         Raises:
-            TopicsRefused: ``no_run`` or ``dimension_changed`` for discover and align;
-                ``collection_changed`` once the collection is replaced.
+            TopicsRefused: ``no_run`` or ``dimension_changed`` for every action
+                but build; ``collection_changed`` once the collection is replaced.
         """
         store, client = self._deps.store, self._deps.client
         created = owner_created_at()
@@ -821,6 +841,8 @@ class TopicsService:
             return self._discover(physical, dense, run, created, owner_created_at, progress, warn, job)
         if action == "reduce":
             return self._reduce(physical, dense, run, run_id, groups or (), created, owner_created_at, progress)
+        if action == "relax":
+            return self._relax(physical, dense, run, run_id, threshold, created, owner_created_at, progress, job)
         return self._align(physical, dense, run, created, owner_created_at, progress, job)
 
     def _build(
@@ -1110,6 +1132,94 @@ class TopicsService:
             if group[0] in names and names[group[0]].written
         }
 
+    def _relax(
+        self,
+        physical: str,
+        dense: DenseVector,
+        run: TopicRun,
+        asked: str | None,
+        threshold: float | None,
+        created: str | None,
+        owner_created_at: Callable[[], str | None],
+        progress: Progress,
+        job: _Job,
+    ) -> TopicsOutcome:
+        """Place unassigned chunks under a lowered admission bar, starting over each time.
+
+        BERTopic's ``reduce_outliers`` by embeddings, as a one-off: every chunk
+        an earlier relax placed goes back to the unassigned pool first, then the
+        pool is placed again. A chunk that now clears its nearest topic's floor
+        is placed as the rule places it (a discover may have added that topic);
+        one that clears only the bar is placed and marked, so the next relax can
+        take it back. Later aligns keep the floors: a relax does not lower them.
+        The scan counts, for every chunk the rule does not place, its best
+        cosine in :data:`RELAX_BINS` bins; the bar admits exactly the bins at or
+        above it, so the histogram previews any bar exactly.
+
+        Args:
+            physical: Physical collection name.
+            dense: The collection's dense vector.
+            run: The active run.
+            asked: The run the relax was asked against.
+            threshold: The bar, a bin edge from 0.01 to 0.99; ``None`` to place
+                nothing under a lowered bar and only measure the pool.
+            created: The ownership row's ``created_at`` when the job started.
+            owner_created_at: Reads it again before the run is saved.
+            progress: Receives ``assigning`` frames.
+            job: What the job has written.
+
+        Returns:
+            The outcome; ``assigned`` counts the chunks placed, by the rule or the bar.
+
+        Raises:
+            TopicsRefused: ``run_changed`` when the run is not the one asked
+                about; ``collection_changed`` once the collection is replaced.
+        """
+        if asked != run.run_id:
+            raise TopicsRefused("run_changed")
+        client, run_id, table = self._deps.client, run.run_id, run.table
+        bar = None if threshold is None else min(RELAX_BINS - 1, max(1, round(threshold * RELAX_BINS)))
+        job.guard()
+        # Set before the call: a write that fails midway may still have landed.
+        job.wrote = True
+        revert_relaxed(client, physical, run_id)
+        pool = and_filters(topic_filter(run_id, UNASSIGNED), eligible_filter())
+        total = count(client, physical, pool)
+        histogram = [0] * RELAX_BINS
+        done = assigned = 0
+        for page in iter_rows(client, physical, scroll_filter=pool, dense=dense):
+            pairs = [(row, row.vector) for row in page if row.vector is not None]
+            if pairs and table.topics:
+                best, cosine = table.nearest(np.stack([vector for _, vector in pairs]))
+                strict = cosine >= table.floors[best]
+                placed: list[PointRow] = []
+                topics: list[int] = []
+                marks: list[bool] = []
+                for (row, _), nearest, score, by_rule in zip(
+                    pairs, best.tolist(), cosine.tolist(), strict.tolist(), strict=True
+                ):
+                    if not by_rule:
+                        slot = min(RELAX_BINS - 1, max(0, math.floor(score * RELAX_BINS)))
+                        histogram[slot] += 1
+                        if bar is None or slot < bar:
+                            continue
+                    placed.append(row)
+                    topics.append(int(table.topics[nearest].id))
+                    marks.append(not by_rule)
+                assigned += self._write(physical, run_id, placed, topics, job, relaxed=marks)
+            done += len(page)
+            progress("assigning", done, max(total, done))
+        _refuse_if_replaced(owner_created_at, created)
+        basis = count(client, physical, pool) + count(client, physical, relaxed_filter(run_id))
+        relax = {
+            "threshold": None if bar is None else bar / RELAX_BINS,
+            "histogram": histogram,
+            "basis": basis,
+            "at": self._now_iso(),
+        }
+        saved = self._save_seen(physical, TopicRun(run_id, {**run.record, RELAX_KEY: relax}, table), table, job)
+        return TopicsOutcome("relax", run_id, len(saved.table.topics), 0, assigned, empty=False)
+
     def _fit_pool(
         self,
         physical: str,
@@ -1374,7 +1484,16 @@ class TopicsService:
             progress(stage, done, max(total, done))
         return moved
 
-    def _write(self, physical: str, run_id: str, rows: Sequence[PointRow], topics: Sequence[int], job: _Job) -> int:
+    def _write(
+        self,
+        physical: str,
+        run_id: str,
+        rows: Sequence[PointRow],
+        topics: Sequence[int],
+        job: _Job,
+        *,
+        relaxed: Sequence[bool] | None = None,
+    ) -> int:
         """Write one page's assignments and widen the seen ranges.
 
         A page's times are stored with the run before the page is written:
@@ -1388,6 +1507,7 @@ class TopicsService:
             rows: The rows.
             topics: Each row's topic.
             job: What the job has written, updated in place.
+            relaxed: Per row, whether it is placed only under a lowered bar; none are when omitted.
 
         Returns:
             Rows placed in a topic.
@@ -1397,10 +1517,12 @@ class TopicsService:
                 the collection was replaced since the job started or its run was
                 deleted.
         """
+        marks = relaxed if relaxed is not None else [False] * len(rows)
         groups: dict[int, list[str]] = {}
-        for row, tid in zip(rows, topics, strict=True):
-            groups.setdefault(tid, []).append(row.point_id)
-        if not groups:
+        lowered: dict[int, list[str]] = {}
+        for row, tid, mark in zip(rows, topics, marks, strict=True):
+            (lowered if mark else groups).setdefault(tid, []).append(row.point_id)
+        if not groups and not lowered:
             return 0
         job.guard()
         page: _Seen = {}
@@ -1418,7 +1540,7 @@ class TopicsService:
             raise TopicsRefused("collection_changed")
         # Set before the call: a write that fails midway may still have landed.
         job.wrote = True
-        write_assignments(self._deps.client, physical, run_id, groups)
+        write_assignments(self._deps.client, physical, run_id, groups, relaxed=lowered)
         for tid, (lo, hi) in page.items():
             _widen(job.seen, tid, lo)
             _widen(job.seen, tid, hi)

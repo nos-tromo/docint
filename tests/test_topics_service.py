@@ -2507,6 +2507,185 @@ def test_a_reduction_outlives_later_aligns_and_discovers(client: QdrantClient, r
     assert "0,1" in stored.record["group_labels"]
 
 
+#: Outliers' cosines to topic 0's centre, each well inside its own 0.01 histogram bin.
+OUTLIER_COSINES = (0.205, 0.305, 0.405, 0.455)
+
+
+def _add_outliers(client: QdrantClient, cosines: Sequence[float] = OUTLIER_COSINES, *, offset: int = 900) -> list[str]:
+    """Add points at a given cosine to blob 0, too far for the fit or a floor to place them.
+
+    Args:
+        client: Qdrant client.
+        cosines: Each point's cosine to blob 0's centre; its other part is orthogonal to every blob.
+        offset: Id offset.
+
+    Returns:
+        The ids, in the order of ``cosines``.
+    """
+    ids = _ids(len(cosines), offset)
+    rows = []
+    for pid, cosine in zip(ids, cosines, strict=True):
+        vector = np.zeros(DIM)
+        vector[0], vector[DIM - 1] = cosine, np.sqrt(1.0 - cosine**2)
+        rows.append((pid, vector, {"search_text": f"passage {pid} outlier words", "file_hash": "hx"}))
+    add_points(client, COLL, rows)
+    return ids
+
+
+def _relax(svc: TopicsService, run_id: str | None, threshold: float | None) -> TopicsOutcome:
+    """Run a relax.
+
+    Args:
+        svc: The service.
+        run_id: The run it is asked against.
+        threshold: The lowered bar, ``None`` to undo and measure.
+
+    Returns:
+        The outcome.
+    """
+    rec = Frames()
+    return svc.run(
+        "relax",
+        COLL,
+        logical="coll",
+        owner_created_at=lambda: CREATED,
+        progress=rec.progress,
+        warn=rec.warn,
+        run_id=run_id,
+        threshold=threshold,
+    )
+
+
+def _relaxed_marks(client: QdrantClient) -> dict[str, str]:
+    """Read every point's relaxed marker.
+
+    Args:
+        client: Qdrant client.
+
+    Returns:
+        Point id to its marker; points never written by a run are left out.
+    """
+    return {pid: p[gather.RELAXED_FIELD] for pid, p in _payloads(client).items() if gather.RELAXED_FIELD in p}
+
+
+def test_a_relax_places_chunks_at_or_above_its_bar_marks_them_and_undoes_exactly(
+    client: QdrantClient, root: Path
+) -> None:
+    """Each relax starts over; the marked chunks and the histogram follow the bar, and undoing restores the build.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    outliers = _add_outliers(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    built, floors = _topics(client), [t.floor for t in run.table.topics]
+    assert {built[pid] for pid in outliers} == {-1}
+    svc = _service(client, root)
+
+    placed = _relax(svc, run.run_id, 0.3)
+
+    assert placed == TopicsOutcome("relax", run.run_id, 3, 0, 3, empty=False)
+    topics, marks = _topics(client), _relaxed_marks(client)
+    assert [topics[pid] for pid in outliers] == [-1, 0, 0, 0]
+    assert [marks[pid] for pid in outliers] == ["", run.run_id, run.run_id, run.run_id]
+    assert all(marks[pid] == "" for pid in built if pid not in outliers)
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert [t.floor for t in stored.table.topics] == floors
+    relax = stored.record["relax"]
+    assert relax["threshold"] == 0.3
+    assert relax["basis"] == len(outliers)
+    assert [i for i, n in enumerate(relax["histogram"]) if n] == [20, 30, 40, 45]
+    assert sum(relax["histogram"]) == len(outliers)
+
+    _relax(svc, run.run_id, 0.4)
+    assert [_topics(client)[pid] for pid in outliers] == [-1, -1, 0, 0]
+    assert count(client, COLL, gather.relaxed_filter(run.run_id)) == 2
+
+    undone = _relax(svc, run.run_id, None)
+
+    assert undone.assigned == 0
+    assert _topics(client) == built
+    assert set(_relaxed_marks(client).values()) == {""}
+    after = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert after is not None and after.record["relax"]["threshold"] is None
+    assert sum(after.record["relax"]["histogram"]) == len(outliers)
+
+
+def test_a_relax_places_a_chunk_the_rule_admits_without_its_marker(client: QdrantClient, root: Path) -> None:
+    """A pool chunk that clears its topic's floor, as an interrupted discover can leave one, is placed by the rule.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    ids = _add_blobs(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    gather.write_assignments(client, COLL, run.run_id, {-1: ids[:1]})
+
+    outcome = _relax(_service(client, root), run.run_id, None)
+
+    assert outcome.assigned == 1
+    assert _topics(client)[ids[0]] == 0
+    assert _relaxed_marks(client)[ids[0]] == ""
+
+
+def test_later_jobs_keep_the_floors_and_never_leave_an_old_marker(client: QdrantClient, root: Path) -> None:
+    """An align after a relax places new chunks by the rule, and a rebuild's write clears a relaxed chunk's marker.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    outliers = _add_outliers(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    svc = _service(client, root)
+    _relax(svc, run.run_id, 0.3)
+    late = _add_outliers(client, (0.455,), offset=950)
+
+    _run(svc, "align")
+
+    assert _topics(client)[late[0]] == -1
+    assert _relaxed_marks(client)[late[0]] == ""
+    # A rebuild that wrote a relaxed chunk and was cancelled before it took over...
+    gather.write_assignments(client, COLL, "20200101-000000-abcdef", {0: outliers[3:]})
+    assert _relaxed_marks(client)[outliers[3]] == ""
+    _run(svc, "align")
+    # ...leaves it pending, re-placed by the rule, no longer the relax's to undo.
+    assert count(client, COLL, gather.relaxed_filter(run.run_id)) == 2
+    _relax(svc, run.run_id, None)
+    assert count(client, COLL, gather.relaxed_filter(run.run_id)) == 0
+    assert {_topics(client)[pid] for pid in [*outliers, *late]} == {-1}
+
+
+def test_a_relax_for_another_run_is_refused_and_writes_nothing(client: QdrantClient, root: Path) -> None:
+    """A relax asked against a run that is no longer active is refused before anything is written.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    _add_outliers(client)
+    _run(_service(client, root), "build")
+    before = _topics(client)
+
+    with pytest.raises(TopicsRefused) as caught:
+        _relax(_service(client, root), "20200101-000000-abcdef", 0.3)
+
+    assert caught.value.code == "run_changed"
+    assert _topics(client) == before
+
+
 def test_the_topics_package_imports_nothing_from_rag_state_or_api() -> None:
     """No topics module loads the engine, the state stores or the API."""
     modules = sorted(f"docint.core.topics.{info.name}" for info in pkgutil.iter_modules(docint.core.topics.__path__))
