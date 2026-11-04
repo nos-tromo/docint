@@ -13,7 +13,8 @@ import {
   StatusIcon,
   type StatusIconStatus
 } from '@infra/ui'
-import { reportExportHref, reportPdfHref } from '@/api/reports'
+import { downloadFile, viewFile } from '@/api/files'
+import { reportExportPath, reportPdfPath } from '@/api/reports'
 import type {
   ArtifactType,
   ReportExportFormat,
@@ -37,6 +38,7 @@ import {
   useUpdateReport,
   useUpdateReportItem
 } from '@/hooks/useReports'
+import { useFileAction } from '@/hooks/useFileAction'
 import { useReportPdf, type ReportPdfPhase, type ReportPdfView } from '@/hooks/useReportPdf'
 import { useWhoami } from '@/hooks/useWhoami'
 import { useReportStore } from '@/stores/report'
@@ -124,11 +126,16 @@ function PdfStatusLine({ view, t }: { view: ReportPdfView; t: Translate }) {
  * has, and the panel had no `role="menu"`, no `aria-expanded` and no way to
  * dismiss it.
  *
- * The PDF entry is the exception among plain links. A large report renders
+ * The PDF entry is the exception among the formats. A large report renders
  * for longer than the gateway waits on one request, so the PDF is a background
  * job: the entry starts a render, the line beside the menu follows it, and the
  * file downloads when it is ready. Only a PDF matching the report as it stands
- * is linked directly; an edited report renders again.
+ * is downloaded directly; an edited report renders again.
+ *
+ * Every entry fetches its file through the purpose wrapper rather than being a
+ * link, so the download carries the stated purpose; the HTML view is opened in
+ * a new tab from what was fetched. A failed fetch is said beside the menu,
+ * there being no browser download bar to say it.
  *
  * @param report - The report to export.
  * @param t - The active locale's translate function.
@@ -137,11 +144,18 @@ function PdfStatusLine({ view, t }: { view: ReportPdfView; t: Translate }) {
 function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated_at'>; t: Translate }) {
   const collection = useReportCollection()
   const pdf = useReportPdf(report)
+  const exported = useFileAction()
   const rendering = pdf.phase === 'queued' || pdf.phase === 'running'
   const pdfLabel = t('report.format_pdf')
   return (
     <>
       <PdfStatusLine view={pdf} t={t} />
+      {exported.failed && (
+        <p role="alert" className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <StatusIcon status="failed" label={t('common.download_failed')} />
+          <span aria-hidden="true">{t('common.download_failed')}</span>
+        </p>
+      )}
       <Menu
         align="end"
         className="shrink-0"
@@ -154,8 +168,11 @@ function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated
       >
         {pdf.phase === 'ready' && pdf.pdf ? (
           <MenuItem
-            href={reportPdfHref(collection, report.id)}
-            download={pdf.pdf.filename}
+            onSelect={() => {
+              const filename = pdf.pdf?.filename ?? `report-${report.id}.pdf`
+              void exported.run(() => downloadFile(reportPdfPath(collection, report.id), filename))
+            }}
+            disabled={exported.busy}
             hint={t('report.download_format_title', { label: pdfLabel })}
           >
             {pdfLabel}
@@ -178,8 +195,12 @@ function ExportMenu({ report, t }: { report: Pick<ReportSummary, 'id' | 'updated
         {exportFormats(t).map((e) => (
           <MenuItem
             key={e.format}
-            href={reportExportHref(collection, report.id, e.format)}
-            {...(e.view ? { target: '_blank' as const, rel: 'noreferrer' } : { download: true })}
+            onSelect={() => {
+              const path = reportExportPath(collection, report.id, e.format)
+              const fallback = `report-${report.id}.${e.format}`
+              void exported.run(() => (e.view ? viewFile(path, fallback) : downloadFile(path, fallback)))
+            }}
+            disabled={exported.busy}
             hint={
               e.view
                 ? t('report.open_new_tab_title')

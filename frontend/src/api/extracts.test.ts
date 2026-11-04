@@ -3,9 +3,9 @@ import { ApiError, setOwnerParam } from './client'
 import {
   createExtract,
   deleteExtract,
-  extractDownloadHref,
+  extractDownloadPath,
   listExtracts,
-  sourceExtractHref
+  sourceExtractPath
 } from './extracts'
 
 const originalFetch = globalThis.fetch
@@ -45,8 +45,8 @@ describe('extract API', () => {
   })
 
   it('carries the appendix fields on a single-source download', () => {
-    const href = sourceExtractHref('mydocs', 'a1b2', 'pdf', { reference_number: 'AZ-12' })
-    expect(href).toContain('reference_number=AZ-12')
+    const path = sourceExtractPath('mydocs', 'a1b2', 'pdf', { reference_number: 'AZ-12', operator: '' })
+    expect(path).toBe('/collections/mydocs/sources/a1b2/extract.pdf?reference_number=AZ-12')
   })
 
   it('adopts the in-flight job a 409 names', async () => {
@@ -74,18 +74,16 @@ describe('extract API', () => {
     expect(String(spy.mock.calls[1][0])).toContain('/extracts/20260102-030405-deadbeef')
   })
 
-  it('builds download hrefs that encode their parts', () => {
-    expect(extractDownloadHref('my docs', '20260102-030405-deadbeef')).toContain(
+  it('builds download paths that encode their parts', () => {
+    expect(extractDownloadPath('my docs', '20260102-030405-deadbeef')).toBe(
       '/collections/my%20docs/extracts/20260102-030405-deadbeef/download'
     )
-    expect(sourceExtractHref('mydocs', 'a/b', 'md')).toContain('/sources/a%2Fb/extract.md')
+    expect(sourceExtractPath('mydocs', 'a/b', 'md')).toBe('/collections/mydocs/sources/a%2Fb/extract.md')
   })
 
-  it('carries the admin owner context on every href', () => {
+  it('leaves the admin owner context to the wrapper, which adds it once', () => {
     setOwnerParam('other-operator')
-    expect(extractDownloadHref('mydocs', '20260102-030405-deadbeef')).toContain(
-      '?owner=other-operator'
-    )
-    expect(sourceExtractHref('mydocs', 'abc', 'zip')).toContain('?owner=other-operator')
+    expect(extractDownloadPath('mydocs', '20260102-030405-deadbeef')).not.toContain('owner=')
+    expect(sourceExtractPath('mydocs', 'abc', 'zip')).not.toContain('owner=')
   })
 })

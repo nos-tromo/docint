@@ -238,17 +238,85 @@ field is set; it is recorded on every event of the operation, and never in
 the operational log — it is personal data in its own right.
 
 `AUDIT_REQUIRE_PURPOSE` lists the actions that need a stated purpose. It is
-**empty by default**: the SPA does not send the header yet. When it is set, a
-route is refused (428, one `denied` event) when *any* action its operation
-may record is listed — a chat turn records `query` and `ai_call`, a finalize
-`collect`, `ai_call`, `combine` and `modify`, a summary request `query`,
-`modify` and `ai_call`. A job runs with the purpose of the request that
-queued it, so the requirement is checked once, at the request.
+**empty in the code** (tests, a bare `uvicorn`); the SPA states the purpose
+through its purpose bar ([below](#how-the-spa-sends-the-purpose)). When it is
+set, a route is refused (428, one `denied` event) when *any* action its
+operation may record is listed — a chat turn records `query` and `ai_call`, a
+finalize `collect`, `ai_call`, `combine` and `modify`, a summary request
+`query`, `modify` and `ai_call`. A job runs with the purpose of the request
+that queued it, so the requirement is checked once, at the request.
+`GET /config` names the actions in force as `require_purpose`.
 
 A command-line run states its purpose in `AUDIT_CASE_REF` and `AUDIT_REASON`
 under the same rules; a run that needs one and has none records a `denied`
 event and exits with code 2, and a malformed value exits with code 2 before
 any chain opens.
+
+### How the SPA sends the purpose
+
+The SPA's header holds a **purpose bar** (`@infra/ui`'s `PurposeBar`, scope
+`docint`) where the user states a case reference, a reason, or both. It is
+kept for the browser tab's session, per app (the apps share one origin behind
+the gateway), and signing out clears it. While `GET /config` lists any
+`require_purpose` actions the empty bar is a warning and a blank purpose
+cannot be saved.
+
+- **One way out.** Every request leaves through `apiFetch`
+  (`frontend/src/api/client.ts`): `apiGet`/`apiPost`/`apiPut`/`apiPatch`/
+  `apiDelete`, both SSE helpers, and the XHR upload, which goes through the
+  same `withPurpose`. A stated purpose rides along as `X-Audit-Purpose`.
+- **A 428 asks.** The refused request opens the bar's dialog ("This action
+  needs a stated purpose") and is sent once more with the purpose saved there
+  — to the same URL, owner included, with the same body. Cancelled, the
+  refusal is the request's error ("A purpose must be stated first"), and the
+  queries it left refused are fetched again as soon as a purpose is stated.
+- **No browser-made requests to audited routes.** An `<a href>`, `<img src>`,
+  `<iframe src>`, `window.open` or `EventSource` request cannot carry a
+  header. Downloads are therefore fetched through `apiFetch` and handed to the
+  browser as a file (`frontend/src/api/files.ts`): saved under the name the
+  server's `Content-Disposition` gives it, or, for the report's HTML view,
+  opened in a new tab from what was fetched.
+
+Every audited route the SPA calls, and how it carries the purpose.
+"Required" means refused without a purpose under
+`AUDIT_REQUIRE_PURPOSE=query,disclose`; the other routes carry a purpose when
+one is stated, and it is recorded, but they are not refused without one.
+
+| Route | Records | Required | Sent by |
+|---|---|---|---|
+| `POST /stream_query`, `POST /agent/chat/stream` | `query` + `ai_call` | yes | `streamSse` |
+| `POST /search`, `GET /search/chunk` | `query` | yes | `apiPost`, `apiGet` |
+| `GET` / `POST /summarize` | `query` (+ `modify`, `ai_call`) | yes | `apiGetOrNull`, `apiPost` |
+| `GET /collections/ner/stats`, `/ner/sources`, `/ner/graph`, `GET /collections/hate-speech`, `GET /collections/documents` | `query` | yes | `apiGet` |
+| `GET /collections/{name}/topics` and its `/evidence`, `/documents`, `/chunks` | `query` | yes | `apiGet`, `apiGetOrNull` |
+| `GET /sessions/list`, `GET /sessions/{id}/history` | `query` | yes | `apiGet` |
+| `GET /reports`, `GET /reports/unassigned`, `GET /reports/{id}` | `query` | yes | `apiGet` |
+| `GET /collections/{name}/export/documents.csv`, `ner-sources.csv`, `hate-speech.csv` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `GET /search/export.csv` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `GET /sessions/{id}/sources.zip` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `POST /collections/{name}/extracts` | `disclose` (the job) | yes | `apiPost` |
+| `GET /collections/{name}/extracts/{id}/download` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `GET /collections/{name}/sources/{id}/extract.zip` | `disclose` | yes | `fetchFile` (was a bare `fetch`) |
+| `GET /reports/{id}/export.{md,zip,json}` | `disclose` | yes | export menu → `downloadFile` (was a link) |
+| `GET /reports/{id}/export.html` | `disclose` | yes | export menu → `viewFile`, opened in a new tab (was a `target="_blank"` link) |
+| `POST /reports/{id}/pdf` | `disclose` (the job) | yes | `apiPost` |
+| `GET /reports/{id}/pdf` | `disclose` | yes | export menu and the finished render's own download → `downloadFile` (was a link and an anchor click) |
+| `POST /ingest/upload` | `collect` + `ai_call` | no | `streamUpload` (XHR, `setRequestHeader`; resent after a `428` with the same body) |
+| `POST /ingest/finalize` | `collect` + `ai_call`, `combine`, `modify` | no | `apiPost` |
+| `PUT` / `DELETE /sessions/{id}/scope`, `DELETE /sessions/{id}/topic` | `modify` | no | `apiPut`, `apiDelete` |
+| `POST /reports`, `PATCH /reports/{id}`, `POST …/assign`, `…/collection-overview/refresh`, `…/items`, `…/items/batch`, `…/items/reorder`, `PATCH …/items/{id}` | `modify` | no | `apiPost`, `apiPatch` |
+| `POST /collections/{name}/topics` | `modify` + `ai_call` | no | `apiPost` |
+| `DELETE /collections/{name}`, `/sessions/{id}`, `/reports/{id}`, `/reports/{id}/items/{id}`, `/collections/{name}/extracts/{id}` | `delete` | no | `apiDelete` |
+| `POST /translate` | `ai_call` | no | `apiPost` |
+| `GET /collections/list?all=true`, `GET /collections/retention?all=true` | `admin`, for an admin only | no | `apiGet` |
+
+The admin owner context (`?owner=`) is added by `apiFetch` too, so a download
+an admin makes in another owner's namespace is recorded `on_behalf_of` that
+owner like any other request — the session sources ZIP, which used to go out
+without it, included. The routes the SPA reads that record nothing (`/config`,
+`/version`, `/whoami`, the job status routes and stream, the PDF status,
+extract listings, document counts and summary, the session's topic) carry the
+purpose too, and ignore it.
 
 ## Routes
 

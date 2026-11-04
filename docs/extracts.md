@@ -101,8 +101,10 @@ with no report to inherit from.
 
 **From the SPA.** The Inspector has an *Data extracts* panel: **Build
 extract** queues one for the active collection, progress appears in the
-panel, and finished bundles are listed underneath with a download link. Each
-document row also carries a download action for that source alone.
+panel, and finished bundles are listed underneath, each with a download
+button. Each document row also carries a download action for that source
+alone. Both fetch the archive with the stated purpose
+([audit.md](audit.md#how-the-spa-sends-the-purpose)).
 
 **Over HTTP.** See [api-reference.md](api-reference.md):
 

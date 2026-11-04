@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { setOwnerParam } from './client'
 import { ENTITY_MERGE_MODE } from './types'
 import {
-  csvExportHref,
+  csvExportPath,
   getDocumentsCount,
   getDocumentsPage,
   getDocumentsSummary,
@@ -110,31 +110,26 @@ describe('collections api carries the selected collection', () => {
     expect(lastInit().method).toBe('POST')
   })
 
-  it('csvExportHref encodes the collection into the export path', () => {
-    expect(csvExportHref('my docs', 'documents')).toContain(
-      '/collections/my%20docs/export/documents.csv'
-    )
-    expect(csvExportHref('docs', 'hate-speech')).toContain(
-      '/collections/docs/export/hate-speech.csv'
-    )
+  it('csvExportPath encodes the collection into the export path', () => {
+    expect(csvExportPath('my docs', 'documents')).toBe('/collections/my%20docs/export/documents.csv')
+    expect(csvExportPath('docs', 'hate-speech')).toBe('/collections/docs/export/hate-speech.csv')
   })
 
-  it('csvExportHref carries the pinned entity merge mode and drops empty params', () => {
-    const href = csvExportHref('docs', 'entities', {
+  it('csvExportPath carries the pinned entity merge mode and drops empty params', () => {
+    const path = csvExportPath('docs', 'entities', {
       entity_text: 'Acme',
       entity_type: 'ORG',
       entity_merge_mode: ENTITY_MERGE_MODE
     })
-    expect(href).toContain(`entity_merge_mode=${ENTITY_MERGE_MODE}`)
-    expect(href).toContain('entity_text=Acme')
-    expect(csvExportHref('docs', 'entities', { entity_text: '' })).not.toContain('entity_text=')
+    expect(path).toContain(`entity_merge_mode=${ENTITY_MERGE_MODE}`)
+    expect(path).toContain('entity_text=Acme')
+    expect(csvExportPath('docs', 'entities', { entity_text: '' })).not.toContain('entity_text=')
   })
 
-  it('csvExportHref includes the owner param when an owner context is set', () => {
+  it('csvExportPath leaves the owner to the wrapper, which adds it once', () => {
     setOwnerParam('jane.doe')
-    expect(csvExportHref('docs', 'documents')).toContain('owner=jane.doe')
+    expect(csvExportPath('docs', 'documents')).not.toContain('owner=')
     setOwnerParam(null)
-    expect(csvExportHref('docs', 'documents')).not.toContain('owner=')
   })
 })
 

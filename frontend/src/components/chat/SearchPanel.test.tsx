@@ -9,6 +9,7 @@ import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 import { useTopicFocusStore } from '@/stores/topicFocus'
 import type { SearchResult } from '@/api/types'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 
 const SESSION = 'sess-1'
 
@@ -58,6 +59,9 @@ function mockApi(
 ) {
   const fn = vi.fn((req: RequestInfo | URL, init?: RequestInit) => {
     const u = typeof req === 'string' ? req : String(req)
+    if (u.includes('/search/export.csv')) {
+      return Promise.resolve(fileResponse('id,text\n', { type: 'text/csv', filename: 'docs-search.csv' }))
+    }
     // Checked before '/scope' and the generic '/search' fallthrough.
     if (u.includes('/search/chunk')) {
       const status = chunk.status ?? 200
@@ -87,6 +91,21 @@ function mockApi(
   })
   vi.stubGlobal('fetch', fn)
   return fn
+}
+
+/**
+ * Click the CSV export and return the URL it fetched. A button, not a link: a
+ * link's request could not carry the stated purpose.
+ */
+async function exportedUrl(): Promise<string> {
+  captureDownloads()
+  const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+  const before = fetchMock.mock.calls.length
+  await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }))
+  const exportCall = () =>
+    fetchMock.mock.calls.slice(before).find(([u]) => String(u).includes('/search/export.csv'))
+  await waitFor(() => expect(exportCall()).toBeDefined())
+  return String(exportCall()![0])
 }
 
 function renderPanel(sessionId: string | null = SESSION) {
@@ -822,14 +841,14 @@ describe('SearchPanel field picker', () => {
     expect(options).toEqual(['Text', 'Author', 'Network', 'UUID'])
   })
 
-  it('shows a CSV export link carrying the field once there are hits', async () => {
+  it('exports the CSV carrying the field once there are hits', async () => {
     useSearchUiStore.setState({ field: 'author' })
     mockApi(hitsResult)
 
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    const href = await exportedUrl()
     expect(href).toContain('/search/export.csv')
     expect(href).toContain('collection=docs')
     expect(href).toContain('question=Partei')
@@ -843,7 +862,7 @@ describe('SearchPanel field picker', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    const href = await exportedUrl()
     expect(href).not.toContain('field=')
   })
 
@@ -853,8 +872,8 @@ describe('SearchPanel field picker', () => {
 
     renderPanel()
 
-    const link = await screen.findByRole('link', { name: 'Export CSV' })
-    const href = link.getAttribute('href') ?? ''
+    await screen.findByRole('button', { name: 'Export CSV' })
+    const href = await exportedUrl()
     expect(href).toContain('collection=docs')
     expect(href).not.toContain('question=')
   })
@@ -890,7 +909,7 @@ describe('SearchPanel field picker', () => {
 
     await screen.findByText(/alpha\.pdf/)
 
-    const hrefBefore = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    const hrefBefore = await exportedUrl()
     expect(hrefBefore).toContain('/search/export.csv')
     expect(hrefBefore).toContain('collection=docs')
     expect(hrefBefore).toContain('question=Partei')
@@ -898,10 +917,7 @@ describe('SearchPanel field picker', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /alpha\.pdf/i }))
 
-    await waitFor(() => {
-      const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
-      expect(href).toContain('marked_ids=p1')
-    })
+    expect(await exportedUrl()).toContain('marked_ids=p1')
   })
 
   it('omits marked_ids from the CSV export once a session exists, even with a live selection', async () => {
@@ -926,7 +942,7 @@ describe('SearchPanel field picker', () => {
       expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/scope'))).toBe(true)
     })
 
-    const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    const href = await exportedUrl()
     expect(href).toContain('session_id=' + SESSION)
     expect(href).not.toContain('marked_ids')
   })
@@ -945,7 +961,7 @@ describe('SearchPanel field picker', () => {
     renderPanel()
 
     await screen.findByTestId('search-no-matches')
-    expect(screen.queryByRole('link', { name: 'Export CSV' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Export CSV' })).toBeNull()
   })
 
   it('exports with the topic rule', async () => {
@@ -960,6 +976,7 @@ describe('SearchPanel field picker', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const u = String(input)
+        if (u.includes('/search/export.csv')) return fileResponse('id\n', { type: 'text/csv' })
         if (u.includes('/config')) return respond({ topics_enabled: true })
         if (u.includes('/topics')) {
           return respond({
@@ -981,8 +998,8 @@ describe('SearchPanel field picker', () => {
     renderPanel()
 
     await screen.findByText(/alpha\.pdf/)
-    await waitFor(() => {
-      const href = screen.getByRole('link', { name: 'Export CSV' }).getAttribute('href') ?? ''
+    await waitFor(async () => {
+      const href = await exportedUrl()
       const filters = new URL(href, 'http://localhost').searchParams.get('metadata_filters')
       expect(JSON.parse(filters ?? '[]')).toEqual([
         { field: 'mimetype', operator: 'mime_match', value: 'application/pdf' },

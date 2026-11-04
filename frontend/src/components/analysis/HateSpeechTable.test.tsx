@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { HateSpeechTable } from './HateSpeechTable'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import type { HateSpeechRow } from '@/api/types'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 import { useUiStore } from '@/stores/ui'
 import { useReportStore } from '@/stores/report'
 import { useTranslationsStore } from '@/stores/translations'
@@ -49,6 +50,22 @@ const rows: HateSpeechRow[] = [
 ]
 
 describe('HateSpeechTable', () => {
+  it('exports the flagged chunks as CSV through the purpose wrapper', async () => {
+    const downloads = captureDownloads()
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      fileResponse('chunk_id\n', { type: 'text/csv', filename: 'alpha-hate-speech.csv' })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }))
+
+    await waitFor(() => expect(downloads.saved()).toHaveLength(1))
+    const exportCall = fetchMock.mock.calls.find(([u]) => String(u).includes('/export/'))
+    expect(String(exportCall?.[0])).toBe('/collections/alpha/export/hate-speech.csv')
+    expect(downloads.saved()[0].download).toBe('alpha-hate-speech.csv')
+  })
+
   it('renders one row per finding with category, source and chunk text inline', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
     const row = screen.getByTestId('hate-speech-row')
@@ -75,17 +92,6 @@ describe('HateSpeechTable', () => {
   it('shows the empty state when nothing was flagged', () => {
     render(<HateSpeechTable rows={[]} collection="alpha" />)
     expect(screen.getByText(/no flagged content/i)).toBeInTheDocument()
-  })
-
-  it('renders a streaming CSV download link to the right collection-scoped endpoint', () => {
-    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
-    // The control is the download icon; "Export CSV" survives as its name.
-    const link = screen.getByRole('link', { name: 'Export CSV' })
-    expect(link).toHaveAttribute(
-      'href',
-      expect.stringContaining('/collections/alpha/export/hate-speech.csv')
-    )
-    expect(link).toHaveAttribute('download')
   })
 
   it('reveals a Translate toggle in the actions cell that swaps the chunk text in place', async () => {

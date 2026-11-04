@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { DownloadIcon, HoverIconAction } from '@infra/ui'
-import { createExtract, sourceExtractHref } from '@/api/extracts'
+import { ApiError, isPurposeRefusal } from '@/api/client'
+import { createExtract, sourceExtractPath } from '@/api/extracts'
+import { fetchFile } from '@/api/files'
+import { saveBlob } from '@/lib/files'
 import { useAppendixFields } from '@/hooks/useAppendixFields'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
@@ -12,7 +15,8 @@ import { useT } from '@/i18n/LanguageContext'
  * table's hash expands to every post recorded in it, and the server refuses
  * that with 413 rather than rendering for minutes on the request. On a 413 the
  * click queues a targeted job instead, so one control either downloads or
- * starts a build and the user never meets a dead end.
+ * starts a build and the user never meets a dead end. The fetch goes through
+ * the purpose wrapper, so it carries the stated purpose.
  */
 export function SourceExtractAction({
   fileHash,
@@ -30,18 +34,12 @@ export function SourceExtractAction({
   const onClick = async () => {
     setBusy(true)
     try {
-      const response = await fetch(sourceExtractHref(collection, fileHash, 'zip', appendix))
-      if (response.status === 413) {
-        await createExtract(collection, fileHash, appendix)
-        return
-      }
-      if (!response.ok) return
-      const blob = await response.blob()
-      const anchor = document.createElement('a')
-      anchor.href = URL.createObjectURL(blob)
-      anchor.download = `${(filename || fileHash).replace(/\.[^.]+$/, '')}-extract.zip`
-      anchor.click()
-      URL.revokeObjectURL(anchor.href)
+      const { blob } = await fetchFile(sourceExtractPath(collection, fileHash, 'zip', appendix))
+      saveBlob(blob, `${(filename || fileHash).replace(/\.[^.]+$/, '')}-extract.zip`)
+    } catch (err) {
+      // Too large to render on the request: build it in the background.
+      if (err instanceof ApiError && err.status === 413) await createExtract(collection, fileHash, appendix)
+      else if (!isPurposeRefusal(err)) console.error('Source extract download failed', err)
     } finally {
       setBusy(false)
     }

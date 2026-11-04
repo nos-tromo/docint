@@ -1,15 +1,17 @@
-import { DownloadLink } from '@infra/ui'
 import { useUiStore } from '@/stores/ui'
-import { url } from '@/api/client'
+import { downloadFile } from '@/api/files'
+import { sessionSourcesPath } from '@/api/sessions'
+import { FileDownloadButton } from '@/components/common/FileDownloadButton'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
- * Triggers the server-side session-sources ZIP stream.
+ * Downloads the server-side session-sources ZIP.
  *
  * Replaces the original in-browser JSZip loop (which fetched every source
  * file individually and assembled the archive on the main thread); the
- * backend now streams ``application/zip`` directly from the
- * ``qdrant-sources`` volume, so the browser only handles the download.
+ * backend streams ``application/zip`` straight from the ``qdrant-sources``
+ * volume. It is fetched through the purpose wrapper rather than linked, so it
+ * carries the stated purpose and, for an admin, the owner it belongs to.
  */
 export function SessionZipButton() {
   const t = useT()
@@ -17,12 +19,10 @@ export function SessionZipButton() {
   const collection = useUiStore((s) => s.selectedCollection)
   if (!sessionId || !collection) return null
 
-  const href = url(`/sessions/${encodeURIComponent(sessionId)}/sources.zip`)
   return (
-    <DownloadLink
-      href={href}
-      download={`session-${sessionId}-sources.zip`}
+    <FileDownloadButton
       label={t('inspector.download_session_sources')}
+      download={() => downloadFile(sessionSourcesPath(sessionId), `session-${sessionId}-sources.zip`)}
     />
   )
 }

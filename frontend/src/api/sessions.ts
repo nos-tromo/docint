@@ -23,3 +23,6 @@ export const getSessionTopic = (id: string, collection: string) =>
 /** Remove a session's topic; the session and its turns stay. */
 export const clearSessionTopic = (id: string) =>
   apiDelete<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/topic`)
+
+/** API path of the ZIP of every source a session cites, for `downloadFile`. */
+export const sessionSourcesPath = (id: string) => `/sessions/${encodeURIComponent(id)}/sources.zip`

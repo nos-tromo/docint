@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, getOwnerParam, url } from './client'
+import { apiDelete, apiGet } from './client'
 import { queueJob } from './jobs'
 import type { ExtractRecord } from './types'
 
@@ -54,37 +54,22 @@ export const deleteExtract = (collection: string, extractId: string) =>
     `/collections/${encodeURIComponent(collection)}/extracts/${encodeURIComponent(extractId)}`
   )
 
-/** Append the admin owner context, as the other href builders do. */
-function withOwnerQuery(path: string, extra: [string, string][] = []): string {
-  const owner = getOwnerParam()
-  const params = new URLSearchParams([...(owner ? [['owner', owner]] : []), ...extra])
-  const query = params.toString()
-  return query ? `${path}?${query}` : path
-}
-
 /**
- * Absolute URL of a stored bundle. Use as a download anchor's `href` so the
- * browser streams the archive natively.
+ * API path of a stored bundle, for `downloadFile` — which adds the base, the
+ * admin owner context and the stated purpose.
  */
-export function extractDownloadHref(collection: string, extractId: string): string {
-  return url(
-    withOwnerQuery(
-      `/collections/${encodeURIComponent(collection)}/extracts/${encodeURIComponent(extractId)}/download`
-    )
-  )
+export function extractDownloadPath(collection: string, extractId: string): string {
+  return `/collections/${encodeURIComponent(collection)}/extracts/${encodeURIComponent(extractId)}/download`
 }
 
-/** Absolute URL of one source's extract in the given format. */
-export function sourceExtractHref(
+/** API path of one source's extract in the given format, for `fetchFile`. */
+export function sourceExtractPath(
   collection: string,
   sourceId: string,
   fmt: SourceExtractFormat,
   appendix?: AppendixFields
 ): string {
-  return url(
-    withOwnerQuery(
-      `/collections/${encodeURIComponent(collection)}/sources/${encodeURIComponent(sourceId)}/extract.${fmt}`,
-      appendixEntries(appendix)
-    )
-  )
+  const path = `/collections/${encodeURIComponent(collection)}/sources/${encodeURIComponent(sourceId)}/extract.${fmt}`
+  const query = new URLSearchParams(appendixEntries(appendix)).toString()
+  return query ? `${path}?${query}` : path
 }

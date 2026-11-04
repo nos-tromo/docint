@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { Banner, Button, Card, DownloadLink, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
+import { Banner, Button, Card, Input, SearchButton, SelectMenu, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { ApiError } from '@/api/client'
 import { describeError } from '@/api/errorMessage'
-import { searchExportHref } from '@/api/search'
+import { downloadFile } from '@/api/files'
+import { searchExportPath } from '@/api/search'
+import { FileDownloadButton } from '@/components/common/FileDownloadButton'
 import type { SearchField, SearchHit } from '@/api/types'
 import { SEARCH_FIELDS } from '@/api/types'
 import { useSearch, useScope } from '@/hooks/useSearch'
@@ -288,22 +290,27 @@ export function SearchPanel({ sessionId }: SearchPanelProps) {
               {/* A blank query still exports: the whole filtered collection,
                   the one export the panel cannot show on screen. */}
               {collection && (query.trim() === '' || hits.length > 0) && (
-                <DownloadLink
-                  href={searchExportHref(collection, {
-                    question: query,
-                    field,
-                    filters,
-                    sessionId,
-                    // Redundant once a session exists — commitScope has
-                    // already written the same selection server-side by
-                    // the time this link can be clicked — and a scope has
-                    // no count cap, only a token budget, so hundreds of
-                    // ids serialized here could blow the URL past the
-                    // gateway's header limit. It only earns its place
-                    // pre-session, under the 'new' key.
-                    markedIds: sessionId ? undefined : selectedIds
-                  })}
+                <FileDownloadButton
                   label={t('search.export_results')}
+                  download={() =>
+                    downloadFile(
+                      searchExportPath(collection, {
+                        question: query,
+                        field,
+                        filters,
+                        sessionId,
+                        // Redundant once a session exists — commitScope has
+                        // already written the same selection server-side by
+                        // the time this can be clicked — and a scope has no
+                        // count cap, only a token budget, so hundreds of ids
+                        // serialized here could blow the URL past the
+                        // gateway's header limit. It only earns its place
+                        // pre-session, under the 'new' key.
+                        markedIds: sessionId ? undefined : selectedIds
+                      }),
+                      `${collection}-search.csv`
+                    )
+                  }
                   className="h-7 w-7 shrink-0 px-0"
                 />
               )}

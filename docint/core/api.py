@@ -415,6 +415,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The SPA fetches its downloads (so they carry the stated purpose) and
+    # names each file from this header, which a cross-origin dev server can
+    # read only when it is exposed.
+    expose_headers=["Content-Disposition"],
 )
 install_error_handlers(app)
 

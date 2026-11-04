@@ -1,5 +1,7 @@
-import { Button, DeleteButton, DownloadLink } from '@infra/ui'
-import { extractDownloadHref } from '@/api/extracts'
+import { Button, DeleteButton } from '@infra/ui'
+import { extractDownloadPath } from '@/api/extracts'
+import { downloadFile } from '@/api/files'
+import { FileDownloadButton } from '@/components/common/FileDownloadButton'
 import { useAppendixReportTitle } from '@/hooks/useAppendixFields'
 import { useDeleteExtract, useExtractJob, useExtracts } from '@/hooks/useExtracts'
 import { useUiStore } from '@/stores/ui'
@@ -105,10 +107,9 @@ export function ExtractsPanel() {
                   {record.pdf_skipped ? ` · ${t('extract.pdf_skipped')}` : ''}
                 </div>
               </div>
-              <DownloadLink
-                href={extractDownloadHref(collection, record.extract_id)}
-                download={record.filename}
+              <FileDownloadButton
                 label={t('extract.download')}
+                download={() => downloadFile(extractDownloadPath(collection, record.extract_id), record.filename)}
               />
               <DeleteButton
                 label={t('extract.delete')}

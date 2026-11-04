@@ -7,6 +7,7 @@ import { resetReportPdfJobs } from '@/hooks/useReportPdf'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 
 const overview = {
   collection: 'docs',
@@ -70,6 +71,14 @@ function mockFetch(
       if (url.includes('/reports/1/pdf') && init?.method === 'POST') {
         return { ok: true, status: 202, json: async () => ({ job_id: 'f00d01' }) }
       }
+      if (url.includes('/reports/1/pdf')) {
+        return fileResponse('%PDF-1.7', { type: 'application/pdf', filename: 'report-1-Case Alpha.pdf' })
+      }
+      const exported = /\/reports\/1\/export\.(\w+)/.exec(url)?.[1]
+      if (exported) {
+        const type = { md: 'text/markdown', html: 'text/html', json: 'application/json', zip: 'application/zip' }[exported]
+        return fileResponse(`case alpha as ${exported}`, { type, filename: `report-1-Case Alpha.${exported}` })
+      }
       if (url.includes('/reports/1')) {
         return { ok: true, status: 200, json: async () => detail }
       }
@@ -130,16 +139,61 @@ describe('Report view', () => {
     expect(screen.queryByRole('menuitem', { name: 'PDF' })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /download/i }))
 
-    // No stored render yet, so the PDF entry starts one rather than linking.
+    // No stored render yet, so the PDF entry starts one.
     const pdf = screen.getByRole('menuitem', { name: 'PDF' })
     expect(pdf.tagName).toBe('BUTTON')
-    expect(pdf).not.toHaveAttribute('href')
-    const md = screen.getByRole('menuitem', { name: 'Markdown' })
-    expect(md).toHaveAttribute('href', expect.stringContaining('/reports/1/export.md?collection=docs'))
-    expect(md).toHaveAttribute('download')
-    const html = screen.getByRole('menuitem', { name: 'HTML' })
-    expect(html).toHaveAttribute('target', '_blank')
-    expect(html).toHaveAttribute('rel', 'noreferrer')
+    expect(pdf).toHaveAttribute('title', expect.stringMatching(/downloads when it is ready/))
+    // Every format is fetched rather than linked, so it carries the stated purpose.
+    for (const name of ['Markdown', 'HTML', 'CSV', 'JSON']) {
+      const entry = screen.getByRole('menuitem', { name })
+      expect(entry.tagName).toBe('BUTTON')
+      expect(entry).not.toHaveAttribute('href')
+    }
+  })
+
+  it('downloads an export through the purpose wrapper, under the name the server gave it', async () => {
+    const downloads = captureDownloads()
+    renderReport()
+    await screen.findByText('Acme [ORG]')
+    await userEvent.click(screen.getByRole('button', { name: /download/i }))
+
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Markdown' }))
+
+    await waitFor(() => expect(downloads.saved()).toHaveLength(1))
+    const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
+    expect(urls).toContain('/reports/1/export.md?collection=docs')
+    expect(downloads.saved()[0].download).toBe('report-1-Case Alpha.md')
+  })
+
+  it('opens the HTML export in a new tab from what it fetched', async () => {
+    const downloads = captureDownloads()
+    renderReport()
+    await screen.findByText('Acme [ORG]')
+    await userEvent.click(screen.getByRole('button', { name: /download/i }))
+
+    await userEvent.click(screen.getByRole('menuitem', { name: 'HTML' }))
+
+    await waitFor(() => expect(downloads.opened()).toEqual(['blob:docint/1']))
+    expect(await downloads.blobs[0].text()).toBe('case alpha as html')
+    expect(downloads.saved()).toEqual([])
+  })
+
+  it('says beside the menu when an export failed', async () => {
+    captureDownloads()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    type Fetch = (u: string, init?: RequestInit) => Promise<unknown>
+    const fallback = fetch as unknown as ReturnType<typeof vi.fn<Fetch>>
+    const answer = fallback.getMockImplementation()!
+    fallback.mockImplementation(async (u, init) =>
+      String(u).includes('/export.json') ? new Response('{}', { status: 500 }) : answer(u, init)
+    )
+    renderReport()
+    await screen.findByText('Acme [ORG]')
+    await userEvent.click(screen.getByRole('button', { name: /download/i }))
+
+    await userEvent.click(screen.getByRole('menuitem', { name: 'JSON' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The download failed. Try again.')
   })
 
   it('lists the topics right after the summary, titled by their count and showing their labels', async () => {
@@ -274,7 +328,7 @@ describe('Report view — PDF export', () => {
     'The PDF could not be created.'
   ]
 
-  /** The menu's PDF entry, re-read each time: it is a different element as a link than as a button. */
+  /** The menu's PDF entry, re-read each time: the menu re-renders it as the PDF's state changes. */
   const pdfEntry = () => screen.getByRole('menuitem', { name: 'PDF' })
 
   async function openExportMenu() {
@@ -293,13 +347,19 @@ describe('Report view — PDF export', () => {
     vi.unstubAllGlobals()
   })
 
-  it('links a PDF that matches the report straight to its download', async () => {
+  it('downloads a PDF that matches the report straight away, through the purpose wrapper', async () => {
     mockFetch(reportDetail, { job: pdfJob('completed'), pdf: { ...RENDER, current: true } })
+    const downloads = captureDownloads()
     renderReport()
     await openExportMenu()
-    await waitFor(() => expect(pdfEntry().tagName).toBe('A'))
-    expect(pdfEntry().getAttribute('href')).toMatch(/\/reports\/1\/pdf\?collection=docs$/)
-    expect(pdfEntry()).toHaveAttribute('download', 'report-1-Case Alpha.pdf')
+    await waitFor(() => expect(pdfEntry()).toHaveAttribute('title', 'Download PDF'))
+
+    await userEvent.click(pdfEntry())
+
+    await waitFor(() => expect(downloads.saved()).toHaveLength(1))
+    const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]))
+    expect(urls).toContain('/reports/1/pdf?collection=docs')
+    expect(downloads.saved()[0].download).toBe('report-1-Case Alpha.pdf')
   })
 
   it('renders again instead of linking a PDF the report has outgrown', async () => {
@@ -387,7 +447,7 @@ describe('Report view — PDF export', () => {
     mockFetch(reportDetail, { job: pdfJob('completed'), pdf: { ...RENDER, current: true } })
     renderReport()
     await openExportMenu()
-    await waitFor(() => expect(pdfEntry().tagName).toBe('A'))
+    await waitFor(() => expect(pdfEntry()).toHaveAttribute('title', 'Download PDF'))
     for (const line of STATUS_LINES) expect(screen.queryByText(line)).not.toBeInTheDocument()
   })
 })

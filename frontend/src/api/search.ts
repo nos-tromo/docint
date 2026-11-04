@@ -1,4 +1,4 @@
-import { apiGet, apiPost, getOwnerParam, url } from './client'
+import { apiGet, apiPost } from './client'
 import type { ChunkText, MetadataFilter, SearchField, SearchRequest, SearchResult } from './types'
 
 /**
@@ -44,9 +44,9 @@ export const fetchChunkText = (id: string, collection?: string) =>
  * already persisted server-side by then (see the SearchPanel.tsx call
  * site), and a scope has no count cap — only a token budget — so a
  * legitimate selection can run to hundreds of ids, long enough to overflow
- * the gateway's header limits if serialized here too. Use this as the
- * `href` of a download anchor so the browser handles the streaming response
- * natively.
+ * the gateway's header limits if serialized here too. Hand the path to
+ * `downloadFile`, which adds the base, the admin owner context and the stated
+ * purpose.
  *
  * @param collection - Caller's logical collection.
  * @param opts.question - Whitespace-separated keywords, or blank to export
@@ -56,9 +56,9 @@ export const fetchChunkText = (id: string, collection?: string) =>
  * @param opts.sessionId - The open session, if any, whose stored chat scope
  *   should count as marked too.
  * @param opts.markedIds - Qdrant point ids the caller has selected locally.
- * @returns An absolute URL to the CSV export endpoint.
+ * @returns The API path of the CSV export endpoint.
  */
-export function searchExportHref(
+export function searchExportPath(
   collection: string,
   opts: {
     question: string
@@ -68,7 +68,6 @@ export function searchExportHref(
     markedIds?: string[]
   }
 ): string {
-  const owner = getOwnerParam()
   const params = new URLSearchParams()
   params.set('collection', collection)
   if (opts.question.trim()) params.set('question', opts.question.trim())
@@ -76,6 +75,5 @@ export function searchExportHref(
   if (opts.filters.length) params.set('metadata_filters', JSON.stringify(opts.filters))
   if (opts.sessionId) params.set('session_id', opts.sessionId)
   if (opts.markedIds?.length) params.set('marked_ids', opts.markedIds.join(','))
-  if (owner) params.set('owner', owner)
-  return url(`/search/export.csv?${params}`)
+  return `/search/export.csv?${params}`
 }

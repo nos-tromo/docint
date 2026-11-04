@@ -132,6 +132,7 @@ export const de: Strings = {
     'Dienst nicht erreichbar – Bitte prüfen Sie Ihre Verbindung oder versuchen Sie es später erneut.',
   'common.error_purpose_required':
     'Zuerst ist ein Zweck anzugeben. Legen Sie ihn in der Kopfzeile fest und versuchen Sie es erneut.',
+  'common.download_failed': 'Der Download ist fehlgeschlagen. Versuchen Sie es erneut.',
 
   // chat
   'chat.title': 'Chat',

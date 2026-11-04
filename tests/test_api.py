@@ -5012,6 +5012,21 @@ def test_get_config_advertises_report_batch_cap(client: TestClient) -> None:
     assert response.json()["report_batch_max_items"] == api_module.REPORT_BATCH_MAX_ITEMS
 
 
+def test_a_download_names_its_file_for_a_cross_origin_dev_server(client: TestClient) -> None:
+    """An allowed dev origin can read ``Content-Disposition``, which the SPA names fetched downloads from.
+
+    The SPA fetches every download (so it carries the stated purpose) instead
+    of linking to it, and a browser hides response headers from cross-origin
+    scripts unless they are exposed.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.get("/version", headers={"Origin": api_module.allowed_origins[0]})
+
+    assert response.headers["access-control-expose-headers"] == "Content-Disposition"
+
+
 def test_get_config_includes_language(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """`GET /config` reports the active `RESPONSE_LANGUAGE` locale.
 
