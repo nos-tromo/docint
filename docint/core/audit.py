@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +26,7 @@ from loguru import logger
 from docint import __version__
 from docint.core.auth.principal import Principal, resolve_principal
 from docint.utils.audit_event import Actor, AiCall, AuditEmitter, AuditWriteError, Purpose, Target
+from docint.utils.audit_forward import Forwarded, forwarding
 from docint.utils.audit_meter import TransferMeter, metering
 from docint.utils.audit_runtime import (
     PURPOSE_HEADER,
@@ -339,6 +340,27 @@ class AuditContext:
 SYSTEM_CONTEXT = AuditContext(actor=SYSTEM_ACTOR)
 
 
+def forwarding_of(context: AuditContext) -> AbstractContextManager[Forwarded]:
+    """Bind a context's purpose and request id for the work's calls to other audited services.
+
+    docint's media ingestion calls Nextext, which records those calls in its
+    own trail and may require a stated purpose for them
+    (``docint.utils.audit_forward``).
+
+    Args:
+        context (AuditContext): The work's context.
+
+    Returns:
+        AbstractContextManager[Forwarded]: Binds it for the block.
+    """
+    purpose = context.purpose
+    return forwarding(
+        case_ref=purpose.case_ref if purpose is not None else None,
+        reason=purpose.reason if purpose is not None else None,
+        request_id=context.request_id,
+    )
+
+
 def stated_purpose(case_ref: str | None, reason: str | None) -> Purpose | None:
     """Build the event's purpose, or ``None`` when neither field is stated.
 
@@ -572,6 +594,10 @@ def metered(
     left was sent whether or not the operation finished. A failed audit write
     is not followed by more writes.
 
+    The operation's purpose and request id are also what its work states to
+    the other audited services it calls (:func:`forwarding_of`) — an ingest
+    run's media go through Nextext.
+
     Args:
         op (Operation): The operation doing the work.
         prefix (str | None): Operation-name prefix for its transfer events.
@@ -582,7 +608,7 @@ def metered(
     Yields:
         TransferMeter: The meter bound for the block.
     """
-    with metering() as meter:
+    with metering() as meter, forwarding_of(op.context):
         try:
             yield meter
         except AUDIT_FAILURES:

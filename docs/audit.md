@@ -22,6 +22,7 @@ and its access model. Nothing on this page duplicates that.
 - [Routes](#routes)
 - [Background jobs](#background-jobs)
 - [Model calls](#model-calls)
+- [Calls to Nextext](#calls-to-nextext)
 - [Streaming routes](#streaming-routes)
 - [Retention sweep](#retention-sweep)
 - [Command-line tools](#command-line-tools)
@@ -535,6 +536,33 @@ takes over and records beneath its own `collect` event — that run is what
 consumes the results. A batch that is never finalized is not recorded beyond
 its `ingest.upload` event, whose `preprocess: true` says its files were sent;
 deleting the collection drops the staged counts, and a restart loses them.
+
+## Calls to Nextext
+
+docint ingests audio and video through Nextext (`docint/utils/nextext_client.py`),
+which keeps a data-protection audit log of its own: submitting a clip is a
+`collect` there, every poll of the job a `query` (`job.get`), and every artifact
+download — the transcript, the keyframes — a `disclose` (`artifact.download`).
+Under Nextext's `AUDIT_REQUIRE_PURPOSE` a poll or a download that states no
+purpose is refused, so every request docint sends it carries:
+
+- **`X-Audit-Purpose`** — the purpose stated for the docint work the clip
+  belongs to: the finalize request's for an ingest job, the upload's for the
+  preprocessing an upload starts, the request's for `POST /ingest`, and
+  `AUDIT_CASE_REF`/`AUDIT_REASON` for the `ingest` command. When none was stated
+  — docint's ingest is a `collect`, which needs none of its own — it is
+  docint's own reason for asking, `reason=docint ingest`.
+- **`X-Request-ID`** — the id of the request that started the work, when there
+  is one, so the two trails can be joined.
+
+The purpose rides a context variable that `audit.metered` binds for a run and
+the upload route for the work it submits (`docint/utils/audit_forward.py`), so
+it follows the work into the preprocessing pool; the same purpose and id go on
+the submission, every poll and both downloads of a clip. A refusal from
+Nextext — a 428 included — skips that clip like any other failure at that step
+(`poll_error` while polling, `error` on submission or download) and is logged;
+the run goes on. In docint's own log the round trip is the run's
+`ingest.transcribe` transfer ([Model calls](#model-calls)).
 
 ## Streaming routes
 

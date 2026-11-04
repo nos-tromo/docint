@@ -7202,9 +7202,10 @@ async def ingest_upload(
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
                     # still uploading; the finalize job joins it or finds it done.
-                    # Its model calls count for that run (the staged meter).
+                    # Its model calls count for that run (the staged meter), and
+                    # its calls to Nextext state this upload's purpose.
                     try:
-                        with metering(staged_meter(physical)):
+                        with metering(staged_meter(physical)), audit.forwarding_of(op.context):
                             submit_file(dest, physical, file_hash=file_hash)
                     except Exception as exc:
                         logger.warning("Preprocess submit skipped for '{}': {}", filename, exc)

@@ -386,6 +386,10 @@ secret. For the header path docint sends `NEXTEXT_IDENTITY` (default
 request; set `NEXTEXT_IDENTITY` to empty to suppress the header, but never to
 a `service:` value, which Nextext reserves and ignores in the header. See
 [configuration.md](configuration.md#nextext-media-processing--nextextconfig).
+Every request also states a purpose and forwards the request id, since Nextext
+refuses a job poll or an artifact download without a purpose when its own
+audit log requires one: the purpose stated for the ingest, else
+`reason=docint ingest` ([audit.md](audit.md#calls-to-nextext)).
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
 video/audio files are skipped gracefully — collections with no audio/video are

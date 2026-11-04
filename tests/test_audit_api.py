@@ -30,6 +30,7 @@ from docint.core.jobs import IngestJobManager
 from docint.core.rag import IngestStats
 from docint.core.search.fulltext import parse_keywords
 from docint.utils.audit_event import AuditEmitter, sha256_text
+from docint.utils.audit_forward import forward_headers
 from docint.utils.audit_meter import TransferKey, count_transfer, staged_meter, take_staged
 from docint.utils.audit_runtime import PURPOSE_HEADER, encode_purpose
 from docint.utils.hashing import compute_file_hash
@@ -799,6 +800,33 @@ def test_an_upload_records_the_files_it_staged(
     assert event["criteria"] == {"preprocess": False, "bytes": len(content)}
 
 
+def test_the_work_an_upload_starts_states_the_uploads_purpose(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file's upload-time preprocessing (a clip's Nextext round trip) forwards the upload's purpose.
+
+    Args:
+        client (TestClient): The running app.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The sources root.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setenv("INGEST_PREPROCESS_ON_UPLOAD", "true")
+    forwarded: list[dict[str, str]] = []
+    monkeypatch.setattr(api_module, "submit_file", lambda *_args, **_kwargs: forwarded.append(forward_headers()))
+    headers = {**ALICE, "X-Request-ID": "req-0003", PURPOSE_HEADER: encode_purpose("case-0001", "Review")}
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "alpha"},
+        files=[("files", ("clip-0001.mp4", b"synthetic media bytes", "video/mp4"))],
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert forwarded == [{"X-Audit-Purpose": "case_ref=case-0001&reason=Review", "X-Request-ID": "req-0003"}]
+
+
 def _fake_ingest(hashes: tuple[str, ...]) -> Any:
     """Build an ``ingest_docs`` stand-in that calls two models and ingests ``hashes``.
 
@@ -870,6 +898,44 @@ def test_an_ingest_run_records_what_it_collected_and_what_it_sent(
     assert all(event["parent_event_id"] == run["event_id"] for event in transfers)
     assert all(event["request_id"] == "req-0002" for event in transfers)
     assert take_staged("alpha") is None
+
+
+@pytest.mark.parametrize(
+    ("purpose", "forwarded"),
+    [
+        (encode_purpose(None, "Review of the uploads"), "reason=Review+of+the+uploads"),
+        (None, "reason=docint+ingest"),
+    ],
+)
+def test_an_ingest_runs_calls_to_nextext_state_the_finalize_purpose(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, purpose: str | None, forwarded: str
+) -> None:
+    """The job forwards the purpose its finalize request stated, else docint's own reason for asking.
+
+    Args:
+        client (TestClient): The running app.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The sources root.
+        purpose (str | None): The finalize request's ``X-Audit-Purpose``.
+        forwarded (str): What the run's calls to Nextext state.
+    """
+    monkeypatch.setenv("TOPICS_ENABLED", "false")
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    (tmp_path / "alpha").mkdir()
+    fake = _fake_ingest(("c" * 64,))
+    seen: list[dict[str, str]] = []
+
+    def _ingest(*args: Any, **kwargs: Any) -> IngestStats:
+        seen.append(forward_headers())
+        return fake(*args, **kwargs)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", _ingest)
+    headers = {**ALICE, "X-Request-ID": "req-0004", **({PURPOSE_HEADER: purpose} if purpose else {})}
+
+    snapshot = run_ingest(client, "alpha", headers=headers, extra={"ner": False, "summary": False, "topics": False})
+
+    assert snapshot["status"] == "completed"
+    assert seen == [{"X-Audit-Purpose": forwarded, "X-Request-ID": "req-0004"}]
 
 
 def test_a_job_whose_audit_write_fails_is_marked_failed(

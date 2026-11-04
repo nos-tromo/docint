@@ -23,6 +23,7 @@ from docint.core import audit
 from docint.core.audit_targets import chunk_target, entity_key, entity_target, report_items_target, unit_target
 from docint.core.auth.principal import Principal
 from docint.utils.audit_event import Actor, AuditEmitter, AuditWriteError, Target, verify_chain
+from docint.utils.audit_forward import forward_headers
 from docint.utils.audit_meter import (
     TransferKey,
     TransferMeter,
@@ -391,6 +392,29 @@ def test_in_context_carries_the_meter_into_a_thread_pool() -> None:
         pool.submit(count_transfer, "ner", "inference:ner", "gliner", 7).result()
 
     assert [(key.stage, tally.items, tally.requests) for key, tally in meter.snapshot()] == [("ner", 5, 1)]
+
+
+def test_an_operations_work_states_its_purpose_to_the_services_it_calls() -> None:
+    """Inside ``metered``, outbound calls carry the operation's purpose and request id, pool threads included."""
+    op = audit.Operation(_auditor(io.StringIO()), _context(), "collect", "ingest.run")
+    stated = {"X-Audit-Purpose": "case_ref=case-0001", "X-Request-ID": "req-0001"}
+
+    with audit.metered(op):
+        inside = forward_headers()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            in_pool = pool.submit(in_context(forward_headers)).result()
+
+    assert inside == stated
+    assert in_pool == stated
+    assert forward_headers() == {"X-Audit-Purpose": "reason=docint+ingest"}
+
+
+def test_work_with_no_stated_purpose_states_the_system_one() -> None:
+    """A run nobody stated a purpose for asks as docint ingesting, with no request id to forward."""
+    op = audit.Operation(_auditor(io.StringIO()), audit.SYSTEM_CONTEXT, "collect", "ingest.run")
+
+    with audit.metered(op):
+        assert forward_headers() == {"X-Audit-Purpose": "reason=docint+ingest"}
 
 
 def test_staged_meters_are_taken_once() -> None:
