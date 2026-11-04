@@ -305,7 +305,15 @@ describe('HateSpeechTable document preview', () => {
 })
 
 describe('HateSpeechTable — evidence thumbnail', () => {
-  it('shows the source image when the flagged chunk came from a picture', () => {
+  let fetchMock: ReturnType<typeof vi.fn<(input: unknown) => Promise<Response>>>
+  beforeEach(() => {
+    // Every row here shows a picture, fetched through the purpose wrapper.
+    captureDownloads()
+    fetchMock = vi.fn(async () => fileResponse('jpeg-bytes', { type: 'image/jpeg' }))
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  it('shows the source image when the flagged chunk came from a picture, fetched rather than linked', async () => {
     useUiStore.setState({ selectedCollection: 'alpha', previewModal: null })
     renderWithClient(
       <HateSpeechTable
@@ -325,9 +333,11 @@ describe('HateSpeechTable — evidence thumbnail', () => {
     )
 
     expect(screen.getByRole('button', { name: /poster\.png/ })).toBeInTheDocument()
-    expect(document.querySelector('[data-testid="hate-speech-row"] img')?.getAttribute('src')).toContain(
-      'image_id=ph'
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="hate-speech-row"] img')?.getAttribute('src')).toMatch(/^blob:/)
     )
+    const thumbnail = fetchMock.mock.calls.find(([u]) => String(u).includes('/sources/thumbnail'))
+    expect(String(thumbnail?.[0])).toContain('image_id=ph')
   })
 
   it('enlarges the picture when the pixels are clicked', async () => {

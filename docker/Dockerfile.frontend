@@ -22,7 +22,6 @@ ENV DOCINT_CLIENT_MAX_BODY_SIZE=1g
 ENV DOCINT_API_MAX_BODY_SIZE=64m
 
 COPY frontend/nginx/security-headers.conf /etc/nginx/security-headers.conf
-COPY frontend/nginx/security-headers-framable.conf /etc/nginx/security-headers-framable.conf
 COPY frontend/nginx/default.conf /etc/nginx/templates/default.conf.template
 
 COPY --from=builder /build/dist /usr/share/nginx/html

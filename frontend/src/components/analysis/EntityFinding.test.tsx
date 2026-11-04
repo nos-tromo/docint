@@ -7,6 +7,9 @@ import { useUiStore } from '@/stores/ui'
 import { useTranslationsStore } from '@/stores/translations'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import type { NerSourceRow } from '@/api/types'
+import { clearAllPurposes, setPurpose } from '@infra/ui'
+import { PURPOSE_SCOPE } from '@/api/client'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 
 const GRID = '2.5rem 1fr 1fr 2fr 6rem'
 
@@ -296,6 +299,20 @@ it('breaks unbreakable metadata values instead of overflowing the column', () =>
 })
 
 describe('EntityFinding — evidence thumbnail', () => {
+  let downloads: ReturnType<typeof captureDownloads>
+  let fetchMock: ReturnType<typeof vi.fn<(input: unknown, init?: { headers?: Record<string, string> }) => Promise<Response>>>
+
+  beforeEach(() => {
+    downloads = captureDownloads()
+    fetchMock = vi.fn(async () => fileResponse('jpeg-bytes', { type: 'image/jpeg' }))
+    vi.stubGlobal('fetch', fetchMock)
+  })
+  afterEach(() => {
+    clearAllPurposes()
+    sessionStorage.clear()
+    vi.unstubAllGlobals()
+  })
+
   function renderFinding(source: NerSourceRow) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
@@ -311,7 +328,14 @@ describe('EntityFinding — evidence thumbnail', () => {
     )
   }
 
-  it('shows the source image when the finding came from a picture', () => {
+  /** The thumbnail's `<img>`, once the fetched picture is showing. */
+  async function shownImage(container: HTMLElement): Promise<HTMLImageElement> {
+    await waitFor(() => expect(container.querySelector('img')?.getAttribute('src')).toMatch(/^blob:/))
+    return container.querySelector('img')!
+  }
+
+  it('shows the source image when the finding came from a picture, fetched with the purpose', async () => {
+    setPurpose(PURPOSE_SCOPE, { caseRef: 'case-0001' })
     const { container } = renderFinding({
       chunk_id: 'c1',
       filename: 'slide.png',
@@ -323,11 +347,15 @@ describe('EntityFinding — evidence thumbnail', () => {
     // The picture is the control: it carries the accessible name, and the img
     // inside it is presentational so the two are not announced twice.
     expect(screen.getByRole('button', { name: /slide\.png/ })).toBeInTheDocument()
-    expect(container.querySelector('img')?.getAttribute('src')).toContain('/sources/thumbnail?')
-    expect(container.querySelector('img')?.getAttribute('src')).toContain('image_id=h1')
+    // An <img src> could not state the purpose, so the picture is fetched.
+    expect((await shownImage(container)).getAttribute('src')).toBe('blob:docint/1')
+    const [target, init] = fetchMock.mock.calls[0]
+    expect(String(target)).toBe('/sources/thumbnail?collection=test-collection&image_id=h1')
+    expect(init?.headers?.['X-Audit-Purpose']).toBe('case_ref=case-0001')
+    expect(await downloads.blobs[0].text()).toBe('jpeg-bytes')
   })
 
-  it('shows a keyframe from its stored frame, not from the clip it was cut from', () => {
+  it('shows a keyframe from its stored frame, not from the clip it was cut from', async () => {
     const { container } = renderFinding({
       chunk_id: 'c5',
       filename: 'talk.mp4',
@@ -335,9 +363,10 @@ describe('EntityFinding — evidence thumbnail', () => {
       image_id: 'frame-hash'
     })
 
-    const src = container.querySelector('img')?.getAttribute('src') ?? ''
-    expect(src).toContain('image_id=frame-hash')
-    expect(src).not.toContain('clip-hash')
+    await shownImage(container)
+    const target = String(fetchMock.mock.calls[0][0])
+    expect(target).toContain('image_id=frame-hash')
+    expect(target).not.toContain('clip-hash')
   })
 
   it('enlarges a keyframe from its stored frame, since its file is a clip', async () => {
@@ -348,15 +377,13 @@ describe('EntityFinding — evidence thumbnail', () => {
       image_id: 'frame-hash'
     })
 
-    await userEvent.click(container.querySelector('img')!)
+    await userEvent.click(await shownImage(container))
 
     const modal = useUiStore.getState().previewModal
-    expect(modal).toMatchObject({ filename: 'talk.mp4' })
-    expect(modal?.image_url).toContain('image_id=frame-hash')
-    expect(modal?.file_hash).toBeUndefined()
+    expect(modal).toEqual({ filename: 'talk.mp4', collection: 'test-collection', image_id: 'frame-hash' })
   })
 
-  it('shows nothing for a text finding', () => {
+  it('shows nothing for a text finding, and fetches nothing', () => {
     const { container } = renderFinding({
       chunk_id: 'c2',
       filename: 'paper.pdf',
@@ -365,6 +392,7 @@ describe('EntityFinding — evidence thumbnail', () => {
     })
 
     expect(container.querySelector('img')).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('hides itself when the image cannot be loaded', async () => {
@@ -375,9 +403,22 @@ describe('EntityFinding — evidence thumbnail', () => {
       image_id: 'h3'
     })
 
-    container.querySelector('img')!.dispatchEvent(new Event('error'))
+    ;(await shownImage(container)).dispatchEvent(new Event('error'))
 
     await waitFor(() => expect(container.querySelector('img')).toBeNull())
+  })
+
+  it('hides itself when the picture is refused', async () => {
+    fetchMock.mockImplementation(async () => new Response('{}', { status: 404 }))
+    const { container } = renderFinding({
+      chunk_id: 'c7',
+      filename: 'gone.png',
+      file_hash: 'h7',
+      image_id: 'h7'
+    })
+
+    await waitFor(() => expect(container.querySelector('img')).toBeNull())
+    expect(screen.queryByRole('button', { name: /gone\.png/ })).not.toBeInTheDocument()
   })
 
   it('opens the full-size preview when the image is clicked', async () => {
@@ -390,7 +431,7 @@ describe('EntityFinding — evidence thumbnail', () => {
 
     // Click the pixels, not the surrounding control: that is the target an
     // investigator aims at.
-    await userEvent.click(container.querySelector('img')!)
+    await userEvent.click(await shownImage(container))
 
     expect(useUiStore.getState().previewModal).toMatchObject({ file_hash: 'h4', filename: 'slide.png' })
   })

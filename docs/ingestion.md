@@ -564,7 +564,9 @@ ingestion path:
 - In the Analysis tables, every finding read off an image shows the picture:
   `/sources/thumbnail` serves the stored thumbnail by `image_id`, so a PDF
   figure or a keyframe shows its own pixels rather than the document or the
-  clip it came from. Report exports carry the same stored image.
+  clip it came from. The SPA fetches it with the stated purpose rather than
+  pointing an `<img>` at the route ([audit.md](audit.md#how-the-spa-sends-the-purpose)).
+  Report exports carry the same stored image.
 - Failures are soft unless `IMAGE_FAIL_ON_EMBED_ERROR` /
   `IMAGE_FAIL_ON_TAG_ERROR` are set.
 

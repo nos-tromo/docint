@@ -272,10 +272,11 @@ cannot be saved.
   queries it left refused are fetched again as soon as a purpose is stated.
 - **No browser-made requests to audited routes.** An `<a href>`, `<img src>`,
   `<iframe src>`, `window.open` or `EventSource` request cannot carry a
-  header. Downloads are therefore fetched through `apiFetch` and handed to the
-  browser as a file (`frontend/src/api/files.ts`): saved under the name the
-  server's `Content-Disposition` gives it, or, for the report's HTML view,
-  opened in a new tab from what was fetched.
+  header. Downloads, previews and thumbnails are therefore fetched through
+  `apiFetch` and handed to the browser as a file (`frontend/src/api/files.ts`):
+  saved under the name the server's `Content-Disposition` gives it, opened in
+  a new tab from what was fetched (the report's HTML view, a preview's "Open
+  in new tab"), or shown in an `<img>` or `<iframe>` from memory.
 
 Every audited route the SPA calls, and how it carries the purpose.
 "Required" means refused without a purpose under
@@ -301,6 +302,8 @@ one is stated, and it is recorded, but they are not refused without one.
 | `GET /reports/{id}/export.html` | `disclose` | yes | export menu → `viewFile`, opened in a new tab (was a `target="_blank"` link) |
 | `POST /reports/{id}/pdf` | `disclose` (the job) | yes | `apiPost` |
 | `GET /reports/{id}/pdf` | `disclose` | yes | export menu and the finished render's own download → `downloadFile` (was a link and an anchor click) |
+| `GET /sources/preview` | `query` | yes | preview dialog → `fetchFile`, framed or shown from memory; its "Open in new tab" opens what was fetched (was an `<iframe>`/`<img>` `src`, a bare `fetch` and a link) |
+| `GET /sources/thumbnail` | `query` | yes | evidence thumbnails and the stored-image preview → `fetchFile`, cached per image (was an `<img src>`) |
 | `POST /ingest/upload` | `collect` + `ai_call` | no | `streamUpload` (XHR, `setRequestHeader`; resent after a `428` with the same body) |
 | `POST /ingest/finalize` | `collect` + `ai_call`, `combine`, `modify` | no | `apiPost` |
 | `PUT` / `DELETE /sessions/{id}/scope`, `DELETE /sessions/{id}/topic` | `modify` | no | `apiPut`, `apiDelete` |
