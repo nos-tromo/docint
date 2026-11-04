@@ -141,17 +141,19 @@ Everything shows no chip, nor does a turn answered from a hand-picked scope
 **Ask in chat** on an Analysis topic opens a new chat with that topic as its
 **topic focus**, shown as a chip at the inner end of the header's controls
 (`src/components/chat/TopicFocusChip.tsx`): the topic's number and
-label (`T3 · <label>`) over a line saying what the next turn does with it, and
-a control that removes it. The focus adds one metadata rule, `docint_topic`
-equal to `<run id>:<topic id>` ([topics.md](topics.md#payload-keys-and-indexes)), to
+label (`T3 · <label>`, the label the run gives it now) over a line saying what
+the next turn does with it, and a control that removes it. The focus adds one
+metadata rule, `docint_topic` equal to `<run id>:<topic id>`, or for a merged
+topic `in` its members' values ([topics.md](topics.md#payload-keys-and-indexes)), to
 every search of the search panel, its CSV export included, and to chat turns
 answered from Everything or Documents, which then answer from the topic's
 chunks alone, without their wider sections. The chip has four states; when
 several apply, the first wins:
 
-- **stale**: the focused run is no longer the collection's active run, for
-  example after a rebuild. Nothing is sent, since the old value matches no
-  chunk;
+- **stale**: the focused topic is no longer one the collection's active run
+  shows: the run was rebuilt, or a reduction merged the topic into one with a
+  lower number. Nothing is sent, since the old value would match no chunk or
+  only part of a topic;
 - **scoped**: chunks are pinned, so an answer comes from them alone and ignores
   every filter, and the rule applies to searches only;
 - **visual**: the Images target. Its turns get no topic rule, while searches
@@ -410,7 +412,8 @@ the current topics stop matching; **Find new topics**, while some chunks are
 unassigned; **Align pending chunks**, while some are pending; the report
 toggle (`AddToReportButton`, as on the Summary tab), which adds the whole run —
 every topic's label, counts, keywords and summary — to the active report as a
-single item, and takes it out again; and **Download CSV**. A collection without
+single item, and takes it out again; **Download CSV**; and the
+**fine-tuning** disclosure at the far edge. A collection without
 a run shows a **Start analysis** button instead.
 While a job runs, a line names its stage, with a bar where the stage has a
 total. A banner suggests a rebuild when the collection is now embedded with
@@ -418,7 +421,8 @@ another model than the run was built with.
 
 Each topic is a row (`TopicRow.tsx`), largest first: its number (`T3`), its
 label, its size and share of the collection's chunks, a **New** badge for a
-topic a later discover added, its first five keywords and the dates its chunks
+topic a later discover added, a **from N topics** badge for a topic a
+reduction merged, its first five keywords and the dates its chunks
 span. Opening a row, one at a time, shows the topic's **Summary** (four to five
 sentences written when the topic was added), its
 **Evidence** (the five chunks nearest its centre), its **Documents** (the
@@ -427,6 +431,34 @@ passages**, 50 at a time; the three are read only while the row is open. **Ask
 in chat** opens a new chat focused on the topic (see
 [Chat](#chat-srcrouteschattsx)); the chat keeps it once its first question is
 sent.
+
+**Fine-tuning** (`TopicsLab.tsx`) opens in place of the topic list and reads
+`GET /collections/{name}/topics/tuning` once ([topics.md](topics.md#fine-tuning)).
+Its three sections run topics jobs through the tab's own start, so their
+progress and outcomes show as any job's, and every control waits while a job
+runs:
+
+- **Merge similar topics.** A slider sets the number of topics, from 2 to the
+  run's own count, and says from which similarity the cut merges. It cuts the
+  merge tree in the browser (`src/lib/topicMerge.ts`), so moving it asks
+  nothing of the server. Below it, a compact list of the draft's topics: each
+  a toggle for selection, its size, a **from N topics** badge and **Split** on
+  a merged one; **Merge selected** joins the selected topics. While the draft
+  differs from the stored reduction a line says it is a preview. **Apply**
+  queues a reduce with the draft's groups, **Discard** drops the draft, and
+  **Restore the original topics** queues a reduce with none. Moving the slider
+  after merging by hand replaces the hand-made draft.
+- **Unassigned chunks.** The counts of unassigned chunks and of those placed
+  under a lowered bar. **Measure the distribution** runs a relax that places
+  nothing new; after it, a slider for the minimum similarity says how many
+  chunks it would place, exactly, and **Place them** runs it. **Undo** takes the
+  placement back. A distribution measured before the pool changed says so and
+  offers **Apply again** at the bar applied.
+- **Recompute.** A minimum topic size (blank for automatic), the size the run
+  was built with beside it, and **Recompute**, which asks first as **Restart
+  analysis** does.
+
+Closing fine-tuning drops a draft not applied.
 
 The tab shows warnings or errors for the collection's newest topics job
 only when this tab started it or
@@ -469,7 +501,8 @@ While the collection has an active topic run, the document table gains a
 each naming a topic (`T3` and its label, cut to 24 characters and whole in the
 tooltip) with the document's chunk count in it, then `+N` for the rest. Values
 of another run, and the run's unassigned chunks, name no topic of the active
-run and are left out; a document with none shows `—`. The tallies come from the
+run and are left out; a document with none shows `—`. The values of a merged
+topic's members count as that one topic. The tallies come from the
 documents listing's `topics` field
 ([api-reference.md](api-reference.md#get-collectionsdocuments)), and the column
 refetches when a topics job on the collection ends: any job the page's job
