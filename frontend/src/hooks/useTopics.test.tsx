@@ -423,7 +423,7 @@ describe('useStartTopics', () => {
 
     let queued: unknown
     await act(async () => {
-      queued = await result.current.mutateAsync('discover')
+      queued = await result.current.mutateAsync({ action: 'discover' })
     })
 
     const [post] = reads(fetchMock).filter((r) => r.method === 'POST')
@@ -432,13 +432,31 @@ describe('useStartTopics', () => {
     expect(queued).toEqual({ job_id: 'job-9', adopted: false })
   })
 
+  it("sends an action's settings beside it", async () => {
+    const { fetchMock } = stubApi()
+    const { result } = renderHook(() => useStartTopics(), { wrapper })
+
+    await act(async () => {
+      await result.current.mutateAsync({ action: 'reduce', run_id: 'r1', groups: [[0, 2]] })
+      await result.current.mutateAsync({ action: 'relax', run_id: 'r1', threshold: null })
+    })
+
+    const bodies = reads(fetchMock)
+      .filter((r) => r.method === 'POST')
+      .map((r) => JSON.parse(String(r.body)))
+    expect(bodies).toEqual([
+      { action: 'reduce', run_id: 'r1', groups: [[0, 2]] },
+      { action: 'relax', run_id: 'r1', threshold: null }
+    ])
+  })
+
   it('refuses without a collection and sends nothing', async () => {
     const { fetchMock } = stubApi()
     useUiStore.setState({ selectedCollection: null })
     const { result } = renderHook(() => useStartTopics(), { wrapper })
 
     await act(async () => {
-      await expect(result.current.mutateAsync('build')).rejects.toBeInstanceOf(Error)
+      await expect(result.current.mutateAsync({ action: 'build' })).rejects.toBeInstanceOf(Error)
     })
 
     expect(fetchMock).not.toHaveBeenCalled()
