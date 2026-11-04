@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -6,6 +6,7 @@ import { resetReportPdfJobs, useReportPdf } from './useReportPdf'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useUiStore } from '@/stores/ui'
 import type { IngestEvent, IngestJobSnapshot, ReportPdfStatus } from '@/api/types'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 
 let status: ReportPdfStatus = { job: null, pdf: null }
 const reportPdfStatus = vi.fn(async (_collection: string, _id: number) => status)
@@ -66,11 +67,12 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>
 }
 
-let click: MockInstance<() => void>
+let captured: ReturnType<typeof captureDownloads>
+let fetchMock: ReturnType<typeof vi.fn<(input: unknown) => Promise<Response>>>
 
-/** The anchors the hook clicked, i.e. the downloads it started. */
+/** The files the hook saved, i.e. the downloads it finished. */
 function downloads(): HTMLAnchorElement[] {
-  return click.mock.contexts as HTMLAnchorElement[]
+  return captured.saved()
 }
 
 beforeEach(() => {
@@ -81,11 +83,17 @@ beforeEach(() => {
   queueReportPdf.mockClear()
   useIngestJobsStore.getState().clear()
   resetReportPdfJobs()
-  click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  captured = captureDownloads()
+  // The stored PDF itself: the one request the hook makes beyond the mocked routes.
+  fetchMock = vi.fn(async (_input: unknown) =>
+    fileResponse('%PDF-1.7', { type: 'application/pdf', filename: 'report-1-Case Alpha.pdf' })
+  )
+  vi.stubGlobal('fetch', fetchMock)
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   client.clear()
 })
 
@@ -218,7 +226,7 @@ describe('useReportPdf — download when ready', () => {
     await act(() => hook.result.current.start())
     expect(queueReportPdf).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(hook.result.current.phase).toBe('running'))
-    expect(click).not.toHaveBeenCalled()
+    expect(downloads()).toEqual([])
 
     // The terminal frame is what makes the hook ask the status route again.
     status = { job: job('j1', 'completed'), pdf: { ...RENDER, current: true } }
@@ -232,9 +240,10 @@ describe('useReportPdf — download when ready', () => {
 
   it('downloads the PDF once the render this tab asked for completes', async () => {
     await renderAndComplete()
-    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(downloads()).toHaveLength(1))
+    // Fetched through the purpose wrapper, then saved under its name.
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/reports/1/pdf?collection=docs')
     const [anchor] = downloads()
-    expect(anchor.getAttribute('href')).toMatch(/\/reports\/1\/pdf\?collection=docs$/)
     expect(anchor.download).toBe('report-1-Case Alpha.pdf')
   })
 
@@ -248,7 +257,7 @@ describe('useReportPdf — download when ready', () => {
 
   it('does not download again when the stream replays the completion', async () => {
     const { unmount } = await renderAndComplete()
-    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(downloads()).toHaveLength(1))
 
     // A reconnect replays the job's history; a return to the tab remounts the
     // hook, which then finds the same completed job and current PDF.
@@ -259,13 +268,14 @@ describe('useReportPdf — download when ready', () => {
     unmount()
     const again = renderHook(() => useReportPdf(REPORT), { wrapper })
     await waitFor(() => expect(again.result.current.phase).toBe('ready'))
-    expect(click).toHaveBeenCalledTimes(1)
+    expect(downloads()).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('downloads an adopted render too — this tab asked for it', async () => {
     queueReportPdf.mockResolvedValueOnce({ job_id: 'j1', adopted: true })
     await renderAndComplete()
-    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(downloads()).toHaveLength(1))
   })
 
   it('never downloads a render this tab did not ask for', async () => {
@@ -279,7 +289,7 @@ describe('useReportPdf — download when ready', () => {
       frame('j9', 'report_pdf_completed', { empty: false, duration_ms: 3100, artifact: RENDER })
     })
     await waitFor(() => expect(result.current.phase).toBe('ready'))
-    expect(click).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('does not download a render that finished after the report changed', async () => {
@@ -291,6 +301,6 @@ describe('useReportPdf — download when ready', () => {
     status = { job: job('j1', 'completed'), pdf: { ...RENDER, current: false } }
     act(() => frame('j1', 'report_pdf_completed', { empty: false, duration_ms: 4200, artifact: RENDER }))
     await waitFor(() => expect(hook.result.current.phase).toBe('stale'))
-    expect(click).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

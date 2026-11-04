@@ -130,6 +130,12 @@ services:
       # `docker compose exec` (the make targets) lands in this container's log
       # beside the API's chain. The lock file lives on /tmp (media-tmp).
       AUDIT_OUTPUT: container
+      # Actions refused without a stated purpose — X-Audit-Purpose on a
+      # request (the SPA's purpose bar), CASE_REF=/REASON= on a make target:
+      # queries and disclosures, whose reason §76 BDSG Abs. 2 asks for.
+      # Colon-less on purpose: the default applies only while the variable is
+      # unset, so `AUDIT_REQUIRE_PURPOSE=` (empty) in .env requires none.
+      AUDIT_REQUIRE_PURPOSE: ${AUDIT_REQUIRE_PURPOSE-query,disclose}
     env_file: *env-file
     volumes:
       - docling-cache:/home/app/.cache/docling

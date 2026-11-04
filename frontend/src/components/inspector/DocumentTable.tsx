@@ -18,12 +18,13 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   ChevronsUpDownIcon,
-  CopyButton,
-  DownloadLink
+  CopyButton
 } from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
 import type { TopicSummary } from '@/api/topics'
-import { csvExportHref } from '@/api/collections'
+import { csvExportPath } from '@/api/collections'
+import { downloadFile } from '@/api/files'
+import { FileDownloadButton } from '@/components/common/FileDownloadButton'
 import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -334,7 +335,10 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
           {isFetching ? ` ${t('table.loading_suffix')}` : ''}
         </p>
         {collection && (
-          <DownloadLink href={csvExportHref(collection, 'documents')} label={t('table.export_csv')} />
+          <FileDownloadButton
+            label={t('table.export_csv')}
+            download={() => downloadFile(csvExportPath(collection, 'documents'), `${collection}-documents.csv`)}
+          />
         )}
       </div>
 

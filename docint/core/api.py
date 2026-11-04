@@ -415,6 +415,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The SPA fetches its downloads (so they carry the stated purpose) and
+    # names each file from this header, which a cross-origin dev server can
+    # read only when it is exposed.
+    expose_headers=["Content-Disposition"],
 )
 install_error_handlers(app)
 
@@ -1950,6 +1954,7 @@ class FrontendConfigOut(BaseModel):
     language: str
     collection_retention: str
     topics_enabled: bool
+    require_purpose: list[str]
 
 
 class FileTypeCount(BaseModel):
@@ -2100,7 +2105,7 @@ class ReportListOut(BaseModel):
 
 
 @app.get("/config", response_model=FrontendConfigOut, tags=["Meta"])
-def get_frontend_config() -> dict[str, int | str | bool]:
+def get_frontend_config() -> dict[str, int | str | bool | list[str]]:
     """Return deploy-time frontend configuration for the SPA.
 
     Served without a principal dependency so the SPA can read it on first load,
@@ -2108,18 +2113,24 @@ def get_frontend_config() -> dict[str, int | str | bool]:
     variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`
     and :func:`docint.utils.env_cfg.load_language_env`) -- except
     ``report_batch_max_items``, which is the constant the request model was
-    built with, so the advertised cap is the enforced one.
+    built with, so the advertised cap is the enforced one, and
+    ``require_purpose``, which is the running audit chain's rule for the same
+    reason. Not recorded in the audit trail: it is configuration.
 
     Returns:
-        dict[str, int | str | bool]: ``graph_top_k``, ``graph_max_top_k``,
-        ``collection_timeout``, ``max_upload_bytes`` (the per-request upload
-        ceiling nginx enforces, which the SPA uses to size its upload batches),
-        ``report_batch_max_items`` (the most artifacts one report batch add may
-        carry, which the SPA refuses an oversize section against),
-        ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
-        ``"de"``), ``collection_retention`` (``COLLECTION_RETENTION``:
-        ``"off"`` or the idle window, which the SPA checks before asking for
-        expiry dates), and ``topics_enabled`` (``TOPICS_ENABLED``).
+        dict[str, int | str | bool | list[str]]: ``graph_top_k``,
+        ``graph_max_top_k``, ``collection_timeout``, ``max_upload_bytes`` (the
+        per-request upload ceiling nginx enforces, which the SPA uses to size
+        its upload batches), ``report_batch_max_items`` (the most artifacts
+        one report batch add may carry, which the SPA refuses an oversize
+        section against), ``language`` (the active ``RESPONSE_LANGUAGE``
+        locale, ``"en"`` or ``"de"``), ``collection_retention``
+        (``COLLECTION_RETENTION``: ``"off"`` or the idle window, which the SPA
+        checks before asking for expiry dates), ``topics_enabled``
+        (``TOPICS_ENABLED``), and ``require_purpose`` (the audit actions
+        ``AUDIT_REQUIRE_PURPOSE`` makes a stated purpose mandatory for,
+        sorted; the SPA's purpose bar insists on a purpose while it is not
+        empty).
     """
     cfg = load_frontend_env()
     return {
@@ -2131,6 +2142,7 @@ def get_frontend_config() -> dict[str, int | str | bool]:
         "language": load_language_env().code,
         "collection_retention": load_retention_env().window,
         "topics_enabled": load_topics_env().enabled,
+        "require_purpose": sorted(audit.current().require_purpose),
     }
 
 
@@ -7190,9 +7202,10 @@ async def ingest_upload(
                     # The file's heavy stage (PDF layout/OCR, image caption,
                     # transcription) starts now, while the rest of the batch is
                     # still uploading; the finalize job joins it or finds it done.
-                    # Its model calls count for that run (the staged meter).
+                    # Its model calls count for that run (the staged meter), and
+                    # its calls to Nextext state this upload's purpose.
                     try:
-                        with metering(staged_meter(physical)):
+                        with metering(staged_meter(physical)), audit.forwarding_of(op.context):
                             submit_file(dest, physical, file_hash=file_hash)
                     except Exception as exc:
                         logger.warning("Preprocess submit skipped for '{}': {}", filename, exc)

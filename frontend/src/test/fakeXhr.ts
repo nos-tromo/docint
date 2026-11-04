@@ -5,6 +5,8 @@ export class FakeXhr {
   static instances: FakeXhr[] = []
   method = ''
   url = ''
+  /** Request headers set before `send`, by name as given. */
+  headers: Record<string, string> = {}
   body: unknown = null
   status = 0
   responseText = ''
@@ -22,6 +24,10 @@ export class FakeXhr {
   open(method: string, url: string) {
     this.method = method
     this.url = url
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers[name] = value
   }
 
   send(body: unknown) {

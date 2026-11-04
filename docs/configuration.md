@@ -170,7 +170,7 @@ and how, is [audit.md](audit.md).
 | Variable | Dataclass | Default | Description |
 |---|---|---|---|
 | `AUDIT_OUTPUT` | `AuditConfig` | *unset* | Where audit lines go: `stdout` (or unset) for the process's own stdout, `container` for the container's main stdout under one container-wide lock, so a command run with `docker compose exec` writes into the backend's own log. `docker/compose.yaml` sets `container` on the backend. Any other value stops startup. |
-| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty* | Comma-separated audit actions that need a stated purpose (`X-Audit-Purpose` on a request, `AUDIT_CASE_REF`/`AUDIT_REASON` on a command): any of `collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`. A request without one is answered 428, a command exits with code 2; both are recorded as `denied`. Parsed once at startup; an unknown name stops startup. Empty in this release — the SPA does not send the header yet. |
+| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty* | Comma-separated audit actions that need a stated purpose (`X-Audit-Purpose` on a request, `AUDIT_CASE_REF`/`AUDIT_REASON` on a command): any of `collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`. A request without one is answered 428, a command exits with code 2; both are recorded as `denied`. Parsed once at startup; an unknown name stops startup. Empty in the code; `docker/compose.yaml` sets `${AUDIT_REQUIRE_PURPOSE-query,disclose}` on the backend, so a deployment requires a purpose for every query and disclosure unless `.env` sets the variable — `AUDIT_REQUIRE_PURPOSE=` (empty) requires none. The SPA states the purpose in its header bar and reads the actions in force from `GET /config` (`require_purpose`). |
 | `AUDIT_CLI_USER` | `AuditCliConfig` | *unset* | The operator's host account, recorded as a command's actor (`via: "cli"`). The make targets pass `$SUDO_USER`, else `id -un`. |
 | `AUDIT_CASE_REF` | `AuditCliConfig` | *unset* | A command run's case reference. Per run (`make … CASE_REF=…`) — never in `.env`, where it would be stated for every run. A blank value states nothing; a value with control characters or over 256 characters ends the run with exit code 2. |
 | `AUDIT_REASON` | `AuditCliConfig` | *unset* | A command run's reason. Per run (`make … REASON=…`), under the same rules as `AUDIT_CASE_REF`. |
@@ -717,8 +717,9 @@ Loaded by `load_frontend_env()` (`env_cfg.py:352`).
 | `REPORT_BATCH_MAX_ITEMS` | `2000` | Most artifacts one `POST /reports/{id}/items/batch` may carry (clamped to ≥ 1). Read **once at import**: it becomes the request model's `max_length`, so a change needs a backend restart, and `GET /config` always advertises the value actually enforced. The Analysis screens' "Add all" refuses a larger section against this number rather than adding part of it. Raising it far past the default also means checking `DOCINT_API_MAX_BODY_SIZE` (see [deployment.md](deployment.md)) — the count is what the SPA refuses against, the bytes are what nginx stops. |
 
 All five values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE`, `COLLECTION_RETENTION` and `TOPICS_ENABLED` — eight fields
-in all (`FrontendConfigOut`).
+`RESPONSE_LANGUAGE`, `COLLECTION_RETENTION`, `TOPICS_ENABLED` and the actions
+`AUDIT_REQUIRE_PURPOSE` requires (`require_purpose`, as the running audit chain
+enforces them) — nine fields in all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 

@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPatch, apiPost, url, withOwner } from './client'
+import { apiDelete, apiGet, apiPatch, apiPost } from './client'
 import { queueJob } from './jobs'
 import type {
   Report,
@@ -73,15 +73,12 @@ export const refreshCollectionOverview = (collection: string, id: number) =>
   apiPost<Report>(inCollection(`/reports/${id}/collection-overview/refresh`, collection), {})
 
 /**
- * Build an absolute URL for one of the report export endpoints. Use as the
- * `href` of a download/view anchor so the browser handles the response
- * natively (the `.html` form is served inline; the rest are attachments).
- *
- * A link bypasses `apiGet`, so it carries the admin owner context itself —
- * without it, an admin working in another user's namespace gets a 404.
+ * API path of one of the report export endpoints (the `.html` form is served
+ * inline, the rest as attachments), for `downloadFile`/`viewFile` — which add
+ * the base, the admin owner context and the stated purpose.
  */
-export function reportExportHref(collection: string, id: number, format: ReportExportFormat): string {
-  return url(withOwner(inCollection(`/reports/${id}/export.${format}`, collection)))
+export function reportExportPath(collection: string, id: number, format: ReportExportFormat): string {
+  return inCollection(`/reports/${id}/export.${format}`, collection)
 }
 
 /**
@@ -89,7 +86,7 @@ export function reportExportHref(collection: string, id: number, format: ReportE
  *
  * Rendering a large report outlasts the gateway's request timeout, so the PDF
  * is a job rather than a response; progress arrives on the shared job stream
- * and the result is fetched from {@link reportPdfHref}. A render already in
+ * and the result is fetched from {@link reportPdfPath}. A render already in
  * flight for this report is adopted (see {@link queueJob}).
  *
  * @param collection - The caller's active collection, which the report must belong to.
@@ -103,7 +100,7 @@ export const queueReportPdf = (collection: string, id: number) =>
 export const reportPdfStatus = (collection: string, id: number) =>
   apiGet<ReportPdfStatus>(inCollection(`/reports/${id}/pdf/status`, collection))
 
-/** Absolute URL of the report's stored PDF, for a download anchor's `href`. */
-export function reportPdfHref(collection: string, id: number): string {
-  return url(withOwner(inCollection(`/reports/${id}/pdf`, collection)))
+/** API path of the report's stored PDF, for `downloadFile`. */
+export function reportPdfPath(collection: string, id: number): string {
+  return inCollection(`/reports/${id}/pdf`, collection)
 }

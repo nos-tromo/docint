@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { ExtractsPanel } from './ExtractsPanel'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useUiStore } from '@/stores/ui'
 import type { ExtractRecord, IngestEvent } from '@/api/types'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 
 const RECORD: ExtractRecord = {
   extract_id: '20260102-030405-deadbeef',
@@ -42,7 +44,11 @@ describe('ExtractsPanel', () => {
     useUiStore.setState({ selectedCollection: 'mydocs' })
     useIngestJobsStore.getState().clear()
   })
-  afterEach(() => useIngestJobsStore.getState().clear())
+  afterEach(() => {
+    useIngestJobsStore.getState().clear()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
 
   it('lists a stored bundle with its size and contents', async () => {
     render(<ExtractsPanel />, { wrapper })
@@ -52,12 +58,17 @@ describe('ExtractsPanel', () => {
     expect(screen.getByText(/12 figures/)).toBeInTheDocument()
   })
 
-  it('offers a download link pointing at the stored bundle', async () => {
+  it('downloads the stored bundle through the purpose wrapper, under its own name', async () => {
+    const downloads = captureDownloads()
+    const fetchMock = vi.fn(async (..._args: unknown[]) => fileResponse('PK', { type: 'application/zip' }))
+    vi.stubGlobal('fetch', fetchMock)
     render(<ExtractsPanel />, { wrapper })
-    const link = await screen.findByRole('link', { name: /Download extract/i })
-    expect(link.getAttribute('href')).toContain(
-      '/collections/mydocs/extracts/20260102-030405-deadbeef/download'
-    )
+
+    await userEvent.click(await screen.findByRole('button', { name: /Download extract/i }))
+
+    await waitFor(() => expect(downloads.saved()).toHaveLength(1))
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/collections/mydocs/extracts/20260102-030405-deadbeef/download')
+    expect(downloads.saved()[0].download).toBe('mydocs-extract-20260102-0304.zip')
   })
 
   it('shows progress from the shared job stream', async () => {

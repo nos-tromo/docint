@@ -1,17 +1,46 @@
-import type { ReactNode } from 'react'
-import { AppShell } from '@infra/ui'
+import { useMemo, type ReactNode } from 'react'
+import { AppShell, PurposeBar, type PurposeBarLabels } from '@infra/ui'
 import { Sidebar } from './Sidebar'
 import { PreviewDialog } from '@/components/common/PreviewDialog'
+import { PURPOSE_SCOPE } from '@/api/client'
 import { useT } from '@/i18n/LanguageContext'
+import { useConfig } from '@/hooks/useConfig'
 import { useWhoami } from '@/hooks/useWhoami'
 import { useVersion } from '@/hooks/useVersion'
 import { useIngestJobStream } from '@/hooks/useIngestJobStream'
 
+/** The purpose bar's strings in the active locale. */
+function usePurposeLabels(): PurposeBarLabels {
+  const t = useT()
+  return useMemo(
+    () => ({
+      purpose: t('purpose.name'),
+      empty: t('purpose.empty'),
+      required: t('purpose.required'),
+      title: t('purpose.title'),
+      description: t('purpose.description'),
+      requested: t('purpose.requested'),
+      caseRef: t('purpose.case_ref'),
+      reason: t('purpose.reason'),
+      save: t('purpose.save'),
+      cancel: t('purpose.cancel'),
+      clear: t('purpose.clear'),
+      errorLength: t('purpose.error_length'),
+      errorControl: t('purpose.error_control'),
+      errorHeader: t('purpose.error_header'),
+      errorEmpty: t('purpose.error_empty')
+    }),
+    [t]
+  )
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const t = useT()
   useIngestJobStream()
+  const { data: config } = useConfig()
   const { data: whoami } = useWhoami()
   const { data: version } = useVersion()
+  const purposeLabels = usePurposeLabels()
   return (
     <>
       <AppShell
@@ -31,6 +60,16 @@ export function Shell({ children }: { children: ReactNode }) {
           dark: t('appHeader.theme_dark')
         }}
         signOutLabel={t('appHeader.sign_out')}
+        // Where the purpose every request carries is stated (`apiFetch`), and
+        // the dialog a 428 opens. The backend says which actions it refuses
+        // without one; any at all make the empty bar a warning.
+        headerActions={
+          <PurposeBar
+            scope={PURPOSE_SCOPE}
+            required={(config?.require_purpose?.length ?? 0) > 0}
+            labels={purposeLabels}
+          />
+        }
         sidebar={<Sidebar />}
       >
         {children}

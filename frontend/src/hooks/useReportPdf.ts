@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { queueReportPdf, reportPdfHref, reportPdfStatus } from '@/api/reports'
+import { isPurposeRefusal } from '@/api/client'
+import { downloadFile } from '@/api/files'
+import { queueReportPdf, reportPdfPath, reportPdfStatus } from '@/api/reports'
 import { useReportCollection } from '@/hooks/useReports'
 import { selectJobEvents, useIngestJobsStore } from '@/stores/ingestJobs'
 import type { IngestEvent, IngestJobSnapshot, ReportPdfStatus, ReportSummary } from '@/api/types'
@@ -111,16 +113,6 @@ export function deriveReportPdfView(input: {
   return { phase: 'idle', stage: null, page: null }
 }
 
-/** Hand the browser a file to download, the way a clicked link would. */
-function downloadFile(href: string, filename: string): void {
-  const anchor = document.createElement('a')
-  anchor.href = href
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-}
-
 /**
  * This tab's own request for a render of one report: kept until the status
  * route has answered once since, or for good when the queue route refused.
@@ -211,7 +203,11 @@ export function useReportPdf(report: Pick<ReportSummary, 'id' | 'updated_at'>) {
     if (!completedJobId || !currentFilename) return
     if (!requestedJobs.has(completedJobId) || downloadedJobs.has(completedJobId)) return
     downloadedJobs.add(completedJobId)
-    downloadFile(reportPdfHref(collection, report.id), currentFilename)
+    // Fetched through the purpose wrapper, like every download; the menu's
+    // PDF entry stays there if this one fails.
+    downloadFile(reportPdfPath(collection, report.id), currentFilename).catch((err: unknown) => {
+      if (!isPurposeRefusal(err)) console.error('Downloading the report PDF failed', err)
+    })
   }, [completedJobId, currentFilename, report.id, collection])
 
   const view = deriveReportPdfView({ job, pdf, frames, pending, startFailed: own?.failed ?? false })

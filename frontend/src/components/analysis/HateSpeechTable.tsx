@@ -1,7 +1,8 @@
 import { useRef } from 'react'
-import { DownloadLink } from '@infra/ui'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { csvExportHref, getHateSpeechPage } from '@/api/collections'
+import { csvExportPath, getHateSpeechPage } from '@/api/collections'
+import { downloadFile } from '@/api/files'
+import { FileDownloadButton } from '@/components/common/FileDownloadButton'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataPills } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
@@ -200,7 +201,10 @@ export function HateSpeechTable({
             hasRows={rows.length > 0}
           />
           {collection && (
-            <DownloadLink href={csvExportHref(collection, 'hate-speech')} label={t('table.export_csv')} />
+            <FileDownloadButton
+              label={t('table.export_csv')}
+              download={() => downloadFile(csvExportPath(collection, 'hate-speech'), `${collection}-hate-speech.csv`)}
+            />
           )}
         </div>
       </div>

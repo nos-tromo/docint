@@ -22,6 +22,7 @@ and its access model. Nothing on this page duplicates that.
 - [Routes](#routes)
 - [Background jobs](#background-jobs)
 - [Model calls](#model-calls)
+- [Calls to Nextext](#calls-to-nextext)
 - [Streaming routes](#streaming-routes)
 - [Retention sweep](#retention-sweep)
 - [Command-line tools](#command-line-tools)
@@ -237,18 +238,103 @@ generic detail and records nothing. A purpose is *stated* when at least one
 field is set; it is recorded on every event of the operation, and never in
 the operational log — it is personal data in its own right.
 
-`AUDIT_REQUIRE_PURPOSE` lists the actions that need a stated purpose. It is
-**empty by default**: the SPA does not send the header yet. When it is set, a
-route is refused (428, one `denied` event) when *any* action its operation
-may record is listed — a chat turn records `query` and `ai_call`, a finalize
-`collect`, `ai_call`, `combine` and `modify`, a summary request `query`,
-`modify` and `ai_call`. A job runs with the purpose of the request that
-queued it, so the requirement is checked once, at the request.
+`AUDIT_REQUIRE_PURPOSE` lists the actions that need a stated purpose. **A
+deployment requires one for `query` and `disclose`**: `docker/compose.yaml`
+sets `${AUDIT_REQUIRE_PURPOSE-query,disclose}` on the backend, because §76
+BDSG Abs. 2 asks the reason for queries and disclosures. Every search, chat
+turn, listing, preview and download is then refused until a purpose is
+stated; collecting, changing, combining and erasing data, and a translation's
+model call, are recorded with the purpose when one is stated but not refused
+without one. The default applies only while the variable is unset: set
+`AUDIT_REQUIRE_PURPOSE=` (empty) in `.env` to require none, or list other
+actions. The code default is empty (tests, a bare `uvicorn`). The SPA states
+the purpose through its purpose bar ([below](#how-the-spa-sends-the-purpose)).
+A route is refused (428, one `denied` event) when *any* action its
+operation may record is listed — a chat turn records `query` and `ai_call`, a
+finalize `collect`, `ai_call`, `combine` and `modify`, a summary request
+`query`, `modify` and `ai_call`. A job runs with the purpose of the request
+that queued it, so the requirement is checked once, at the request.
+`GET /config` names the actions in force as `require_purpose`.
 
 A command-line run states its purpose in `AUDIT_CASE_REF` and `AUDIT_REASON`
 under the same rules; a run that needs one and has none records a `denied`
 event and exits with code 2, and a malformed value exits with code 2 before
 any chain opens.
+
+### How the SPA sends the purpose
+
+The SPA's header holds a **purpose bar** (`@infra/ui`'s `PurposeBar`, scope
+`docint`) where the user states a case reference, a reason, or both. It is
+kept for the browser tab's session, per app (the apps share one origin behind
+the gateway), and signing out clears it. While `GET /config` lists any
+`require_purpose` actions the empty bar is a warning and a blank purpose
+cannot be saved.
+
+- **One way out.** Every request leaves through `apiFetch`
+  (`frontend/src/api/client.ts`): `apiGet`/`apiPost`/`apiPut`/`apiPatch`/
+  `apiDelete`, both SSE helpers, and the XHR upload, which goes through the
+  same `withPurpose`. A stated purpose rides along as `X-Audit-Purpose`.
+- **A 428 asks.** The refused request opens the bar's dialog ("This action
+  needs a stated purpose") and is sent once more with the purpose saved there
+  — to the same URL, owner included, with the same body. Cancelled, the
+  refusal is the request's error ("This action needs a stated purpose. Please
+  state one in the header and try again."), and the queries it left refused
+  are fetched again as soon as a purpose is stated; a refused change or
+  download stays refused until it is tried again. Every attempt gets its own
+  timeout (the upload's stall watchdog), none counts the time spent in the
+  dialog.
+- **No browser-made requests to audited routes.** An `<a href>`, `<img src>`,
+  `<iframe src>`, `window.open` or `EventSource` request cannot carry a
+  header. Downloads, previews and thumbnails are therefore fetched through
+  `apiFetch` and handed to the browser as a file (`frontend/src/api/files.ts`):
+  saved under the name the server's `Content-Disposition` gives it, opened in
+  a new tab from what was fetched (the report's HTML view, a preview's "Open
+  in new tab"), or shown in an `<img>` or `<iframe>` from memory.
+
+Every audited route the SPA calls, and how it carries the purpose.
+"Required" means refused without a purpose under
+`AUDIT_REQUIRE_PURPOSE=query,disclose`; the other routes carry a purpose when
+one is stated, and it is recorded, but they are not refused without one.
+
+| Route | Records | Required | Sent by |
+|---|---|---|---|
+| `POST /stream_query`, `POST /agent/chat/stream` | `query` + `ai_call` | yes | `streamSse` |
+| `POST /search`, `GET /search/chunk` | `query` | yes | `apiPost`, `apiGet` |
+| `GET` / `POST /summarize` | `query` (+ `modify`, `ai_call`) | yes | `apiGetOrNull`, `apiPost` |
+| `GET /collections/ner/stats`, `/ner/sources`, `/ner/graph`, `GET /collections/hate-speech`, `GET /collections/documents` | `query` | yes | `apiGet` |
+| `GET /collections/{name}/topics` and its `/evidence`, `/documents`, `/chunks` | `query` | yes | `apiGet`, `apiGetOrNull` |
+| `GET /sessions/list`, `GET /sessions/{id}/history` | `query` | yes | `apiGet` |
+| `GET /reports`, `GET /reports/unassigned`, `GET /reports/{id}` | `query` | yes | `apiGet` |
+| `GET /collections/{name}/export/documents.csv`, `ner-sources.csv`, `hate-speech.csv` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `GET /search/export.csv` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `GET /sessions/{id}/sources.zip` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `POST /collections/{name}/extracts` | `disclose` (the job) | yes | `apiPost` |
+| `GET /collections/{name}/extracts/{id}/download` | `disclose` | yes | download button → `downloadFile` (was a link) |
+| `GET /collections/{name}/sources/{id}/extract.zip` | `disclose` | yes | `fetchFile` (was a bare `fetch`) |
+| `GET /reports/{id}/export.{md,zip,json}` | `disclose` | yes | export menu → `downloadFile` (was a link) |
+| `GET /reports/{id}/export.html` | `disclose` | yes | export menu → `viewFile`, opened in a new tab (was a `target="_blank"` link) |
+| `POST /reports/{id}/pdf` | `disclose` (the job) | yes | `apiPost` |
+| `GET /reports/{id}/pdf` | `disclose` | yes | export menu and the finished render's own download → `downloadFile` (was a link and an anchor click) |
+| `GET /sources/preview` | `query` | yes | preview dialog → `fetchFile`, framed or shown from memory; its "Open in new tab" opens what was fetched (was an `<iframe>`/`<img>` `src`, a bare `fetch` and a link) |
+| `GET /sources/thumbnail` | `query` | yes | evidence thumbnails and the stored-image preview → `fetchFile`, cached per image (was an `<img src>`) |
+| `POST /ingest/upload` | `collect` + `ai_call` | no | `streamUpload` (XHR, `setRequestHeader`; resent after a `428` with the same body) |
+| `POST /ingest/finalize` | `collect` + `ai_call`, `combine`, `modify` | no | `apiPost` |
+| `PUT` / `DELETE /sessions/{id}/scope`, `DELETE /sessions/{id}/topic` | `modify` | no | `apiPut`, `apiDelete` |
+| `POST /reports`, `PATCH /reports/{id}`, `POST …/assign`, `…/collection-overview/refresh`, `…/items`, `…/items/batch`, `…/items/reorder`, `PATCH …/items/{id}` | `modify` | no | `apiPost`, `apiPatch` |
+| `POST /collections/{name}/topics` | `modify` + `ai_call` | no | `apiPost` |
+| `DELETE /collections/{name}`, `/sessions/{id}`, `/reports/{id}`, `/reports/{id}/items/{id}`, `/collections/{name}/extracts/{id}` | `delete` | no | `apiDelete` |
+| `POST /translate` | `ai_call` | no | `apiPost` |
+| `GET /collections/list?all=true`, `GET /collections/retention?all=true` | `admin`, for an admin only | no | `apiGet` |
+
+The admin owner context (`?owner=`) is added by `apiFetch` too, so a download
+an admin makes in another owner's namespace is recorded `on_behalf_of` that
+owner like any other request — the session sources ZIP, which used to go out
+without it, included. The routes the SPA calls that record nothing
+(`/config`, `/config/ingest-defaults`, `/version`, `/whoami`,
+`POST /collections/select`, `POST /collections/ner/warm`, `GET /ingest/staged`,
+the job routes and their stream, the PDF status, extract listings, document
+counts and summary, the session's topic, the non-admin collection listings)
+carry the purpose too, and ignore it.
 
 ## Routes
 
@@ -260,7 +346,7 @@ ends ([Background jobs](#background-jobs)).
 
 | Route | Recorded as | Target and notes |
 |---|---|---|
-| `GET /config` | — | Deploy-time configuration, served without a principal. |
+| `GET /config` | — | Deploy-time configuration, served without a principal — including `require_purpose`, the actions the running chain requires a stated purpose for. |
 | `GET /config/ingest-defaults` | — | Configuration. |
 | `GET /version` | — | Liveness. |
 | `GET /health` | — | Readiness. |
@@ -455,6 +541,33 @@ consumes the results. A batch that is never finalized is not recorded beyond
 its `ingest.upload` event, whose `preprocess: true` says its files were sent;
 deleting the collection drops the staged counts, and a restart loses them.
 
+## Calls to Nextext
+
+docint ingests audio and video through Nextext (`docint/utils/nextext_client.py`),
+which keeps a data-protection audit log of its own: submitting a clip is a
+`collect` there, every poll of the job a `query` (`job.get`), and every artifact
+download — the transcript, the keyframes — a `disclose` (`artifact.download`).
+Under Nextext's `AUDIT_REQUIRE_PURPOSE` a poll or a download that states no
+purpose is refused, so every request docint sends it carries:
+
+- **`X-Audit-Purpose`** — the purpose stated for the docint work the clip
+  belongs to: the finalize request's for an ingest job, the upload's for the
+  preprocessing an upload starts, the request's for `POST /ingest`, and
+  `AUDIT_CASE_REF`/`AUDIT_REASON` for the `ingest` command. When none was stated
+  — docint's ingest is a `collect`, which needs none of its own — it is
+  docint's own reason for asking, `reason=docint ingest`.
+- **`X-Request-ID`** — the id of the request that started the work, when there
+  is one, so the two trails can be joined.
+
+The purpose rides a context variable that `audit.metered` binds for a run and
+the upload route for the work it submits (`docint/utils/audit_forward.py`), so
+it follows the work into the preprocessing pool; the same purpose and id go on
+the submission, every poll and both downloads of a clip. A refusal from
+Nextext — a 428 included — skips that clip like any other failure at that step
+(`poll_error` while polling, `error` on submission or download) and is logged;
+the run goes on. In docint's own log the round trip is the run's
+`ingest.transcribe` transfer ([Model calls](#model-calls)).
+
 ## Streaming routes
 
 - **`POST /stream_query`, `POST /agent/chat/stream`** — the answer streams
@@ -504,11 +617,21 @@ The make targets run the commands inside the running backend with
 `docker compose exec`, so their lines land in the backend's log
 (`AUDIT_OUTPUT=container`): a one-off container can exit before the log
 collector has found it, and its lines would be lost without a trace. The
-backend must be up. They pass the operator's host account and the purpose:
+backend must be up. They pass the operator's host account and the purpose.
+
+Inside the backend the compose default `query,disclose` applies, so the
+commands that read or hand out collection data need `CASE_REF=` or `REASON=`
+and exit with code 2 without one: `extract` (`disclose`), `topics status` —
+`make topics`' default `OP` (`query`) — and `query` / `query-eval` (`query` and
+`disclose`). `resolve` (`combine`), `search-index` / `search-index-all`
+(`modify`), `topics build` / `discover` / `align` (`modify`), `ingest`
+(`collect`) and `verify --repair` (`delete`) need none, and record one when it
+is given:
 
 ```bash
-make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"
 make extract COLLECTION=mydocs CASE_REF=case-0001
+make topics COLLECTION=mydocs REASON="Review of the topic labels"
+make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entities"
 ```
 
 `AUDIT_CLI_USER` is `$SUDO_USER`, else `id -un`, on the host; an empty
@@ -520,7 +643,7 @@ one-off container: it reads only the retention clock.
 | Variable | Read by | Default | Description |
 |---|---|---|---|
 | `AUDIT_OUTPUT` | `AuditConfig` | *unset* | `stdout` (or unset) for the process's own stdout; `container` for the container's main stdout under the container-wide lock. Compose sets `container` on the backend. Any other value stops startup. |
-| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty* | Comma-separated actions that need a stated purpose (`collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`). Empty in this release. An unknown name stops startup. |
+| `AUDIT_REQUIRE_PURPOSE` | `AuditConfig` | *empty*; `query,disclose` in `docker/compose.yaml` while unset | Comma-separated actions that need a stated purpose (`collect`, `modify`, `query`, `disclose`, `combine`, `delete`, `admin`, `ai_call`, `auth`). Set it empty in `.env` to require none. An unknown name stops startup. `GET /config` names the actions in force (`require_purpose`). |
 | `AUDIT_CLI_USER` | `AuditCliConfig` | *unset* | The operator's host account, for a command's actor. The make targets set it. |
 | `AUDIT_CASE_REF` | `AuditCliConfig` | *unset* | A command's case reference. Per run (`make … CASE_REF=…`), never in `.env`. |
 | `AUDIT_REASON` | `AuditCliConfig` | *unset* | A command's reason. Per run (`make … REASON=…`), never in `.env`. |

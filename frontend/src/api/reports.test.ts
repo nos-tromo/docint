@@ -13,8 +13,8 @@ import {
   refreshCollectionOverview,
   removeReportItem,
   reorderReportItems,
-  reportExportHref,
-  reportPdfHref,
+  reportExportPath,
+  reportPdfPath,
   reportPdfStatus,
   updateReport,
   updateReportItem
@@ -63,7 +63,9 @@ describe('reports api', () => {
     await listUnassignedReports()
     const call = lastCall()
     expect(String(call[0])).toMatch(/\/reports\/unassigned$/)
-    expect(call[1]).toBeUndefined()
+    // A GET: no method, no body — only the headers every request carries.
+    expect(call[1]?.method).toBeUndefined()
+    expect(call[1]?.body).toBeUndefined()
   })
 
   it('assignReport POSTs the collection to move the report into', async () => {
@@ -79,7 +81,9 @@ describe('reports api', () => {
     await getReport('docs', 4)
     const call = lastCall()
     expect(String(call[0])).toContain('/reports/4?collection=docs')
-    expect(call[1]).toBeUndefined()
+    // A GET: no method, no body — only the headers every request carries.
+    expect(call[1]?.method).toBeUndefined()
+    expect(call[1]?.body).toBeUndefined()
   })
 
   it('escapes the collection, so its name cannot spill into the query', async () => {
@@ -145,10 +149,10 @@ describe('reports api', () => {
     expect(JSON.parse(call[1].body)).toEqual({ item_ids: [2, 1] })
   })
 
-  it('reportExportHref builds the export URL for each format', () => {
-    expect(reportExportHref('docs', 7, 'pdf')).toContain('/reports/7/export.pdf?collection=docs')
-    expect(reportExportHref('docs', 7, 'zip')).toContain('/reports/7/export.zip?collection=docs')
-    expect(reportExportHref('docs', 7, 'md')).toContain('/reports/7/export.md?collection=docs')
+  it('reportExportPath builds the export path for each format', () => {
+    expect(reportExportPath('docs', 7, 'pdf')).toBe('/reports/7/export.pdf?collection=docs')
+    expect(reportExportPath('docs', 7, 'zip')).toBe('/reports/7/export.zip?collection=docs')
+    expect(reportExportPath('docs', 7, 'md')).toBe('/reports/7/export.md?collection=docs')
   })
 
   it('refreshCollectionOverview POSTs to the refresh route', async () => {
@@ -199,18 +203,18 @@ describe('report PDF job api', () => {
     await expect(reportPdfStatus('docs', 7)).resolves.toEqual({ job: null, pdf: null })
     const call = lastCall()
     expect(String(call[0])).toContain('/reports/7/pdf/status?collection=docs')
-    expect(call[1]).toBeUndefined()
+    // A GET: no method, no body — only the headers every request carries.
+    expect(call[1]?.method).toBeUndefined()
+    expect(call[1]?.body).toBeUndefined()
   })
 
-  it('links the stored PDF', () => {
-    expect(reportPdfHref('docs', 7)).toMatch(/\/reports\/7\/pdf\?collection=docs$/)
+  it('addresses the stored PDF', () => {
+    expect(reportPdfPath('docs', 7)).toBe('/reports/7/pdf?collection=docs')
   })
 
-  it('carries the admin owner context on every download link', () => {
-    // A link is not an apiGet, so nothing else adds it — and without it an
-    // admin in another user's namespace is answered 404.
+  it('leaves the admin owner context to the wrapper, which adds it once', () => {
     setOwnerParam('other.operator')
-    expect(reportPdfHref('docs', 7)).toContain('/reports/7/pdf?collection=docs&owner=other.operator')
-    expect(reportExportHref('docs', 7, 'md')).toContain('/reports/7/export.md?collection=docs&owner=other.operator')
+    expect(reportPdfPath('docs', 7)).not.toContain('owner=')
+    expect(reportExportPath('docs', 7, 'md')).not.toContain('owner=')
   })
 })

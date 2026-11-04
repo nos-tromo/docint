@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, getOwnerParam, url } from './client'
+import { apiDelete, apiGet, apiPost } from './client'
 import type {
   CollectionsRetention,
   DocumentRecord,
@@ -169,20 +169,19 @@ export interface CsvExportParams {
 }
 
 /**
- * Build an absolute URL pointing at one of the streaming CSV export
- * endpoints. Use this as the ``href`` of a download anchor so the browser
- * handles the streaming response natively.
+ * The API path of one of the streaming CSV export endpoints, for
+ * `downloadFile` — which adds the sub-path base, the admin owner context and
+ * the stated purpose, none of which a plain link could send all of.
  */
-export function csvExportHref(
+export function csvExportPath(
   collection: string,
   kind: CsvExportKind,
   params: CsvExportParams = {}
 ): string {
-  const owner = getOwnerParam()
-  const qs = Object.entries({ ...params, owner: owner ?? undefined })
+  const qs = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== null && v !== '')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
     .join('&')
   const suffix = qs ? `?${qs}` : ''
-  return url(`/collections/${encodeURIComponent(collection)}/export/${kind}.csv${suffix}`)
+  return `/collections/${encodeURIComponent(collection)}/export/${kind}.csv${suffix}`
 }

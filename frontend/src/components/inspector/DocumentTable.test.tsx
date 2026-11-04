@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { DocumentTable } from './DocumentTable'
@@ -7,6 +7,12 @@ import type { DocumentRecord } from '@/api/types'
 import type { TopicSummary } from '@/api/topics'
 import { useUiStore } from '@/stores/ui'
 import userEvent from '@testing-library/user-event'
+import { captureDownloads, fileResponse } from '@/test/downloads'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 // Each row carries the extract action, which reads the active report's
 // appendix fields — so the table needs the query client the app provides.
@@ -78,11 +84,21 @@ describe('DocumentTable', () => {
     ).toBeInTheDocument()
   })
 
-  it('shows the document count and a CSV export link', () => {
+  it('shows the document count and fetches the CSV export through the purpose wrapper', async () => {
+    const downloads = captureDownloads()
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      fileResponse('file_hash\n', { type: 'text/csv', filename: 'mydocs-documents.csv' })
+    )
+    vi.stubGlobal('fetch', fetchMock)
     render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
     expect(screen.getByText(/2 documents/)).toBeInTheDocument()
-    const link = screen.getByRole('link', { name: 'Export CSV' })
-    expect(link).toHaveAttribute('href', expect.stringContaining('/collections/mydocs/export/documents.csv'))
+
+    // A button, not a link: a link's request could not carry the stated purpose.
+    await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }))
+
+    await waitFor(() => expect(downloads.saved()).toHaveLength(1))
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/collections/mydocs/export/documents.csv')
+    expect(downloads.saved()[0].download).toBe('mydocs-documents.csv')
   })
 
   it('renders an empty state instead of a bare table when there are no documents', () => {

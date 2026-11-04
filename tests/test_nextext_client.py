@@ -3,13 +3,16 @@
 import io
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
 
+from docint.utils.audit_forward import forwarding
+from docint.utils.audit_runtime import parse_purpose_header
 from docint.utils.env_cfg import NextextConfig
-from docint.utils.nextext_client import NextextClient
+from docint.utils.nextext_client import NextextClient, NextextResult
 
 
 def _cfg() -> NextextConfig:
@@ -310,3 +313,87 @@ def test_rejected_options_names_the_required_nextext_version(
     assert result.keyframes == []
     assert "v1.9.0" in loguru_caplog.text
     assert "422" in loguru_caplog.text
+
+
+#: Every request one clip makes: the submission, a poll, and both artifacts.
+_CALLS = [
+    ("POST", "/jobs"),
+    ("GET", "/jobs/J1"),
+    ("GET", "/jobs/J1/artifacts/docint.jsonl"),
+    ("GET", "/jobs/J1/artifacts/keyframes.zip"),
+]
+
+
+def _recorded(
+    tmp_path: Path, handler: Callable[[httpx.Request], httpx.Response] = _handler
+) -> tuple[NextextResult, list[httpx.Request]]:
+    """Run one clip through a recording transport.
+
+    Args:
+        tmp_path (Path): Where the synthetic clip is written.
+        handler (Callable[[httpx.Request], httpx.Response]): The transport's handler.
+
+    Returns:
+        tuple[NextextResult, list[httpx.Request]]: The result and every request sent.
+    """
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"fakevideo")
+    seen: list[httpx.Request] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return handler(request)
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(recording))
+    return NextextClient(_cfg(), client=client).process_media(media), seen
+
+
+def test_every_call_states_docints_own_purpose_when_none_was_stated(tmp_path: Path) -> None:
+    """Nextext audits a poll as a query and a download as a disclosure: each states why docint asks."""
+    result, seen = _recorded(tmp_path)
+
+    assert result.status == "completed"
+    assert [(r.method, r.url.path) for r in seen] == _CALLS
+    for request in seen:
+        assert parse_purpose_header(request.headers["X-Audit-Purpose"]) == (None, "docint ingest")
+        assert "X-Request-ID" not in request.headers
+
+
+def test_every_call_states_the_purpose_of_the_work_that_triggered_it(tmp_path: Path) -> None:
+    """The ingest's stated purpose and its request id go along on all of a clip's calls."""
+    with forwarding(case_ref="case-0001", reason="Review of the flagged postings", request_id="req-0001"):
+        result, seen = _recorded(tmp_path)
+
+    assert result.status == "completed"
+    assert [(r.method, r.url.path) for r in seen] == _CALLS
+    for request in seen:
+        assert parse_purpose_header(request.headers["X-Audit-Purpose"]) == (
+            "case-0001",
+            "Review of the flagged postings",
+        )
+        assert request.headers["X-Request-ID"] == "req-0001"
+
+
+@pytest.mark.parametrize(
+    ("refused", "status"),
+    [("/jobs", "error"), ("/jobs/J1", "poll_error"), ("/jobs/J1/artifacts/docint.jsonl", "error")],
+)
+def test_a_refusal_for_want_of_a_purpose_is_the_usual_ingest_error(tmp_path: Path, refused: str, status: str) -> None:
+    """A 428 from Nextext skips the clip the way any other refusal at that step does.
+
+    Args:
+        tmp_path (Path): Where the synthetic clip is written.
+        refused (str): The path Nextext answers 428.
+        status (str): The result status that step's failure has always had.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == refused:
+            return httpx.Response(428, json={"detail": "A stated purpose is required for this request."})
+        return _handler(request)
+
+    result, _ = _recorded(tmp_path, handler)
+
+    assert result.status == status
+    assert result.transcript_jsonl is None
+    assert result.keyframes == []

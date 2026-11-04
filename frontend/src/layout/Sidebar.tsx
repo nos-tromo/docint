@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { HoverIconAction, NewButton, SelectMenu, TrashIcon, WarningIcon } from '@infra/ui'
-import { ApiError } from '@/api/client'
+import { ApiError, isPurposeRefusal } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useCollectionsRetention } from '@/hooks/useRetention'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
@@ -36,6 +36,7 @@ function getSessionsStatusMessage(
   if (error instanceof ApiError && error.status === 401) {
     return t('common.sessions_error_auth')
   }
+  if (isPurposeRefusal(error)) return t('common.error_purpose_required')
   return t('common.sessions_error_default')
 }
 

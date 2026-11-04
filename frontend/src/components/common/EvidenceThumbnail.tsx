@@ -1,8 +1,19 @@
 import { useState } from 'react'
-import { sourceThumbnailUrl } from '@/api/ingest'
+import { useQuery } from '@tanstack/react-query'
+import { fetchFile } from '@/api/files'
+import { sourceThumbnailPath } from '@/api/ingest'
 import { previewKind } from '@/components/common/PreviewDialog'
+import { useActiveCollection } from '@/hooks/useActiveCollection'
+import { useObjectUrl } from '@/hooks/useObjectUrl'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
+
+/**
+ * How long a thumbnail nothing shows stays in memory: long enough that a row
+ * the list virtualizer unmounted and scrolled back into view does not fetch
+ * — and record — the same picture again.
+ */
+const THUMBNAIL_GC_MS = 5 * 60_000
 
 /**
  * The source image of a finding whose chunk came from a picture — a
@@ -14,8 +25,10 @@ import { useT } from '@/i18n/LanguageContext'
  * The pixels are addressed by `imageId` (`/sources/thumbnail`), never by the
  * row's `fileHash`: that names the file the finding came from, which for a
  * keyframe is its clip and for a figure its PDF — nothing an `<img>` can show.
- * Clicking enlarges the picture: a still from its own file, at full size, and
- * a keyframe or figure from the stored image, since its file is not one.
+ * They are fetched through the purpose wrapper, since an `<img src>` cannot
+ * state the purpose, and shown from memory. Clicking enlarges the picture: a
+ * still from its own file, at full size, and a keyframe or figure from the
+ * stored image, since its file is not one.
  *
  * Renders nothing when the row is not an image, when no collection is
  * selected, or when the fetch fails — a broken image beside a finding reads as
@@ -33,12 +46,20 @@ export function EvidenceThumbnail({
   className?: string
 }) {
   const t = useT()
-  const collection = useUiStore((s) => s.selectedCollection)
+  const scope = useActiveCollection()
+  const { collection } = scope
   const openPreview = useUiStore((s) => s.openPreview)
   const [failed, setFailed] = useState(false)
-  if (!imageId || !collection || failed) return null
+  const thumbnail = useQuery({
+    queryKey: ['source-thumbnail', scope, imageId],
+    queryFn: async () => (await fetchFile(sourceThumbnailPath(collection!, imageId!))).blob,
+    enabled: !!collection && !!imageId,
+    staleTime: Infinity,
+    gcTime: THUMBNAIL_GC_MS
+  })
+  const src = useObjectUrl(thumbnail.data)
+  if (!imageId || !collection || failed || thumbnail.isError) return null
   const name = filename || t('common.unknown_source')
-  const src = sourceThumbnailUrl(collection, imageId)
   return (
     <button
       type="button"
@@ -46,7 +67,7 @@ export function EvidenceThumbnail({
         openPreview(
           fileHash && previewKind(name) === 'image'
             ? { collection, file_hash: fileHash, filename: name }
-            : { filename: name, image_url: src }
+            : { collection, image_id: imageId, filename: name }
         )
       }
       // The picture is the control, so it says what it is and what it does:
@@ -55,13 +76,7 @@ export function EvidenceThumbnail({
       aria-label={`${t('common.preview_open')}: ${name}`}
       className={`block cursor-pointer rounded border border-border overflow-hidden hover:border-foreground/40 focus-visible:ring-1 focus-visible:ring-primary outline-none ${className ?? ''}`}
     >
-      <img
-        src={src}
-        alt=""
-        loading="lazy"
-        onError={() => setFailed(true)}
-        className="h-20 w-auto max-w-full object-contain"
-      />
+      <img src={src} alt="" onError={() => setFailed(true)} className="h-20 w-auto max-w-full object-contain" />
     </button>
   )
 }

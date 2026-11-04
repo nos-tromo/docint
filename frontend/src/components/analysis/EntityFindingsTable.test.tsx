@@ -7,6 +7,7 @@ import { useUiStore } from '@/stores/ui'
 import { useReportStore } from '@/stores/report'
 import { useTranslationsStore } from '@/stores/translations'
 import type { NerEntityRow, NerSourceRow } from '@/api/types'
+import { captureDownloads, fileResponse } from '@/test/downloads'
 
 // Rows render a TranslateControl (mounted whenever a row has chunk text),
 // which calls useTranslate()/useMutation() — it needs a QueryClientProvider
@@ -53,6 +54,25 @@ afterEach(() => {
 })
 
 describe('EntityFindingsTable', () => {
+  it('exports the matching findings as CSV through the purpose wrapper', async () => {
+    const downloads = captureDownloads()
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      fileResponse('chunk_id\n', { type: 'text/csv', filename: 'alpha-ner-sources.csv' })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }))
+
+    await waitFor(() => expect(downloads.saved()).toHaveLength(1))
+    // The control is the download icon; "Export CSV" survives as its name.
+    const target = String(fetchMock.mock.calls.find(([u]) => String(u).includes('/export/'))?.[0])
+    expect(target).toContain('/collections/alpha/export/ner-sources.csv?')
+    expect(target).toContain('entity_text=Berlin')
+    expect(target).toContain('entity_type=LOC')
+    expect(downloads.saved()[0].download).toBe('alpha-ner-sources.csv')
+  })
+
   it('shows the findings count and a table header for the selected entity', () => {
     renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     const heading = screen.getByText(/findings for/i).parentElement!
@@ -68,17 +88,6 @@ describe('EntityFindingsTable', () => {
     expect(screen.getAllByTestId('entity-finding-row')).toHaveLength(2)
     // "Berlin" is highlighted (a <mark>), so assert on the trailing segment.
     expect(screen.getByText(/is the capital/)).toBeInTheDocument()
-  })
-
-  it('renders the CSV download link with the selected entity in the query string', () => {
-    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
-    // The control is the download icon; "Export CSV" survives as its name.
-    const link = screen.getByRole('link', { name: 'Export CSV' })
-    const href = link.getAttribute('href') ?? ''
-    expect(href).toContain('/collections/alpha/export/ner-sources.csv')
-    expect(href).toContain('entity_text=Berlin')
-    expect(href).toContain('entity_type=LOC')
-    expect(link).toHaveAttribute('download')
   })
 
   it('Add all sends the stored translation for a translated finding and none for the rest', async () => {

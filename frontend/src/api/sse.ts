@@ -1,16 +1,28 @@
-import { url, withOwner, ApiError } from './client'
+import { apiFetch, ApiError } from './client'
 
 export interface SseEvent {
   event: string
   data: unknown
 }
 
+/**
+ * POST a JSON body and yield the SSE frames the server streams back.
+ *
+ * Read through `fetch` rather than `EventSource`, which can send neither a
+ * body nor the `X-Audit-Purpose` header; `apiFetch` adds the purpose and
+ * resends once after a `428`.
+ *
+ * @param path - API path (owner param and base are applied by `apiFetch`).
+ * @param body - The JSON body.
+ * @param signal - Optional abort signal closing the connection.
+ * @yields Parsed SSE events.
+ */
 export async function* streamSse(
   path: string,
   body?: unknown,
   signal?: AbortSignal
 ): AsyncGenerator<SseEvent, void, unknown> {
-  const res = await fetch(url(withOwner(path)), {
+  const res = await apiFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -28,7 +40,7 @@ export async function* streamSse(
  * The owner-multiplexed job stream (`/ingest/jobs/events`) carries no request
  * payload, so it cannot reuse the POST helper above.
  *
- * @param path - API path (owner param and base are applied here).
+ * @param path - API path (owner param and base are applied by `apiFetch`).
  * @param signal - Optional abort signal closing the connection.
  * @param owner - Owner to stream for instead of the one selected now (see `withOwner`).
  * @yields Parsed SSE events.
@@ -38,11 +50,15 @@ export async function* streamSseGet(
   signal?: AbortSignal,
   owner?: string | null
 ): AsyncGenerator<SseEvent, void, unknown> {
-  const res = await fetch(url(withOwner(path, owner)), {
-    method: 'GET',
-    headers: { Accept: 'text/event-stream' },
-    signal
-  })
+  const res = await apiFetch(
+    path,
+    {
+      method: 'GET',
+      headers: { Accept: 'text/event-stream' },
+      signal
+    },
+    owner
+  )
   if (!res.ok || !res.body) {
     throw new ApiError(res.status, `SSE request failed: ${res.status}`)
   }

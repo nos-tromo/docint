@@ -1,8 +1,9 @@
 import { useMemo, useRef } from 'react'
-import { DownloadLink } from '@infra/ui'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
-import { csvExportHref, getNerSourcesPage } from '@/api/collections'
+import { csvExportPath, getNerSourcesPage } from '@/api/collections'
+import { downloadFile } from '@/api/files'
+import { FileDownloadButton } from '@/components/common/FileDownloadButton'
 import { EntityFinding } from './EntityFinding'
 import { AddAllToReportButton } from '@/components/report/AddAllToReportButton'
 import { TranslateAllButton } from '@/components/common/TranslateAllButton'
@@ -127,9 +128,11 @@ export function EntityFindingsTable({
             hasRows={findings.length > 0}
           />
           {collection && (
-            <DownloadLink
-              href={csvExportHref(collection, 'ner-sources', exportParams)}
+            <FileDownloadButton
               label={t('table.export_csv')}
+              download={() =>
+                downloadFile(csvExportPath(collection, 'ner-sources', exportParams), `${collection}-ner-sources.csv`)
+              }
             />
           )}
         </div>

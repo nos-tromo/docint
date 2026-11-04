@@ -386,6 +386,10 @@ secret. For the header path docint sends `NEXTEXT_IDENTITY` (default
 request; set `NEXTEXT_IDENTITY` to empty to suppress the header, but never to
 a `service:` value, which Nextext reserves and ignores in the header. See
 [configuration.md](configuration.md#nextext-media-processing--nextextconfig).
+Every request also states a purpose and forwards the request id, since Nextext
+refuses a job poll or an artifact download without a purpose when its own
+audit log requires one: the purpose stated for the ingest, else
+`reason=docint ingest` ([audit.md](audit.md#calls-to-nextext)).
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
 video/audio files are skipped gracefully — collections with no audio/video are
@@ -564,7 +568,9 @@ ingestion path:
 - In the Analysis tables, every finding read off an image shows the picture:
   `/sources/thumbnail` serves the stored thumbnail by `image_id`, so a PDF
   figure or a keyframe shows its own pixels rather than the document or the
-  clip it came from. Report exports carry the same stored image.
+  clip it came from. The SPA fetches it with the stated purpose rather than
+  pointing an `<img>` at the route ([audit.md](audit.md#how-the-spa-sends-the-purpose)).
+  Report exports carry the same stored image.
 - Failures are soft unless `IMAGE_FAIL_ON_EMBED_ERROR` /
   `IMAGE_FAIL_ON_TAG_ERROR` are set.
 

@@ -28,12 +28,25 @@ which proxies API calls to the backend on `:8000`.
 ## Entry & layout
 
 - `index.html` → `src/main.tsx` mounts `<App>` into `#root`.
-- `src/App.tsx` wraps the tree in the TanStack Query provider and the
-  React Router `BrowserRouter`, then renders `src/routes/Router.tsx`.
-- `src/layout/Shell.tsx` is the persistent layout: `@infra/ui`'s `AppHeader`
-  (federation portal link + light/dark/system theme toggle) on top, then a
-  sidebar + main-area row below; `src/layout/Sidebar.tsx` holds the
-  navigation, the collection selector, and the session list.
+- `src/App.tsx` wraps the tree in the TanStack Query provider, the
+  `LanguageProvider` (which reads `GET /config`) and the React Router
+  `BrowserRouter`, then renders `src/routes/Router.tsx` inside the shell. It
+  also refetches the queries a declined purpose prompt left refused, once a
+  purpose is stated (`refetchRefusedOnPurpose`, `src/api/queryClient.ts`).
+- `src/layout/Shell.tsx` is the persistent layout: `@infra/ui`'s `AppShell`,
+  whose one header row carries the federation portal link, the title and
+  version, the **purpose bar**, the light/dark/system theme toggle and the
+  user menu, with the collapsible sidebar beside the main area;
+  `src/layout/Sidebar.tsx` holds the navigation, the collection selector, and
+  the session list. The shell also mounts the app-wide `PreviewDialog`.
+- The purpose bar (`@infra/ui`'s `PurposeBar`, scope `docint`) is where the
+  user states why they are working — a case reference, a reason, or both. The
+  purpose is kept for the browser tab's session and sent with every request
+  as `X-Audit-Purpose`, for the data-protection audit log
+  ([audit.md](audit.md#stated-purpose)). While `GET /config` lists any
+  `require_purpose` actions the empty bar is a warning, and a request the
+  backend refuses for want of a purpose (`428`) opens the bar's dialog and is
+  sent again once one is saved. Signing out clears it.
 
 ## Routes
 
@@ -444,7 +457,7 @@ the table has lazily loaded (the counts are not derived from the loaded rows).
 Between the two sits the **Data extracts** panel
 (`src/components/inspector/ExtractsPanel.tsx`): one control builds a written
 extract of the collection, and the bundles already stored for it are listed
-with their size, contents and a download link. Progress comes from the shared
+with their size, contents and a download button. Progress comes from the shared
 job store that `Shell`'s single owner-multiplexed stream already feeds, so a
 build survives navigating away and a reload re-attaches to it like an ingest
 run. Each document row also carries a download action for that source alone
@@ -489,7 +502,11 @@ without a collection** (`UnassignedReports`), each with a **Move to …**
 action that places it in the active collection and opens it;
 with no collection selected they are listed without one.
 
-The PDF is the one export that is not a plain link. A large report renders for
+Every export is fetched with the stated purpose and handed to the browser as a
+file, never linked, since a link's request cannot carry the purpose; the HTML
+export opens in a new tab from what was fetched, and a failed fetch is said
+beside the menu. The PDF is the one export that is not fetched on the spot. A
+large report renders for
 longer than the gateway waits on a single request, so choosing **PDF** queues a
 background render (`POST /reports/{id}/pdf`, on the same job machinery as the
 Inspector's data extracts) and a compact status line beside the export menu
@@ -501,8 +518,8 @@ shared job stream (`src/hooks/useReportPdf.ts`); the status route
 and on whether the stored PDF still matches it. The render this tab asked for
 downloads by itself once it is ready — exactly once, even when the stream
 replays the job after a reconnect — and a stored PDF that matches the report is
-linked straight from the menu. Editing the report outdates that PDF, so the next
-**PDF** renders it again. The other formats stay plain download links.
+downloaded straight from the menu. Editing the report outdates that PDF, so the
+next **PDF** renders it again. The other formats download on the spot.
 
 The full workflow — snapshot semantics, frozen image evidence, and what each
 export contains — is in [reports.md](reports.md).

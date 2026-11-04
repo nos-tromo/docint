@@ -1,6 +1,5 @@
 import { streamUpload, UploadHttpError, UploadStalledError } from './upload'
 import { streamErrorText } from './errorMessage'
-import { url, withOwner } from './client'
 import { MAX_BATCH_BYTES, planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
 import type { IngestEvent } from './types'
@@ -274,20 +273,14 @@ export async function* streamIngestUploadBatched(
   return { anySaved, failures }
 }
 
-// Used as an <a href>, not fetched — must carry the sub-path base itself.
-export const sourcePreviewUrl = (collection: string, file_hash: string) =>
-  url(
-    withOwner(
-      `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
-    )
-  )
+// A stored source file, for the preview dialog to fetch (`fetchFile`, which
+// adds the sub-path base, the admin owner context and the stated purpose — an
+// <iframe src> or <img src> could send none of the last).
+export const sourcePreviewPath = (collection: string, file_hash: string) =>
+  `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
 
 // The picture behind an image finding, addressed by the image rather than by
 // the file it was cut from (a keyframe's file is its clip, a figure's its PDF).
-// Used as an <img src>, so it carries the sub-path base too.
-export const sourceThumbnailUrl = (collection: string, imageId: string) =>
-  url(
-    withOwner(
-      `/sources/thumbnail?collection=${encodeURIComponent(collection)}&image_id=${encodeURIComponent(imageId)}`
-    )
-  )
+// Fetched like the preview, and shown from memory.
+export const sourceThumbnailPath = (collection: string, imageId: string) =>
+  `/sources/thumbnail?collection=${encodeURIComponent(collection)}&image_id=${encodeURIComponent(imageId)}`

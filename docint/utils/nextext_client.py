@@ -9,6 +9,11 @@ All failures are fail-soft: ``process_media`` returns a ``NextextResult`` with
 a non-``completed`` status (``disabled``, ``timeout``, ``poll_error``, a server
 terminal-fail status, or ``error``) and empty payloads rather than raising, so
 one bad clip never aborts a batch.
+
+Every request states a purpose (``X-Audit-Purpose``) and forwards the request
+id (``docint.utils.audit_forward``): Nextext keeps its own audit trail, and
+with its required purposes a job poll (``query``) or an artifact download
+(``disclose``) without one is refused with 428.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
+from docint.utils.audit_forward import forward_headers
 from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import NextextConfig, load_nextext_env
 
@@ -117,11 +123,12 @@ class NextextClient:
             }
         )
 
-    def _await_job(self, job_id: str) -> str:
+    def _await_job(self, job_id: str, headers: dict[str, str]) -> str:
         """Poll a job until it reaches a terminal status or the budget expires.
 
         Args:
             job_id (str): The job identifier returned by submission.
+            headers (dict[str, str]): The stated purpose and request id.
 
         Returns:
             str: Terminal status (``'completed'`` on success, server terminal
@@ -131,7 +138,7 @@ class NextextClient:
         deadline = time.monotonic() + self._cfg.poll_max_seconds
         while True:
             try:
-                resp = self._client.get(f"/jobs/{job_id}")
+                resp = self._client.get(f"/jobs/{job_id}", headers=headers)
                 resp.raise_for_status()
             except httpx.HTTPError:
                 return "poll_error"
@@ -142,9 +149,18 @@ class NextextClient:
                 return "timeout"
             time.sleep(self._cfg.poll_interval)
 
-    def _fetch_artifact(self, job_id: str, name: str) -> bytes | None:
-        """Fetch one job artifact, returning ``None`` when absent (404)."""
-        resp = self._client.get(f"/jobs/{job_id}/artifacts/{name}")
+    def _fetch_artifact(self, job_id: str, name: str, headers: dict[str, str]) -> bytes | None:
+        """Fetch one job artifact, returning ``None`` when absent (404).
+
+        Args:
+            job_id (str): The job identifier.
+            name (str): The artifact's name.
+            headers (dict[str, str]): The stated purpose and request id.
+
+        Returns:
+            bytes | None: The artifact, or ``None`` when the job has none.
+        """
+        resp = self._client.get(f"/jobs/{job_id}/artifacts/{name}", headers=headers)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -219,21 +235,25 @@ class NextextClient:
         if not self._cfg.enabled:
             return NextextResult(status="disabled")
         count_transfer("transcribe", "inference:asr", "nextext", kind="media")
+        # The same purpose and request id on the submission, every poll and
+        # every download: they belong to the work this clip is part of.
+        headers = forward_headers()
         try:
             with file_path.open("rb") as handle:
                 resp = self._client.post(
                     "/jobs",
                     files={"file": (file_path.name, handle, "application/octet-stream")},
                     data={"options": self._options_payload()},
+                    headers=headers,
                 )
             resp.raise_for_status()
             job_id = str(resp.json()["job_id"])
-            status = self._await_job(job_id)
+            status = self._await_job(job_id, headers)
             if status != _TERMINAL_OK:
                 logger.warning("Nextext job {} for {} ended status={}", job_id, file_path.name, status)
                 return NextextResult(status=status)
-            transcript = self._fetch_artifact(job_id, "docint.jsonl")
-            keyframes = self._unzip_keyframes(self._fetch_artifact(job_id, "keyframes.zip"))
+            transcript = self._fetch_artifact(job_id, "docint.jsonl", headers)
+            keyframes = self._unzip_keyframes(self._fetch_artifact(job_id, "keyframes.zip", headers))
             return NextextResult(status="completed", transcript_jsonl=transcript, keyframes=keyframes)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
