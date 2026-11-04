@@ -31,12 +31,14 @@ from docint.core.topics.gather import (
     DenseVector,
     PointRow,
     and_filters,
+    central_points,
     count,
     dense_vector,
     eligible_filter,
     ensure_topic_indexes,
     iter_rows,
     pending_filter,
+    point_text,
     retrieve_candidates,
     scan_ids,
     topic_filter,
@@ -53,6 +55,7 @@ from docint.core.topics.model import (
     kept_members,
     merge_new,
 )
+from docint.core.topics.reduce import GROUPS_KEY, LABELS_KEY, check_groups, group_key, group_label, view_of
 from docint.core.topics.sample import (
     MAX_DF,
     MIN_DF,
@@ -60,6 +63,7 @@ from docint.core.topics.sample import (
     FitSample,
     auto_min_topic_size,
     build_sample,
+    fit_text,
     min_eligible,
     nr_topics_for,
     text_chars_for,
@@ -72,7 +76,7 @@ from docint.utils.audit_meter import in_context
 from docint.utils.env_cfg import TopicsConfig
 from docint.utils.topics_client import FitParams, FitResult, TopicsBusy, max_fit_points, texts_limit
 
-Action = Literal["build", "discover", "align"]
+Action = Literal["build", "discover", "align", "reduce"]
 STAGES = ("starting", "waiting", "scanning", "sampling", "fitting", "labelling", "assigning", "aligning")
 HEARTBEAT_S = 5.0
 LOCK_POLL_S = 1.0
@@ -83,7 +87,7 @@ Progress = Callable[[str, int, int], None]
 Warn = Callable[[str, str], None]
 FitFn = Callable[[Sequence[str], np.ndarray, FitParams], FitResult]
 
-_ACTIONS = ("build", "discover", "align")
+_ACTIONS = ("build", "discover", "align", "reduce")
 
 _PROGRESS_COPY = {
     "starting": "Starting topics run",
@@ -102,6 +106,7 @@ REFUSALS = {
     "no_run": "Build topics first.",
     "dimension_changed": "The collection's vectors changed size since the topics were built; rebuild them.",
     "collection_changed": "The collection was replaced while its topics were built.",
+    "run_changed": "The topics changed since they were last read; read them again.",
 }
 
 WARNINGS = {
@@ -501,11 +506,13 @@ class TopicsService:
         progress: Progress,
         warn: Warn,
         min_topic_size: int | None = None,
+        run_id: str | None = None,
+        groups: Sequence[Sequence[int]] | None = None,
     ) -> TopicsOutcome:
         """Run one job under the collection's lock, waiting for it if needed.
 
         Args:
-            action: ``build``, ``discover`` or ``align``.
+            action: ``build``, ``discover``, ``align`` or ``reduce``.
             physical: Physical collection name.
             logical: Logical collection name, for the refusal log line.
             owner_created_at: Reads the ownership row's ``created_at`` now.
@@ -513,6 +520,8 @@ class TopicsService:
             warn: Receives ``(code, message)`` for a job that finds nothing.
             min_topic_size: For a build, the smallest topic in place of the
                 configured or automatic size.
+            run_id: For a reduce, the run its groups were drawn up against.
+            groups: For a reduce, the groups of topic ids; empty for none.
 
         Returns:
             The outcome.
@@ -526,7 +535,17 @@ class TopicsService:
         lock = self._wait_for_lock(physical, progress)
         job = _Job()
         try:
-            outcome = self._run_locked(action, physical, owner_created_at, progress, warn, job, min_topic_size)
+            outcome = self._run_locked(
+                action,
+                physical,
+                owner_created_at,
+                progress,
+                warn,
+                job,
+                min_topic_size=min_topic_size,
+                run_id=run_id,
+                groups=groups,
+            )
         except TopicsRefused as exc:
             counts = "".join(f" {key}={value}" for key, value in exc.counts().items())
             logger.info("Topics {} refused for '{}' | code={}{}", action, logical, exc.code, counts)
@@ -751,7 +770,10 @@ class TopicsService:
         progress: Progress,
         warn: Warn,
         job: _Job,
+        *,
         min_topic_size: int | None = None,
+        run_id: str | None = None,
+        groups: Sequence[Sequence[int]] | None = None,
     ) -> TopicsOutcome:
         """Dispatch a job once the lock is held.
 
@@ -766,6 +788,8 @@ class TopicsService:
             warn: The warning channel.
             job: What the job has written.
             min_topic_size: For a build, the smallest topic in place of the configured or automatic size.
+            run_id: For a reduce, the run its groups were drawn up against.
+            groups: For a reduce, the groups of topic ids.
 
         Returns:
             The outcome.
@@ -792,6 +816,8 @@ class TopicsService:
             raise TopicsRefused("dimension_changed")
         if action == "discover":
             return self._discover(physical, dense, run, created, owner_created_at, progress, warn, job)
+        if action == "reduce":
+            return self._reduce(physical, dense, run, run_id, groups or (), created, owner_created_at, progress)
         return self._align(physical, dense, run, created, owner_created_at, progress, job)
 
     def _build(
@@ -976,6 +1002,109 @@ class TopicsService:
         _refuse_if_replaced(owner_created_at, created)
         saved = self._save_seen(physical, run, run.table, job)
         return TopicsOutcome("align", run.run_id, len(saved.table.topics), 0, assigned, empty=False)
+
+    def _reduce(
+        self,
+        physical: str,
+        dense: DenseVector,
+        run: TopicRun,
+        asked: str | None,
+        groups: Sequence[Sequence[int]],
+        created: str | None,
+        owner_created_at: Callable[[], str | None],
+        progress: Progress,
+    ) -> TopicsOutcome:
+        """Store a reduction's groups, labelling each group no label was written for yet.
+
+        Nothing is stored until every label is in, so a cancelled reduce changes
+        nothing. The run's topics and every chunk's payload stay as they are.
+
+        Args:
+            physical: Physical collection name.
+            dense: The collection's dense vector.
+            run: The active run.
+            asked: The run the groups were drawn up against.
+            groups: The groups; empty to undo the reduction.
+            created: The ownership row's ``created_at`` when the job started.
+            owner_created_at: Reads it again before the run is saved.
+            progress: Receives ``labelling`` frames.
+
+        Returns:
+            The outcome; ``topics`` counts the run's topics before reduction.
+
+        Raises:
+            TopicsRefused: ``run_changed`` when the run is not the one asked
+                about or lacks a topic a group names; ``collection_changed``
+                once the collection is replaced.
+        """
+        if asked != run.run_id:
+            raise TopicsRefused("run_changed")
+        try:
+            checked = check_groups((t.id for t in run.table.topics), groups)
+        except ValueError as exc:
+            raise TopicsRefused("run_changed") from exc
+        stored = run.record.get(LABELS_KEY)
+        labels: dict[str, Any] = dict(stored) if isinstance(stored, Mapping) else {}
+        # ponytail: the label cache is never pruned; the merge tree yields at most k - 1 groups.
+        unlabelled = [group for group in checked if group_label(run.record, group) is None]
+        labels.update(self._group_labels(physical, dense, run, unlabelled, progress))
+        _refuse_if_replaced(owner_created_at, created)
+        record = {
+            **run.record,
+            GROUPS_KEY: [list(group) for group in checked],
+            LABELS_KEY: labels,
+            "updated_at": self._now_iso(),
+        }
+        self._deps.store.save(physical, TopicRun(run.run_id, record, run.table))
+        return TopicsOutcome("reduce", run.run_id, len(run.table.topics), 0, 0, empty=False)
+
+    def _group_labels(
+        self,
+        physical: str,
+        dense: DenseVector,
+        run: TopicRun,
+        groups: Sequence[tuple[int, ...]],
+        progress: Progress,
+    ) -> dict[str, dict[str, str]]:
+        """Write labels for groups from their merged keywords and their passages nearest the group centre.
+
+        Args:
+            physical: Physical collection name.
+            dense: The collection's dense vector.
+            run: The run.
+            groups: The groups to label.
+            progress: Receives ``labelling`` frames.
+
+        Returns:
+            Group key to ``{label, description}`` for each label the model wrote;
+            a fallback is not kept, so its group is labelled again next time.
+        """
+        labeller = self._deps.labeller
+        if labeller is None or not groups:
+            return {}
+        merged = view_of(run.table, {GROUPS_KEY: [list(group) for group in groups]}).table
+        requests = []
+        for group in groups:
+            info, centre = merged.topic(group[0]), merged.centre(group[0])
+            if info is None or centre is None:
+                continue
+            points = central_points(
+                self._deps.client,
+                physical,
+                centre=centre,
+                dense=dense,
+                run_id=run.run_id,
+                topic_ids=group,
+                limit=PASSAGES_PER_TOPIC,
+            )
+            passages = tuple(fit_text(point_text(point.payload or {})) for point in points)
+            requests.append(LabelRequest(group[0], tuple(word for word, _ in info.keywords), passages))
+        names = labeller.label_all(requests, progress=lambda done, total: progress("labelling", done, total))
+        return {
+            group_key(group): {"label": names[group[0]].label, "description": names[group[0]].description}
+            for group in groups
+            if group[0] in names and names[group[0]].written
+        }
 
     def _fit_pool(
         self,

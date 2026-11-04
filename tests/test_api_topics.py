@@ -76,6 +76,7 @@ class _TopicsRAG:
         self._com._SessionMaker = sessionmaker(bind=engine)
         self.store = _Store()
         self.overview: dict[str, Any] | None = None
+        self.tuning: dict[str, Any] | None = None
         self.evidence: list[dict[str, Any]] | None = None
         self.documents: dict[str, Any] | None = None
         self.chunks: dict[str, Any] | None = None
@@ -180,6 +181,18 @@ class _TopicsRAG:
         if self.overview_error is not None:
             raise self.overview_error
         return self.overview
+
+    def topics_tuning(self, physical: str) -> dict[str, Any] | None:
+        """Return the scripted tuning view.
+
+        Args:
+            physical: Physical collection name.
+
+        Returns:
+            The tuning view.
+        """
+        self.reads.append(("tuning", physical, None))
+        return self.tuning
 
     def topic_evidence(
         self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
@@ -386,9 +399,10 @@ def _call(client: TestClient, method: str, path: str, logical: str, headers: dic
 
 
 def test_the_topics_routes_exist() -> None:
-    """The enumeration below covers all five routes."""
+    """The enumeration below covers all six routes."""
     assert _topics_routes() == [
         ("GET", PREFIX),
+        ("GET", f"{PREFIX}/tuning"),
         ("GET", f"{PREFIX}/{{topic_id}}/chunks"),
         ("GET", f"{PREFIX}/{{topic_id}}/documents"),
         ("GET", f"{PREFIX}/{{topic_id}}/evidence"),
@@ -405,6 +419,7 @@ def test_topics_routes_honor_admin_owner_context(client: TestClient, fake: _Topi
     """
     physical = fake._com.register("analyst-b", "shared-docs")
     fake.overview = {"run_id": "synthetic-run"}
+    fake.tuning = {"run_id": "synthetic-run", "leaves": []}
     fake.evidence = []
     fake.documents = {"documents": [], "more": False}
     fake.chunks = {"items": [], "next_cursor": None}
@@ -533,6 +548,107 @@ def test_the_runner_hands_a_jobs_settings_to_the_service_and_its_audit_record(
     (built,) = [event for event in events if event.get("operation") == "topics.build"]
     assert built["criteria"]["min_topic_size"] == 7
     assert built["criteria"]["job_id"] == "job-1"
+
+
+RUN = "20260101-000000-abcdef"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "reduce", "groups": [[0, 1]]},
+        {"action": "reduce", "run_id": RUN},
+        {"action": "reduce", "run_id": "not-a-run", "groups": []},
+        {"action": "reduce", "run_id": f"x{RUN}", "groups": []},
+        {"action": "reduce", "run_id": RUN, "groups": [[0]]},
+        {"action": "reduce", "run_id": RUN, "groups": [[0, 0]]},
+        {"action": "reduce", "run_id": RUN, "groups": [[0, 1], [1, 2]]},
+        {"action": "reduce", "run_id": RUN, "groups": [[-1, 2]]},
+        {"action": "build", "run_id": RUN},
+        {"action": "align", "groups": [[0, 1]]},
+    ],
+)
+def test_a_reduce_needs_its_run_and_well_formed_groups(client: TestClient, body: dict[str, Any]) -> None:
+    """A reduce names its run and disjoint groups of two or more ids; no other action takes either.
+
+    Args:
+        client: The client.
+        body: The request body.
+    """
+    assert client.post("/collections/docs/topics", json=body).status_code == 422
+
+
+def test_a_reduce_reaches_its_job_with_its_run_and_groups(
+    make_client: Callable[[JobRunner], TestClient], fake: _TopicsRAG
+) -> None:
+    """A reduce on a collection with a run is queued with its settings; an empty list is a valid undo.
+
+    Args:
+        make_client: The client factory.
+        fake: The RAG stand-in.
+    """
+    seen: list[tuple[str | None, dict[str, Any] | None]] = []
+
+    def recording(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Record the job's action and settings.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        seen.append((state.action, state.topics_options))
+        return {"empty": True, "resolution": None}
+
+    client = make_client(recording)
+    undo: dict[str, Any] = {"action": "reduce", "run_id": RUN, "groups": []}
+    assert client.post("/collections/docs/topics", json=undo).status_code == 400
+    fake.store.run = object()
+    asked: list[list[list[int]]] = [[[3, 1], [4, 5]], []]
+    for groups in asked:
+        res = client.post("/collections/docs/topics", json={"action": "reduce", "run_id": RUN, "groups": groups})
+        assert res.status_code == 202
+        _await_terminal(client, res.json()["job_id"])
+
+    assert seen == [
+        ("reduce", {"run_id": RUN, "groups": [[3, 1], [4, 5]]}),
+        ("reduce", {"run_id": RUN, "groups": []}),
+    ]
+
+
+def test_a_jobs_audit_criteria_name_its_settings_by_number_only() -> None:
+    """A reduce's groups are recorded as their count, never their ids; other settings as given."""
+    criteria = api_module._topics_job_criteria({"run_id": RUN, "groups": [[0, 1], [2, 3]], "min_topic_size": 9})
+
+    assert criteria == {"run_id": RUN, "min_topic_size": 9, "groups": 2}
+    assert api_module._topics_job_criteria({}) == {}
+
+
+def test_tuning_answers_200_or_204_and_records_the_topics_it_shows(
+    client: TestClient, fake: _TopicsRAG, audit_stream: io.StringIO
+) -> None:
+    """The tuning view is read like the overview: 204 without a run, else 200 recorded as a topics query.
+
+    Args:
+        client: The client.
+        fake: The RAG stand-in.
+        audit_stream: The test's audit stream.
+    """
+    assert client.get("/collections/docs/topics/tuning").status_code == 204
+    fake.tuning = {"run_id": RUN, "leaves": [{"id": 0}, {"id": 4}], "merges": [[0, 4, 0.9]]}
+
+    res = client.get("/collections/docs/topics/tuning")
+
+    assert res.status_code == 200
+    assert res.json() == fake.tuning
+    events = [json.loads(line) for line in audit_stream.getvalue().splitlines()]
+    reads = [event for event in events if event.get("operation") == "topics.tuning"]
+    assert [event["outcome"] for event in reads] == ["ok"]
+    assert reads[0]["target"]["kind"] == "topic"
+    assert reads[0]["target"]["ids"] == ["0", "4"]
+    assert reads[0]["criteria"]["run_id"] == RUN
 
 
 def test_a_second_post_answers_409_with_the_running_job_id(make_client: Callable[[JobRunner], TestClient]) -> None:

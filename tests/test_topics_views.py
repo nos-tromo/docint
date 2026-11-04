@@ -443,6 +443,33 @@ def test_a_groups_views_read_all_of_its_leaves(client: QdrantClient, run: TopicR
     assert "blob2" in out[0]["text"]
 
 
+def test_tuning_shows_every_topic_unreduced_with_the_tree_and_the_written_labels(
+    client: QdrantClient, run: TopicRun
+) -> None:
+    """Tuning lists the leaves with their sizes, the merge tree, the stored groups and the written group labels.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    assert views.tuning(client, None, COLL, ensure_indexes=_no_ensure) is None
+    labels = {"0,2": {"label": "Zero and two", "description": "Both."}, "bad": {"label": ""}, "0,1": "x"}
+    reduced = TopicRun(run.run_id, {**run.record, "groups": [[0, 2]], "group_labels": labels}, run.table)
+
+    out = views.tuning(client, reduced, COLL, ensure_indexes=_no_ensure)
+
+    assert out is not None
+    assert out["run_id"] == run.run_id
+    assert out["min_topic_size"] == run.record["params"]["min_topic_size"]
+    assert [(leaf["id"], leaf["size"]) for leaf in out["leaves"]] == [(0, SIZES[0]), (1, SIZES[1]), (2, SIZES[2])]
+    assert all(leaf["fit_size"] > 0 and isinstance(leaf["label"], str) for leaf in out["leaves"])
+    assert len(out["merges"]) == len(SIZES) - 1
+    assert all(len(step) == 3 for step in out["merges"])
+    assert out["groups"] == [[0, 2]]
+    assert out["group_labels"] == {"0,2": "Zero and two"}
+    json.dumps(out)
+
+
 def _rag(client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, created: str) -> RAG:
     """Build a RAG over an in-memory client and a test store.
 

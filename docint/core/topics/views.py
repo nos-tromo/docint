@@ -23,6 +23,7 @@ from docint.core.topics.gather import (
     topic_counts,
 )
 from docint.core.topics.model import TopicInfo
+from docint.core.topics.reduce import LABELS_KEY, merge_tree
 from docint.core.topics.store import TopicRun
 from docint.utils.cursor import InvalidCursorError, decode_cursor, encode_cursor
 
@@ -217,3 +218,51 @@ def chunks(
         raise InvalidCursorError("cursor offset is not a point id")
     points, next_offset = member_page(client, physical, run_id=run.run_id, topic_ids=leaves, offset=offset, limit=limit)
     return {"items": [source_of(p) for p in points], "next_cursor": encode_cursor(next_offset)}
+
+
+def tuning(
+    client: Any,
+    run: TopicRun | None,
+    physical: str,
+    *,
+    ensure_indexes: Callable[[str], None],
+) -> dict[str, Any] | None:
+    """Describe what fine-tuning a run starts from: its own topics and the tree merges follow.
+
+    A client cuts the tree itself, so previewing a reduction asks nothing more of the server.
+
+    Args:
+        client: Qdrant client.
+        run: The active run, ``None`` when there is none.
+        physical: Physical collection name.
+        ensure_indexes: Gives the topic keys their indexes; called before the facet.
+
+    Returns:
+        ``run_id``; the build's ``min_topic_size``; every topic of the run
+        unreduced (``leaves``: id, label, fit size, size); the ``merges``
+        (``[a, b, similarity]`` in merge order, see :func:`merge_tree`); the
+        stored ``groups``; and the labels written for groups (``group_labels``,
+        by member key). ``None`` without a run.
+    """
+    if run is None:
+        return None
+    ensure_indexes(physical)
+    counts = topic_counts(client, physical, run.run_id, limit=len(run.table.topics) + 2)
+    params = run.record.get("params")
+    written = run.record.get(LABELS_KEY)
+    labels = {
+        str(key): entry["label"]
+        for key, entry in (written.items() if isinstance(written, Mapping) else ())
+        if isinstance(entry, Mapping) and isinstance(entry.get("label"), str) and entry["label"]
+    }
+    return {
+        "run_id": run.run_id,
+        "min_topic_size": params.get("min_topic_size") if isinstance(params, Mapping) else None,
+        "leaves": [
+            {"id": t.id, "label": t.label, "fit_size": t.fit_size, "size": counts.get(t.id, 0)}
+            for t in run.table.topics
+        ],
+        "merges": [[a, b, similarity] for a, b, similarity in merge_tree(run.table)],
+        "groups": [list(leaves) for leaves in run.view.members.values() if len(leaves) > 1],
+        "group_labels": labels,
+    }
