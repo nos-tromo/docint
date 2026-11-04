@@ -230,6 +230,33 @@ describe('Sidebar collection selection', () => {
     expect(alert).toHaveTextContent(/authenticated user/i)
   })
 
+  it('says to state a purpose when the sessions list was refused for want of one', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+        const path = typeof input === 'string' ? input : input.toString()
+        if (path.includes('/collections/list')) {
+          return { ok: true, status: 200, json: async () => ['alpha'], text: async () => '["alpha"]' }
+        }
+        if (path.includes('/sessions/list')) {
+          // No purpose bar is mounted here, so the 428 comes straight back.
+          return {
+            ok: false,
+            status: 428,
+            json: async () => ({ detail: 'A stated purpose is required for this request.' }),
+            text: async () => '{"detail":"A stated purpose is required for this request."}'
+          }
+        }
+        return { ok: true, status: 200, json: async () => null, text: async () => 'null' }
+      })
+    )
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebar()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('A purpose must be stated first.')
+  })
+
   it("lists the active collection's sessions and scopes the request", async () => {
     const fetchMock = mockFetch({
       '/collections/list': ['alpha'],

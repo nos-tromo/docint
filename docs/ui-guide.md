@@ -28,12 +28,25 @@ which proxies API calls to the backend on `:8000`.
 ## Entry & layout
 
 - `index.html` → `src/main.tsx` mounts `<App>` into `#root`.
-- `src/App.tsx` wraps the tree in the TanStack Query provider and the
-  React Router `BrowserRouter`, then renders `src/routes/Router.tsx`.
-- `src/layout/Shell.tsx` is the persistent layout: `@infra/ui`'s `AppHeader`
-  (federation portal link + light/dark/system theme toggle) on top, then a
-  sidebar + main-area row below; `src/layout/Sidebar.tsx` holds the
-  navigation, the collection selector, and the session list.
+- `src/App.tsx` wraps the tree in the TanStack Query provider, the
+  `LanguageProvider` (which reads `GET /config`) and the React Router
+  `BrowserRouter`, then renders `src/routes/Router.tsx` inside the shell. It
+  also refetches the queries a declined purpose prompt left refused, once a
+  purpose is stated (`refetchRefusedOnPurpose`, `src/api/queryClient.ts`).
+- `src/layout/Shell.tsx` is the persistent layout: `@infra/ui`'s `AppShell`,
+  whose one header row carries the federation portal link, the title and
+  version, the **purpose bar**, the light/dark/system theme toggle and the
+  user menu, with the collapsible sidebar beside the main area;
+  `src/layout/Sidebar.tsx` holds the navigation, the collection selector, and
+  the session list. The shell also mounts the app-wide `PreviewDialog`.
+- The purpose bar (`@infra/ui`'s `PurposeBar`, scope `docint`) is where the
+  user states why they are working — a case reference, a reason, or both. The
+  purpose is kept for the browser tab's session and sent with every request
+  as `X-Audit-Purpose`, for the data-protection audit log
+  ([audit.md](audit.md#stated-purpose)). While `GET /config` lists any
+  `require_purpose` actions the empty bar is a warning, and a request the
+  backend refuses for want of a purpose (`428`) opens the bar's dialog and is
+  sent again once one is saved. Signing out clears it.
 
 ## Routes
 

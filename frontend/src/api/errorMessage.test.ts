@@ -9,6 +9,11 @@ describe('describeError', () => {
       vars: { status: 502 },
     })
   })
+  it('maps a refusal for want of a stated purpose to its own key, without the status', () => {
+    expect(describeError(new ApiError(428, { detail: 'A stated purpose is required for this request.' }))).toEqual({
+      key: 'common.error_purpose_required',
+    })
+  })
   it('maps network TypeError to the network key', () => {
     expect(describeError(new TypeError('Failed to fetch'))).toEqual({
       key: 'common.error_network',

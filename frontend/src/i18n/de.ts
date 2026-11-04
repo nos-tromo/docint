@@ -16,6 +16,25 @@ export const de: Strings = {
   'appHeader.theme_light': 'Hell',
   'appHeader.theme_dark': 'Dunkel',
 
+  // Zweckleiste: der für das Datenschutz-Protokoll angegebene Zweck
+  'purpose.name': 'Zweck',
+  'purpose.empty': 'Kein Zweck angegeben',
+  'purpose.required': 'Zweck erforderlich',
+  'purpose.title': 'Zweck',
+  'purpose.description':
+    'Wird mit jeder Ihrer Anfragen in dieser App gesendet, bis Sie ihn ändern oder entfernen oder die Sitzung endet.',
+  'purpose.requested': 'Für diese Aktion ist ein Zweck erforderlich.',
+  'purpose.case_ref': 'Aktenzeichen',
+  'purpose.reason': 'Begründung',
+  'purpose.save': 'Speichern',
+  'purpose.cancel': 'Abbrechen',
+  'purpose.clear': 'Entfernen',
+  // `{max}` setzt die Zweckleiste selbst ein.
+  'purpose.error_length': 'Höchstens {max} Zeichen.',
+  'purpose.error_control': 'Entfernen Sie Zeilenumbrüche, Tabulatoren und andere Steuerzeichen.',
+  'purpose.error_header': 'Zusammen zu lang zum Senden. Kürzen Sie eines der Felder.',
+  'purpose.error_empty': 'Geben Sie ein Aktenzeichen oder eine Begründung an.',
+
   // common
   'common.copied': 'Kopiert',
   'common.active': 'Aktiv',
@@ -111,6 +130,8 @@ export const de: Strings = {
     'Etwas ist schiefgelaufen – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_network':
     'Dienst nicht erreichbar – Bitte prüfen Sie Ihre Verbindung oder versuchen Sie es später erneut.',
+  'common.error_purpose_required':
+    'Zuerst ist ein Zweck anzugeben. Legen Sie ihn in der Kopfzeile fest und versuchen Sie es erneut.',
 
   // chat
   'chat.title': 'Chat',

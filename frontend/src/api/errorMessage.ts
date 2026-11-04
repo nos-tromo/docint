@@ -1,6 +1,10 @@
-import { ApiError } from './client'
+import { ApiError, isPurposeRefusal } from './client'
 
-export type ErrorKey = 'common.error_request' | 'common.error_unknown' | 'common.error_network'
+export type ErrorKey =
+  | 'common.error_request'
+  | 'common.error_unknown'
+  | 'common.error_network'
+  | 'common.error_purpose_required'
 
 export type ErrorDescriptor = {
   key: ErrorKey
@@ -10,6 +14,9 @@ export type ErrorDescriptor = {
 /** The only sanctioned path from a thrown error to user-visible text.
  *  Never render err.message, err.detail, or response bodies. */
 export function describeError(err: unknown): ErrorDescriptor {
+  // Refused for want of a stated purpose, the dialog having been dismissed:
+  // say what to do rather than show a status code.
+  if (isPurposeRefusal(err)) return { key: 'common.error_purpose_required' }
   if (err instanceof ApiError) {
     // Dev-only visibility; the body is generic post-backend-fix anyway.
     console.debug('API error detail', err.status, err.detail)

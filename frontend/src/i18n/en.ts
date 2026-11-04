@@ -14,6 +14,25 @@ export const en = {
   'appHeader.theme_light': 'light',
   'appHeader.theme_dark': 'dark',
 
+  // Purpose bar: the purpose stated for the data-protection audit log
+  'purpose.name': 'Purpose',
+  'purpose.empty': 'No purpose stated',
+  'purpose.required': 'Purpose required',
+  'purpose.title': 'Purpose',
+  'purpose.description':
+    'Sent with each request you make in this app until you change or clear it, or the session ends.',
+  'purpose.requested': 'This action needs a stated purpose.',
+  'purpose.case_ref': 'Case reference',
+  'purpose.reason': 'Reason',
+  'purpose.save': 'Save',
+  'purpose.cancel': 'Cancel',
+  'purpose.clear': 'Clear',
+  // `{max}` is filled in by the purpose bar itself.
+  'purpose.error_length': 'At most {max} characters.',
+  'purpose.error_control': 'Remove line breaks, tabs and other control characters.',
+  'purpose.error_header': 'Too long to send together. Shorten one of the fields.',
+  'purpose.error_empty': 'Enter a case reference or a reason.',
+
   // common
   'common.copied': 'Copied',
   'common.active': 'Active',
@@ -105,6 +124,7 @@ export const en = {
   'common.error_request': 'Something went wrong ({status}). Please try again or contact support.',
   'common.error_unknown': 'Something went wrong. Please try again or contact support.',
   'common.error_network': 'Service unreachable. Please check your connection or try again later.',
+  'common.error_purpose_required': 'A purpose must be stated first. Set it in the header, then try again.',
 
   // chat
   'chat.title': 'Chat',

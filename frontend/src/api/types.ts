@@ -839,6 +839,12 @@ export interface AppConfig {
    * surface hidden.
    */
   topics_enabled?: boolean
+  /**
+   * The audit actions the backend refuses without a stated purpose
+   * (`AUDIT_REQUIRE_PURPOSE`), sorted. Any at all make the header's purpose
+   * bar insist on one. Optional: a backend predating it requires none.
+   */
+  require_purpose?: string[]
 }
 
 /** One collection's retention clock and deletion date (`GET /collections/retention`). */
