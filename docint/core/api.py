@@ -1780,24 +1780,30 @@ class TopicsIn(BaseModel):
     """Request payload for queuing a topics run.
 
     Attributes:
-        action (Literal["build", "discover", "align", "reduce"]): ``build`` fits
-            a new run, ``discover`` looks for new topics among the unassigned
-            chunks, ``align`` places chunks the run has not placed yet, and
-            ``reduce`` stores which of the run's topics are read as one.
+        action (Literal["build", "discover", "align", "reduce", "relax"]):
+            ``build`` fits a new run, ``discover`` looks for new topics among
+            the unassigned chunks, ``align`` places chunks the run has not
+            placed yet, ``reduce`` stores which of the run's topics are read as
+            one, and ``relax`` places unassigned chunks under a lowered bar.
         min_topic_size (int | None): For ``build`` only: the smallest topic the
             fit may form, in place of ``TOPICS_MIN_TOPIC_SIZE``; ``None`` keeps
             the configured or automatic size.
-        run_id (str | None): For ``reduce``, required: the run the request was
-            drawn up against. The job is refused when another run is active.
+        run_id (str | None): For ``reduce`` and ``relax``, required: the run the
+            request was drawn up against. The job is refused when another run
+            is active.
         groups (list[list[int]] | None): For ``reduce``, required: the topic
             ids read as one, two or more per group, no id in two groups; an
             empty list undoes the reduction.
+        threshold (float | None): For ``relax``: the lowered bar, the cosine to
+            the nearest topic's centre a chunk must reach, 0.01 to 0.99 in
+            steps of 0.01; ``None`` undoes the last relax and only measures.
     """
 
-    action: Literal["build", "discover", "align", "reduce"] = "build"
+    action: Literal["build", "discover", "align", "reduce", "relax"] = "build"
     min_topic_size: int | None = Field(default=None, ge=2, le=10_000)
     run_id: str | None = None
     groups: list[list[int]] | None = Field(default=None, max_length=10_000)
+    threshold: float | None = Field(default=None, ge=0.01, le=0.99)
 
     @field_validator("run_id")
     @classmethod
@@ -1830,12 +1836,20 @@ class TopicsIn(BaseModel):
         """
         if self.min_topic_size is not None and self.action != "build":
             raise ValueError("min_topic_size applies to build only")
-        if self.action != "reduce":
-            if self.groups is not None or self.run_id is not None:
-                raise ValueError("groups and run_id apply to reduce only")
+        if self.threshold is not None and self.action != "relax":
+            raise ValueError("threshold applies to relax only")
+        if self.groups is not None and self.action != "reduce":
+            raise ValueError("groups apply to reduce only")
+        if self.action not in ("reduce", "relax"):
+            if self.run_id is not None:
+                raise ValueError("run_id applies to reduce and relax only")
             return self
-        if self.run_id is None or self.groups is None:
-            raise ValueError("a reduce needs run_id and groups")
+        if self.run_id is None:
+            raise ValueError(f"a {self.action} needs run_id")
+        if self.groups is None:
+            if self.action == "reduce":
+                raise ValueError("a reduce needs groups")
+            return self
         seen: set[int] = set()
         for group in self.groups:
             members = set(group)
@@ -1852,7 +1866,12 @@ class TopicsIn(BaseModel):
         Returns:
             dict[str, Any] | None: The settings given, ``None`` when there are none.
         """
-        given = {"min_topic_size": self.min_topic_size, "run_id": self.run_id, "groups": self.groups}
+        given = {
+            "min_topic_size": self.min_topic_size,
+            "run_id": self.run_id,
+            "groups": self.groups,
+            "threshold": self.threshold,
+        }
         return {key: value for key, value in given.items() if value is not None} or None
 
 

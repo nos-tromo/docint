@@ -13,17 +13,21 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from docint.core.topics.gather import (
+    UNASSIGNED,
     DenseVector,
+    and_filters,
     central_points,
     count,
     document_counts,
     eligible_filter,
     member_page,
     pending_filter,
+    relaxed_filter,
     topic_counts,
+    topic_filter,
 )
 from docint.core.topics.model import TopicInfo
-from docint.core.topics.reduce import LABELS_KEY, merge_tree
+from docint.core.topics.reduce import LABELS_KEY, RELAX_KEY, merge_tree
 from docint.core.topics.store import TopicRun
 from docint.utils.cursor import InvalidCursorError, decode_cursor, encode_cursor
 
@@ -241,8 +245,9 @@ def tuning(
         ``run_id``; the build's ``min_topic_size``; every topic of the run
         unreduced (``leaves``: id, label, fit size, size); the ``merges``
         (``[a, b, similarity]`` in merge order, see :func:`merge_tree`); the
-        stored ``groups``; and the labels written for groups (``group_labels``,
-        by member key). ``None`` without a run.
+        stored ``groups``; the labels written for groups (``group_labels``,
+        by member key); and the last relax (``relax``, see
+        :func:`_relax_state`). ``None`` without a run.
     """
     if run is None:
         return None
@@ -265,4 +270,33 @@ def tuning(
         "merges": [[a, b, similarity] for a, b, similarity in merge_tree(run.table)],
         "groups": [list(leaves) for leaves in run.view.members.values() if len(leaves) > 1],
         "group_labels": labels,
+        "relax": _relax_state(client, run, physical),
+    }
+
+
+def _relax_state(client: Any, run: TopicRun, physical: str) -> dict[str, Any]:
+    """Describe a run's last relax and whether its histogram still describes the pool.
+
+    Args:
+        client: Qdrant client.
+        run: The run.
+        physical: Physical collection name.
+
+    Returns:
+        ``threshold`` (``None`` when none is applied), ``histogram`` (``None``
+        before the first relax), ``applied`` (chunks placed under the bar now)
+        and ``stale``: true without a histogram, and once the chunks the rule
+        leaves out are no longer the ones it counted (an ingest or a discover
+        since).
+    """
+    stored = run.record.get(RELAX_KEY)
+    last: Mapping[str, Any] = stored if isinstance(stored, Mapping) else {}
+    applied = count(client, physical, relaxed_filter(run.run_id))
+    histogram = last.get("histogram")
+    pool = count(client, physical, and_filters(topic_filter(run.run_id, UNASSIGNED), eligible_filter()))
+    return {
+        "threshold": last.get("threshold") if applied else None,
+        "histogram": histogram if isinstance(histogram, list) else None,
+        "applied": applied,
+        "stale": not isinstance(histogram, list) or last.get("basis") != pool + applied,
     }

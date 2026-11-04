@@ -21,6 +21,7 @@ from docint.core.topics.model import TopicInfo, TopicTable, unit_rows
 __all__ = [
     "GROUPS_KEY",
     "LABELS_KEY",
+    "RELAX_KEY",
     "TopicView",
     "check_groups",
     "group_key",
@@ -33,6 +34,9 @@ __all__ = [
 GROUPS_KEY = "groups"
 #: The record key holding written group labels, by :func:`group_key`.
 LABELS_KEY = "group_labels"
+#: The record key holding the last relax (outliers placed under a lowered bar): its bar, its
+#: cosine histogram and the count it measured, written by ``TopicsService``.
+RELAX_KEY = "relax"
 #: Keywords a group keeps, as many as the fit gives a topic.
 KEYWORDS_KEPT = 10
 
