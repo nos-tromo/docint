@@ -1,5 +1,5 @@
-import { memo, useCallback, useMemo, useState } from 'react'
-import { Banner, Button, DownloadButton, NewButton, PlayButton, RefreshButton } from '@infra/ui'
+import { memo, useCallback, useId, useMemo, useState } from 'react'
+import { Banner, Button, DisclosureButton, DownloadButton, NewButton, PlayButton, RefreshButton } from '@infra/ui'
 import { topicValue, type TopicSummary, type TopicsAction } from '@/api/topics'
 import { describeError } from '@/api/errorMessage'
 import { useActiveCollection } from '@/hooks/useActiveCollection'
@@ -12,6 +12,7 @@ import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { TopicRow } from './TopicRow'
+import { TopicsLab } from './TopicsLab'
 
 type AskInChat = (topic: TopicSummary, runId: string) => void
 
@@ -24,6 +25,7 @@ const WARNING_KEYS = new Map<string, keyof Strings>([
   ['no_run', 'topics.warning_no_run'],
   ['dimension_changed', 'topics.warning_dimension_changed'],
   ['collection_changed', 'topics.warning_collection_changed'],
+  ['run_changed', 'topics.warning_run_changed'],
   ['topics_unreachable', 'topics.warning_topics_unreachable'],
   ['topics_busy', 'topics.warning_topics_busy'],
   ['topics_too_large', 'topics.warning_topics_too_large'],
@@ -143,6 +145,9 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
   const start = useStartTopics()
   const [openTopic, setOpenTopic] = useState<string | null>(null)
   const toggleTopic = useCallback((key: string) => setOpenTopic((open) => (open === key ? null : key)), [])
+  // Fine-tuning works on its own compact list, so the topic list makes way for it while it is open.
+  const [labOpen, setLabOpen] = useState(false)
+  const labId = useId()
 
   // Between the click and the new job's first frame, the job store still names
   // the previous job, finished; until that frame arrives the run is "starting".
@@ -152,7 +157,7 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
   )
   const awaiting = start.isPending || (startedJobId !== null && !startedSeen)
   const busy = awaiting || job.running
-  const busyAction: TopicsAction | null = job.running ? job.action : awaiting ? (start.variables ?? null) : null
+  const busyAction: TopicsAction | null = job.running ? job.action : awaiting ? (start.variables?.action ?? null) : null
 
   // A job's outcome shows if it was started here or watched live on this page, never one only
   // replayed on a connect; progress shows for any running job, and a new start hides the last outcome.
@@ -190,7 +195,7 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
   const rebuild = () => {
     // A rebuild replaces every topic, so a chat filter on the current ones stops matching.
     if (!window.confirm(t('topics.rebuild_confirm'))) return
-    start.mutate('build')
+    start.mutate({ action: 'build' })
   }
   const download = () => {
     if (data) downloadCsv(`${collection}-topics.csv`, topicsCsv(data.topics))
@@ -225,16 +230,22 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
               label={t('topics.discover')}
               busy={busyAction === 'discover'}
               disabled={busy || coverage.unassigned === 0}
-              onClick={() => start.mutate('discover')}
+              onClick={() => start.mutate({ action: 'discover' })}
             />
             <PlayButton
               label={t('topics.align')}
               busy={busyAction === 'align'}
               disabled={busy || coverage.pending === 0}
-              onClick={() => start.mutate('align')}
+              onClick={() => start.mutate({ action: 'align' })}
             />
             {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
             <DownloadButton label={t('topics.download_csv')} onClick={download} />
+            <DisclosureButton
+              expanded={labOpen}
+              controls={labId}
+              label={t(labOpen ? 'topics.lab_hide' : 'topics.lab_show')}
+              onClick={() => setLabOpen((open) => !open)}
+            />
           </div>
         </div>
       )}
@@ -245,7 +256,7 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
       {data === null && (
         <div className="flex flex-col items-start gap-3 rounded-md border border-border border-dashed p-6">
           <p className="text-sm text-muted-foreground">{t('topics.empty')}</p>
-          <Button variant="primary" disabled={busy} onClick={() => start.mutate('build')}>
+          <Button variant="primary" disabled={busy} onClick={() => start.mutate({ action: 'build' })}>
             {t('topics.build')}
           </Button>
         </div>
@@ -284,7 +295,12 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
       )}
       {data?.embed_model_changed && <Banner variant="info">{t('topics.embed_model_changed')}</Banner>}
 
-      {data && data.topics.length > 0 && (
+      <div id={labId} hidden={!labOpen}>
+        {/* Keyed by run, so a rebuild starts a fresh draft. */}
+        {labOpen && data && <TopicsLab key={data.run_id} overview={data} onStart={start.mutate} busy={busy} />}
+      </div>
+
+      {data && data.topics.length > 0 && !labOpen && (
         <TopicList
           topics={data.topics}
           runId={data.run_id}

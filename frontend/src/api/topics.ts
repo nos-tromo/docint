@@ -8,9 +8,56 @@ export const TOPIC_FIELD = 'docint_topic'
 
 /**
  * What a topics job does: `build` fits the topics from scratch, `discover` looks
- * for new ones among the unassigned chunks, `align` places the chunks not yet placed.
+ * for new ones among the unassigned chunks, `align` places the chunks not yet
+ * placed, `reduce` stores which topics are read as one, and `relax` places
+ * unassigned chunks under a lowered bar.
  */
-export type TopicsAction = 'build' | 'discover' | 'align'
+export type TopicsAction = 'build' | 'discover' | 'align' | 'reduce' | 'relax'
+
+/** A topics job's settings, each for one action only (see `POST /collections/{name}/topics`). */
+export interface TopicsOptions {
+  /** `build`: the smallest topic the fit may form. */
+  min_topic_size?: number
+  /** `reduce` and `relax`: the run the request was drawn up against. */
+  run_id?: string
+  /** `reduce`: the topic ids read as one; empty to undo the reduction. */
+  groups?: number[][]
+  /** `relax`: the lowered bar, 0.01 to 0.99; null to undo the last relax and only measure. */
+  threshold?: number | null
+}
+
+/** A topics job to queue: what it does, with its settings. */
+export interface TopicsRequest extends TopicsOptions {
+  action: TopicsAction
+}
+
+/** The last relax, as the tuning view describes it. */
+export interface TopicsRelaxState {
+  /** The bar applied now, null when none is. */
+  threshold: number | null
+  /** Chunks the rule leaves out, by best cosine in bins of 0.01; null before the first relax. */
+  histogram: number[] | null
+  /** Chunks placed under the bar now. */
+  applied: number
+  /** True without a histogram, or once the pool it counted has changed. */
+  stale: boolean
+}
+
+/** What fine-tuning a run starts from, as `GET /collections/{name}/topics/tuning` describes it. */
+export interface TopicsTuning {
+  run_id: string
+  /** The minimum topic size the run was built with. */
+  min_topic_size: number | null
+  /** Every topic of the run before any reduction. */
+  leaves: { id: number; label: string; fit_size: number; size: number }[]
+  /** `[a, b, similarity]` per step: the clusters named by their lowest ids merge, closest first. */
+  merges: [number, number, number][]
+  /** The groups stored now, each ascending. */
+  groups: number[][]
+  /** Labels written for groups, by their members joined with commas (`"3,7,12"`). */
+  group_labels: Record<string, string>
+  relax: TopicsRelaxState
+}
 
 /** One topic of a run, as `GET /collections/{name}/topics` lists it. */
 export interface TopicSummary {
@@ -96,13 +143,25 @@ export function getTopics(collection: string): Promise<TopicsOverview | null> {
  *
  * @param collection - The caller's logical collection name.
  * @param action - What the job does.
+ * @param options - The action's settings.
  * @returns The job id, and whether it was adopted from an in-flight run.
  */
 export function startTopics(
   collection: string,
-  action: TopicsAction
+  action: TopicsAction,
+  options: TopicsOptions = {}
 ): Promise<{ job_id: string; adopted: boolean }> {
-  return queueJob(topicsPath(collection), { action })
+  return queueJob(topicsPath(collection), { action, ...options })
+}
+
+/**
+ * Read what fine-tuning a collection's active topic run starts from.
+ *
+ * @param collection - The caller's logical collection name.
+ * @returns The tuning view, or null when the collection has no run.
+ */
+export function getTopicsTuning(collection: string): Promise<TopicsTuning | null> {
+  return apiGetOrNull<TopicsTuning>(`${topicsPath(collection)}/tuning`)
 }
 
 /** A topic's passages nearest its centre. */
