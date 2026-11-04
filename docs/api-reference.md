@@ -55,7 +55,7 @@ instead of the frame carrying the result; a queued job is marked failed
 
 | Method | Path | Tag | Purpose |
 |---|---|---|---|
-| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention window, topics flag). |
+| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention window, topics flag, required-purpose actions). |
 | `GET`  | `/config/ingest-defaults` | `Meta` | Deployment defaults for the ingest UI's enrichment toggles. |
 | `GET`  | `/version` | `Meta` | Running app version. Unauthenticated; the Docker healthcheck's liveness probe. |
 | `GET`  | `/health` | `Meta` | Dependency status (Qdrant reachability). Unauthenticated, always `200`. |
@@ -141,18 +141,23 @@ instead of the frame carrying the result; a queued job is marked failed
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns eight fields (`FrontendConfigOut`):
+without a principal. Returns nine fields (`FrontendConfigOut`):
 `graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`,
-`report_batch_max_items`, `language`, `collection_retention` and
-`topics_enabled`. They come from `NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`,
-`FRONTEND_COLLECTION_TIMEOUT`, `DOCINT_CLIENT_MAX_BODY_SIZE`,
-`REPORT_BATCH_MAX_ITEMS`, `RESPONSE_LANGUAGE`, `COLLECTION_RETENTION` and
-`TOPICS_ENABLED` respectively (see
+`report_batch_max_items`, `language`, `collection_retention`,
+`topics_enabled` and `require_purpose`. They come from `NER_GRAPH_TOP_K`,
+`NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
+`DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS`, `RESPONSE_LANGUAGE`,
+`COLLECTION_RETENTION`, `TOPICS_ENABLED` and `AUDIT_REQUIRE_PURPOSE`
+respectively (see
 [configuration.md](configuration.md#frontend--frontendconfig)).
 `collection_retention` is `"off"` or the idle window (`"6m"` … `"24m"`); a
 client asks `GET /collections/retention` only when it is not `"off"`. While
 `topics_enabled` is false the SPA shows none of its topics screens, and every
-[topics route](#topics) answers `404`.
+[topics route](#topics) answers `404`. `require_purpose` lists, sorted, the
+audit actions the running backend refuses without a stated purpose (e.g.
+`["disclose", "query"]`; `[]` while the knob is empty), so a client can ask
+for a purpose before it sends a request that would be refused
+([audit.md](audit.md#stated-purpose)). Reading it records nothing.
 
 ### `GET /config/ingest-defaults`
 

@@ -340,12 +340,44 @@ def test_a_required_purpose_is_enforced_per_action(
 
 
 def test_no_purpose_is_required_by_default(client: TestClient) -> None:
-    """The knob is empty in this release: nothing asks for a purpose.
+    """The code default is empty: nothing asks for a purpose unless the knob is set.
 
     Args:
         client (TestClient): The running app.
     """
     assert client.get("/collections/documents", params={"collection": "alpha"}, headers=ALICE).status_code == 200
+
+
+def test_the_config_advertises_the_purpose_rule_in_force(
+    rag: DummyRAG, monkeypatch: pytest.MonkeyPatch, audit_stream: io.StringIO
+) -> None:
+    """``GET /config`` names the required actions, sorted, so the SPA can insist on a purpose.
+
+    It is read on the SPA's first load, before anyone signs in, so it needs no
+    principal; and it is configuration, so it records nothing.
+
+    Args:
+        rag (DummyRAG): The RAG double.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    monkeypatch.setenv("AUDIT_REQUIRE_PURPOSE", "query, Disclose")
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY")
+    with TestClient(api_module.app) as client:
+        response = client.get("/config")
+
+    assert response.status_code == 200
+    assert response.json()["require_purpose"] == ["disclose", "query"]
+    assert _ops(audit_stream) == []
+
+
+def test_the_config_advertises_no_purpose_rule_by_default(client: TestClient) -> None:
+    """With ``AUDIT_REQUIRE_PURPOSE`` unset the list is empty, and the purpose bar stays optional.
+
+    Args:
+        client (TestClient): The running app.
+    """
+    assert client.get("/config").json()["require_purpose"] == []
 
 
 def test_requiring_ai_call_gates_a_chat_turn(

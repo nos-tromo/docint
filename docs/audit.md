@@ -260,7 +260,7 @@ ends ([Background jobs](#background-jobs)).
 
 | Route | Recorded as | Target and notes |
 |---|---|---|
-| `GET /config` | — | Deploy-time configuration, served without a principal. |
+| `GET /config` | — | Deploy-time configuration, served without a principal — including `require_purpose`, the actions the running chain requires a stated purpose for. |
 | `GET /config/ingest-defaults` | — | Configuration. |
 | `GET /version` | — | Liveness. |
 | `GET /health` | — | Readiness. |

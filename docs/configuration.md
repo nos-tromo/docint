@@ -717,8 +717,9 @@ Loaded by `load_frontend_env()` (`env_cfg.py:352`).
 | `REPORT_BATCH_MAX_ITEMS` | `2000` | Most artifacts one `POST /reports/{id}/items/batch` may carry (clamped to ≥ 1). Read **once at import**: it becomes the request model's `max_length`, so a change needs a backend restart, and `GET /config` always advertises the value actually enforced. The Analysis screens' "Add all" refuses a larger section against this number rather than adding part of it. Raising it far past the default also means checking `DOCINT_API_MAX_BODY_SIZE` (see [deployment.md](deployment.md)) — the count is what the SPA refuses against, the bytes are what nginx stops. |
 
 All five values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE`, `COLLECTION_RETENTION` and `TOPICS_ENABLED` — eight fields
-in all (`FrontendConfigOut`).
+`RESPONSE_LANGUAGE`, `COLLECTION_RETENTION`, `TOPICS_ENABLED` and the actions
+`AUDIT_REQUIRE_PURPOSE` requires (`require_purpose`, as the running audit chain
+enforces them) — nine fields in all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 
