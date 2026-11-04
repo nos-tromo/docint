@@ -360,6 +360,27 @@ def test_widen_seen_rewrites_only_the_record_and_never_recreates_a_deleted_run(t
     assert not directory.exists()
 
 
+def test_a_runs_reduction_survives_a_seen_rewrite_and_is_read_through_its_view(tmp_path: Path) -> None:
+    """Groups and their labels are record keys: kept by widen_seen, and applied by the loaded run's view."""
+    store = TopicStore(tmp_path)
+    plain = _run(_id(store))
+    record = {**plain.record, "groups": [[0, 1]], "group_labels": {"0,1": {"label": "Both", "description": "Two."}}}
+    run = TopicRun(plain.run_id, record, plain.table)
+    store.save(PHYSICAL, run)
+
+    day = "2025-01-01T00:00:00+00:00"
+    assert store.widen_seen(PHYSICAL, run.run_id, {1: (day, day)}, updated_at="2026-03-01T00:00:00+00:00")
+
+    stored = store.load(PHYSICAL, run.run_id)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 1]]
+    assert stored.record["group_labels"] == record["group_labels"]
+    assert stored.view.members == {0: (0, 1)}
+    merged = stored.view.table.topic(0)
+    assert merged is not None and merged.label == "Both"
+    assert merged.first_seen == day
+
+
 def test_prune_removes_a_run_even_when_it_is_the_active_one(tmp_path: Path) -> None:
     """Prune ignores the active pointer."""
     store = TopicStore(tmp_path)

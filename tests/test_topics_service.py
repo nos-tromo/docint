@@ -2274,6 +2274,239 @@ def test_the_outcome_artifact_carries_the_published_keys() -> None:
     }
 
 
+class _Prompts:
+    """A fake chat model for labels that records each prompt it is sent."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Start empty.
+
+        Args:
+            fail: Whether every call raises, so every label falls back.
+        """
+        self.prompts: list[str] = []
+        self.fail = fail
+
+    def __call__(self, prompt: str, response_format: dict[str, Any] | None) -> str:
+        """Record the prompt and answer with a label naming how many were asked.
+
+        Args:
+            prompt: The rendered prompt.
+            response_format: Ignored.
+
+        Returns:
+            A JSON reply.
+
+        Raises:
+            RuntimeError: When scripted to fail.
+        """
+        self.prompts.append(prompt)
+        if self.fail:
+            raise RuntimeError("model down")
+        return json.dumps({"label": f"Group label {len(self.prompts)}", "description": "A merged summary."})
+
+
+def _reduce(
+    svc: TopicsService,
+    run_id: str | None,
+    groups: Sequence[Sequence[int]],
+    frames: Frames | None = None,
+) -> TopicsOutcome:
+    """Run a reduce.
+
+    Args:
+        svc: The service.
+        run_id: The run the groups were drawn up against.
+        groups: The groups.
+        frames: Frame recorder; a fresh one when omitted.
+
+    Returns:
+        The outcome.
+    """
+    rec = frames or Frames()
+    return svc.run(
+        "reduce",
+        COLL,
+        logical="coll",
+        owner_created_at=lambda: CREATED,
+        progress=rec.progress,
+        warn=rec.warn,
+        run_id=run_id,
+        groups=groups,
+    )
+
+
+def _built(client: QdrantClient, root: Path) -> TopicRun:
+    """Build three topics over three blobs, labelled by the fake model.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+
+    Returns:
+        The active run.
+    """
+    _add_blobs(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and [t.id for t in run.table.topics] == [0, 1, 2]
+    return run
+
+
+def test_a_reduce_stores_its_groups_and_labels_each_group_once(client: QdrantClient, root: Path) -> None:
+    """A new group is labelled from its own passages; the same group again, or after a reset, costs no call.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    before = _topics(client)
+    model = _Prompts()
+    svc = _service(client, root, labeller=TopicLabeller(model, template=DEFAULT_TEMPLATE))
+    frames = Frames()
+
+    outcome = _reduce(svc, run.run_id, [[2, 0]], frames)
+
+    assert outcome == TopicsOutcome("reduce", run.run_id, 3, 0, 0, empty=False)
+    assert len(model.prompts) == 1
+    assert "blob1" not in model.prompts[0]
+    assert "blob0" in model.prompts[0] and "blob2" in model.prompts[0]
+    assert "labelling" in frames.stages()
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 2]]
+    assert stored.record["group_labels"] == {"0,2": {"label": "Group label 1", "description": "A merged summary."}}
+    merged = stored.view.table.topic(0)
+    assert merged is not None and merged.label == "Group label 1"
+    assert stored.table.topics == run.table.topics
+    # Only the run's record changes: every chunk keeps its own topic.
+    assert _topics(client) == before
+
+    _reduce(svc, run.run_id, [[0, 2]])
+    reset = _reduce(svc, run.run_id, [])
+    assert reset.empty is False
+    cleared = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert cleared is not None and cleared.record["groups"] == []
+    assert cleared.view.members == {0: (0,), 1: (1,), 2: (2,)}
+    assert "0,2" in cleared.record["group_labels"]
+    _reduce(svc, run.run_id, [[0, 2]])
+    assert len(model.prompts) == 1
+
+
+def test_a_label_the_model_could_not_write_is_not_kept(client: QdrantClient, root: Path) -> None:
+    """A fallback label is not cached, so the group is labelled again next time; its groups still apply.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    model = _Prompts(fail=True)
+    svc = _service(client, root, labeller=TopicLabeller(model, template=DEFAULT_TEMPLATE))
+
+    _reduce(svc, run.run_id, [[0, 1]])
+    _reduce(svc, run.run_id, [[0, 1]])
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 1]]
+    assert stored.record["group_labels"] == {}
+    assert len(model.prompts) >= 2
+    merged = stored.view.table.topic(0)
+    assert merged is not None and merged.label == run.table.topics[0].label
+
+
+def test_without_labels_a_group_is_named_by_its_largest_topic(client: QdrantClient, root: Path) -> None:
+    """With TOPICS_LABELS off nothing is asked of a model and the group carries its largest topic's label.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    svc = TopicsService(replace(_service(client, root)._deps, labeller=None))
+
+    _reduce(svc, run.run_id, [[1, 2]])
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None and stored.record["group_labels"] == {}
+    merged = stored.view.table.topic(1)
+    assert merged is not None and merged.label == run.table.topics[1].label
+
+
+@pytest.mark.parametrize("groups", [[[0, 9]], [[0, 1], [1, 2]]])
+def test_a_reduce_for_another_run_or_unknown_topics_is_refused(
+    client: QdrantClient, root: Path, groups: list[list[int]]
+) -> None:
+    """A run id that is not the active run's, or groups the run cannot hold, are refused and store nothing.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        groups: Groups the run cannot hold.
+    """
+    run = _built(client, root)
+    svc = _service(client, root)
+
+    with pytest.raises(TopicsRefused) as stale:
+        _reduce(svc, "20200101-000000-abcdef", [[0, 1]])
+    assert stale.value.code == "run_changed"
+    with pytest.raises(TopicsRefused) as unknown:
+        _reduce(svc, run.run_id, groups)
+    assert unknown.value.code == "run_changed"
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None and "groups" not in stored.record
+
+
+def test_a_cancelled_reduce_changes_nothing(client: QdrantClient, root: Path) -> None:
+    """A reduce stopped while its labels are written stores neither its groups nor any label.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+
+    def stop(stage: str, _done: int, _total: int) -> None:
+        """Cancel once labelling reports.
+
+        Args:
+            stage: The stage.
+            _done: Ignored.
+            _total: Ignored.
+
+        Raises:
+            Stop: At the first labelling frame.
+        """
+        if stage == "labelling":
+            raise Stop
+
+    with pytest.raises(Stop):
+        _reduce(_service(client, root), run.run_id, [[0, 1]], Frames(stop))
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None and "groups" not in stored.record and "group_labels" not in stored.record
+
+
+def test_a_reduction_outlives_later_aligns_and_discovers(client: QdrantClient, root: Path) -> None:
+    """Groups stay as stored while later jobs place chunks and widen dates.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    _reduce(_service(client, root), run.run_id, [[0, 1]])
+    _add_blobs(client, per=5, offset=500, seed=3)
+
+    _run(_service(client, root), "align")
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 1]]
+    assert "0,1" in stored.record["group_labels"]
+
+
 def test_the_topics_package_imports_nothing_from_rag_state_or_api() -> None:
     """No topics module loads the engine, the state stores or the API."""
     modules = sorted(f"docint.core.topics.{info.name}" for info in pkgutil.iter_modules(docint.core.topics.__path__))

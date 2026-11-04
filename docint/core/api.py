@@ -2120,29 +2120,70 @@ class TopicsIn(BaseModel):
     """Request payload for queuing a topics run.
 
     Attributes:
-        action (Literal["build", "discover", "align"]): ``build`` fits a new run,
-            ``discover`` looks for new topics among the unassigned chunks, and
-            ``align`` places chunks the run has not placed yet.
+        action (Literal["build", "discover", "align", "reduce"]): ``build`` fits
+            a new run, ``discover`` looks for new topics among the unassigned
+            chunks, ``align`` places chunks the run has not placed yet, and
+            ``reduce`` stores which of the run's topics are read as one.
         min_topic_size (int | None): For ``build`` only: the smallest topic the
             fit may form, in place of ``TOPICS_MIN_TOPIC_SIZE``; ``None`` keeps
             the configured or automatic size.
+        run_id (str | None): For ``reduce``, required: the run the request was
+            drawn up against. The job is refused when another run is active.
+        groups (list[list[int]] | None): For ``reduce``, required: the topic
+            ids read as one, two or more per group, no id in two groups; an
+            empty list undoes the reduction.
     """
 
-    action: Literal["build", "discover", "align"] = "build"
+    action: Literal["build", "discover", "align", "reduce"] = "build"
     min_topic_size: int | None = Field(default=None, ge=2, le=10_000)
+    run_id: str | None = None
+    groups: list[list[int]] | None = Field(default=None, max_length=10_000)
+
+    @field_validator("run_id")
+    @classmethod
+    def _run_id_is_a_run_id(cls, value: str | None) -> str | None:
+        """Accept a well-formed topic run id and nothing else.
+
+        Args:
+            value (str | None): The submitted run id.
+
+        Returns:
+            str | None: The run id.
+
+        Raises:
+            ValueError: When the value is not a run id.
+        """
+        if value is not None and not RUN_ID_PATTERN.fullmatch(value):
+            raise ValueError("not a topic run id")
+        return value
 
     @model_validator(mode="after")
     def _options_fit_the_action(self) -> "TopicsIn":
-        """Refuse a setting the action does not take.
+        """Refuse a setting the action does not take, and a reduce that is not well formed.
 
         Returns:
             TopicsIn: The validated model.
 
         Raises:
-            ValueError: When ``min_topic_size`` comes with another action than ``build``.
+            ValueError: When a setting comes with an action that does not take
+                it, a reduce lacks its run or groups, or its groups are malformed.
         """
         if self.min_topic_size is not None and self.action != "build":
             raise ValueError("min_topic_size applies to build only")
+        if self.action != "reduce":
+            if self.groups is not None or self.run_id is not None:
+                raise ValueError("groups and run_id apply to reduce only")
+            return self
+        if self.run_id is None or self.groups is None:
+            raise ValueError("a reduce needs run_id and groups")
+        seen: set[int] = set()
+        for group in self.groups:
+            members = set(group)
+            if len(members) < 2 or len(group) > 10_000 or min(members) < 0:
+                raise ValueError("a group holds two or more topic ids, none negative")
+            if seen & members:
+                raise ValueError("a topic id is in two groups")
+            seen |= members
         return self
 
     def options(self) -> dict[str, Any] | None:
@@ -2151,7 +2192,7 @@ class TopicsIn(BaseModel):
         Returns:
             dict[str, Any] | None: The settings given, ``None`` when there are none.
         """
-        given = {"min_topic_size": self.min_topic_size}
+        given = {"min_topic_size": self.min_topic_size, "run_id": self.run_id, "groups": self.groups}
         return {key: value for key, value in given.items() if value is not None} or None
 
 
@@ -7984,6 +8025,44 @@ def get_topics(
         return Response(status_code=204)
     op.record(target=topic_target(list(overview.get("topics") or [])), criteria={"run_id": overview.get("run_id")})
     return overview
+
+
+@app.get("/collections/{name}/topics/tuning", response_model=None, tags=["Query"])
+def get_topics_tuning(
+    name: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 - FastAPI dependency marker
+    op: Operation = Depends(audited("query", "topics.tuning")),  # noqa: B008 - FastAPI dependency marker
+) -> Response | dict[str, Any]:
+    """Describe what fine-tuning a collection's topics starts from.
+
+    The run's own topics before any reduction, the tree a reduction follows and
+    the labels already written for groups, so a client can preview a reduction
+    without asking again. Audited because the labels are drawn from passages.
+
+    Args:
+        name (str): The caller's logical collection name.
+        principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation.
+
+    Returns:
+        Response | dict[str, Any]: 200 with the tuning view, or 204 when the
+            collection has no usable run.
+
+    Raises:
+        HTTPException: 404 when topics are disabled or the collection is not
+            owned; 500 when the read fails.
+    """
+    _require_topics_enabled()
+    physical = _require_owned_collection(name, principal)
+    try:
+        tuning = rag.topics_tuning(physical)
+    except Exception as e:
+        logger.exception("Reading the topics tuning of '{}' failed", name)
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if tuning is None:
+        return Response(status_code=204)
+    op.record(target=topic_target(list(tuning.get("leaves") or [])), criteria={"run_id": tuning.get("run_id")})
+    return tuning
 
 
 @app.get("/collections/{name}/topics/{topic_id}/evidence", tags=["Query"])

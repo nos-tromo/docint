@@ -11980,6 +11980,23 @@ class RAG:
             ensure_indexes=self._ensure_topic_indexes_once,
         )
 
+    def topics_tuning(self, physical: str) -> dict[str, Any] | None:
+        """Describe what fine-tuning a collection's active topic run starts from.
+
+        Args:
+            physical (str): Physical collection name.
+
+        Returns:
+            dict[str, Any] | None: The run's own topics and the tree merges follow;
+                ``None`` without a usable run.
+        """
+        return topic_views.tuning(
+            self.qdrant_client,
+            self._active_topic_run(physical),
+            physical,
+            ensure_indexes=self._ensure_topic_indexes_once,
+        )
+
     def topic_evidence(
         self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
     ) -> list[dict[str, Any]] | None:
