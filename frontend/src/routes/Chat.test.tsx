@@ -1772,7 +1772,7 @@ describe('Chat topic focus', () => {
     })
     renderChat()
 
-    expect(await screen.findByText('From an earlier build; not applied.')).toBeInTheDocument()
+    expect(await screen.findByText('No longer among the current topics; not applied.')).toBeInTheDocument()
     await ask()
 
     // The old run's value matches no chunk, so sending it would empty the answer.

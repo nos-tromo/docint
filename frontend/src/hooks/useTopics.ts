@@ -95,7 +95,7 @@ export function useChatTopicFocus(): ChatTopicFocus {
 
 /** The rule the topic focus adds to a turn or a search, and whether it is decided yet. */
 export interface TopicFocusRuleState {
-  /** Null unless the focus names a topic of the active collection's active run (see {@link topicFocusRule}). */
+  /** Null unless the focus names a topic the active collection's active run shows (see {@link topicFocusRule}). */
   rule: MetadataFilter | null
   /** True while the open chat's topic, or its run, is still being read. */
   pending: boolean
@@ -114,7 +114,7 @@ export function useTopicFocusRule(): TopicFocusRuleState {
   const config = useConfig()
   const overview = useTopicsOverview(inScope)
   return {
-    rule: topicFocusRule(focus, scope, overview.data?.run_id ?? null),
+    rule: topicFocusRule(focus, scope, overview.data),
     // While the flag is unknown the run may still be read; once it is known, only a read in flight is.
     pending:
       focusPending ||

@@ -3,7 +3,7 @@ import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveColl
 import { useChatTopicFocus, useTopicsOverview, useTopicsRefreshOnJobEnd } from '@/hooks/useTopics'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/stores/searchUi'
-import { focusInScope, topicFocusRule, type TopicFocus } from '@/stores/topicFocus'
+import { focusedTopic, focusInScope, type TopicFocus } from '@/stores/topicFocus'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -14,8 +14,9 @@ import { useT } from '@/i18n/LanguageContext'
  * control to drop it.
  *
  * It says what the next turn sends. A topic from an earlier build is not
- * applied, because its value matches no chunk of the run that replaced it; a
- * visual turn gets no topic rule either, because imagery carries no topic.
+ * applied, because its value matches no chunk of the run that replaced it,
+ * and neither is one since merged into another topic; a visual turn gets no
+ * topic rule either, because imagery carries no topic.
  * Either way the rule is left out rather than allowed to empty the answer, and
  * this is where that is said. With chunks selected, an answer comes from them
  * alone whatever its filters say, so only the searches keep to the topic.
@@ -53,7 +54,8 @@ function FocusChip({
   // Until the active run is read, nothing can be said of the topic.
   if (data === undefined) return null
 
-  const stale = topicFocusRule(focus, scope, data?.run_id ?? null) === null
+  const topic = focusedTopic(focus, scope, data)
+  const stale = topic === null
   const applied = !stale && !scoped && target !== 'visual'
   const hint = stale
     ? t('chat.topic_focus_stale')
@@ -62,7 +64,9 @@ function FocusChip({
       : target === 'visual'
         ? t('chat.topic_focus_not_visual')
         : t('chat.topic_focus_applied')
-  const name = focus.label ? `T${focus.topicId} · ${focus.label}` : `T${focus.topicId}`
+  // The run's label now, which a reduction may have rewritten since the topic was picked.
+  const label = topic?.label || focus.label
+  const name = label ? `T${focus.topicId} · ${label}` : `T${focus.topicId}`
 
   // The topic over its hint, so the chip is as wide as the longer of the two, not their sum:
   // side by side, a German hint leaves the topic no room beside the controls at 1024px.

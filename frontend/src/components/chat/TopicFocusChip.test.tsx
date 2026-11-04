@@ -130,10 +130,10 @@ describe('TopicFocusChip', () => {
         .getState()
         .setFocus({ collection: COLLECTION, owner: null, runId: EARLIER_RUN, topicId: 3, label: 'Harbour cranes' })
     )
-    expect(chip()).toHaveTextContent('From an earlier build; not applied.')
+    expect(chip()).toHaveTextContent('No longer among the current topics; not applied.')
     expect(chip()).not.toHaveTextContent('Not applied to answers from images.')
     act(() => useChatFiltersStore.getState().setRetrievalTarget('all'))
-    expect(chip()).toHaveTextContent('From an earlier build; not applied.')
+    expect(chip()).toHaveTextContent('No longer among the current topics; not applied.')
 
     await userEvent.click(screen.getByRole('button', { name: 'Remove topic filter' }))
 
@@ -163,7 +163,7 @@ describe('TopicFocusChip', () => {
 
     // Behind an earlier build, which is applied to nothing.
     act(() => useUiStore.setState({ currentSessionId: 'sess-old' }))
-    await waitFor(() => expect(chip()).toHaveTextContent('From an earlier build; not applied.'))
+    await waitFor(() => expect(chip()).toHaveTextContent('No longer among the current topics; not applied.'))
 
     // The scope is the open chat's own: another chat's selection says nothing about this one.
     act(() => {
@@ -237,7 +237,7 @@ describe('TopicFocusChip', () => {
     deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'build' }, 0)
     deliver('job-1', 'topics_completed', {}, 5000)
 
-    await waitFor(() => expect(chip()).toHaveTextContent('From an earlier build; not applied.'))
+    await waitFor(() => expect(chip()).toHaveTextContent('No longer among the current topics; not applied.'))
   })
 
   it('says a topic of a collection that has no run any more is not applied', async () => {
@@ -246,7 +246,7 @@ describe('TopicFocusChip', () => {
     renderChip()
 
     expect(await screen.findByRole('group', { name: 'Topic filter' })).toHaveTextContent(
-      'From an earlier build; not applied.'
+      'No longer among the current topics; not applied.'
     )
   })
 
@@ -286,13 +286,39 @@ describe('TopicFocusChip', () => {
   })
 
   it('names a topic without a label by its number alone', async () => {
-    stubApi()
+    stubApi(async () => ({ ...OVERVIEW, topics: [{ ...OVERVIEW.topics[0], label: '' }] }))
     useTopicFocusStore.setState({ focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: '' } })
     renderChip()
 
     const group = await screen.findByRole('group', { name: 'Topic filter' })
     expect(group).toHaveTextContent('T3')
     expect(group).not.toHaveTextContent('·')
+  })
+
+  it('names the topic as the run labels it now', async () => {
+    // A reduction that grew topic 3 wrote it a new label after it was picked.
+    stubApi()
+    useTopicFocusStore.setState({
+      focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Cranes, earlier name' }
+    })
+    renderChip()
+
+    const group = await screen.findByRole('group', { name: 'Topic filter' })
+    expect(group).toHaveTextContent('T3 · Harbour cranes')
+    expect(group).toHaveTextContent('Applied to answers and searches.')
+  })
+
+  it('applies nothing for a topic since merged into another', async () => {
+    stubApi(async () => ({ ...OVERVIEW, topics: [{ ...OVERVIEW.topics[0], id: 1, members: [1, 3] }] }))
+    useTopicFocusStore.setState({
+      focus: { collection: COLLECTION, owner: null, runId: RUN, topicId: 3, label: 'Harbour cranes' }
+    })
+    renderChip()
+
+    const group = await screen.findByRole('group', { name: 'Topic filter' })
+    expect(group).toHaveTextContent('T3 · Harbour cranes')
+    expect(group).toHaveTextContent('No longer among the current topics; not applied.')
+    expect(group).not.toHaveAttribute('data-applied')
   })
 
   it('words its states in German', async () => {

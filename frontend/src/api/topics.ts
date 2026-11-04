@@ -15,6 +15,11 @@ export type TopicsAction = 'build' | 'discover' | 'align'
 /** One topic of a run, as `GET /collections/{name}/topics` lists it. */
 export interface TopicSummary {
   id: number
+  /**
+   * The run's own topics this one is read as: its own id alone, or every
+   * topic a reduction merged into it. Absent means its own id alone.
+   */
+  members?: number[]
   label: string
   description: string
   /** The words that set the topic apart, each with its weight. */
@@ -46,6 +51,8 @@ export interface TopicsOverview {
   embed_model: string
   /** True when the collection is embedded with another model than the run was built with. */
   embed_model_changed: boolean
+  /** The run's own topics before any reduction. */
+  leaf_count?: number
   coverage: TopicsCoverage
   topics: TopicSummary[]
 }
