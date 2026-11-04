@@ -63,7 +63,9 @@ describe('reports api', () => {
     await listUnassignedReports()
     const call = lastCall()
     expect(String(call[0])).toMatch(/\/reports\/unassigned$/)
-    expect(call[1]).toBeUndefined()
+    // A GET: no method, no body — only the headers every request carries.
+    expect(call[1]?.method).toBeUndefined()
+    expect(call[1]?.body).toBeUndefined()
   })
 
   it('assignReport POSTs the collection to move the report into', async () => {
@@ -79,7 +81,9 @@ describe('reports api', () => {
     await getReport('docs', 4)
     const call = lastCall()
     expect(String(call[0])).toContain('/reports/4?collection=docs')
-    expect(call[1]).toBeUndefined()
+    // A GET: no method, no body — only the headers every request carries.
+    expect(call[1]?.method).toBeUndefined()
+    expect(call[1]?.body).toBeUndefined()
   })
 
   it('escapes the collection, so its name cannot spill into the query', async () => {
@@ -199,7 +203,9 @@ describe('report PDF job api', () => {
     await expect(reportPdfStatus('docs', 7)).resolves.toEqual({ job: null, pdf: null })
     const call = lastCall()
     expect(String(call[0])).toContain('/reports/7/pdf/status?collection=docs')
-    expect(call[1]).toBeUndefined()
+    // A GET: no method, no body — only the headers every request carries.
+    expect(call[1]?.method).toBeUndefined()
+    expect(call[1]?.body).toBeUndefined()
   })
 
   it('links the stored PDF', () => {
