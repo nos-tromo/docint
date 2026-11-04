@@ -1601,6 +1601,35 @@ def test_discover_never_fits_topics_finer_than_the_build(client: QdrantClient, r
     assert params.min_topic_size == 4
 
 
+def test_a_build_asked_for_a_topic_size_fits_with_it_over_the_configured_and_automatic_one(
+    client: QdrantClient, root: Path
+) -> None:
+    """A size given with the job beats TOPICS_MIN_TOPIC_SIZE and the automatic size, and is recorded.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60)
+    fit = FakeFit(BLOBS)
+    svc = _service(client, root, fit, cfg=_cfg(min_topic_size=3))
+    svc.run(
+        "build",
+        COLL,
+        logical="coll",
+        owner_created_at=lambda: CREATED,
+        progress=Frames().progress,
+        warn=Frames().warn,
+        min_topic_size=7,
+    )
+    assert fit.requests[0][2].min_topic_size == 7
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and run.record["params"]["min_topic_size"] == 7
+    # Without one, the configured size applies again.
+    _run(_service(client, root, fit, cfg=_cfg(min_topic_size=3)), "build")
+    assert fit.requests[1][2].min_topic_size == 3
+
+
 def _strand_a_discover(
     client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, cfg: TopicsConfig, written: list[str]
 ) -> tuple[str, list[str]]:

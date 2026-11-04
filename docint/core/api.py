@@ -1783,9 +1783,36 @@ class TopicsIn(BaseModel):
         action (Literal["build", "discover", "align"]): ``build`` fits a new run,
             ``discover`` looks for new topics among the unassigned chunks, and
             ``align`` places chunks the run has not placed yet.
+        min_topic_size (int | None): For ``build`` only: the smallest topic the
+            fit may form, in place of ``TOPICS_MIN_TOPIC_SIZE``; ``None`` keeps
+            the configured or automatic size.
     """
 
     action: Literal["build", "discover", "align"] = "build"
+    min_topic_size: int | None = Field(default=None, ge=2, le=10_000)
+
+    @model_validator(mode="after")
+    def _options_fit_the_action(self) -> "TopicsIn":
+        """Refuse a setting the action does not take.
+
+        Returns:
+            TopicsIn: The validated model.
+
+        Raises:
+            ValueError: When ``min_topic_size`` comes with another action than ``build``.
+        """
+        if self.min_topic_size is not None and self.action != "build":
+            raise ValueError("min_topic_size applies to build only")
+        return self
+
+    def options(self) -> dict[str, Any] | None:
+        """Return the settings the topics service's run takes as keywords.
+
+        Returns:
+            dict[str, Any] | None: The settings given, ``None`` when there are none.
+        """
+        given = {"min_topic_size": self.min_topic_size}
+        return {key: value for key, value in given.items() if value is not None} or None
 
 
 class IngestDefaultsOut(BaseModel):
@@ -6764,6 +6791,24 @@ _TOPICS_ENDPOINT_MESSAGES: dict[str, str] = {
 }
 
 
+def _topics_job_criteria(options: Mapping[str, Any]) -> dict[str, object]:
+    """Name a topics job's settings for its audit record: numbers and ids only.
+
+    Args:
+        options (Mapping[str, Any]): The job's settings.
+
+    Returns:
+        dict[str, object]: The settings given, a reduction's groups as their count.
+    """
+    criteria: dict[str, object] = {}
+    for key in ("run_id", "min_topic_size", "threshold"):
+        if key in options:
+            criteria[key] = options[key]
+    if "groups" in options:
+        criteria["groups"] = len(options["groups"])
+    return criteria
+
+
 def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """Execute one topics job: build, discover or align.
 
@@ -6805,7 +6850,8 @@ def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         push("warning", {"message": message, "code": code})
 
     action = state.action or "build"
-    op = _job_operation(state, "modify", f"topics.{action}")
+    options = state.topics_options or {}
+    op = _job_operation(state, "modify", f"topics.{action}", criteria=_topics_job_criteria(options))
     try:
         with audit.metered(op, on_error=_job_error_criteria) as meter:
             outcome = rag.topics_service().run(
@@ -6815,6 +6861,7 @@ def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
                 owner_created_at=lambda: rag.collection_created_at(state.physical),
                 progress=_progress,
                 warn=_warn,
+                **options,
             )
     except TopicsRefused as exc:
         # A sample too small to fit says how many chunks it held and needs.
@@ -7525,6 +7572,7 @@ async def create_topics(
         physical=physical,
         kind="topics",
         action=action,
+        topics_options=payload.options() if payload is not None else None,
         audit=op.context,
     )
     if not created:
