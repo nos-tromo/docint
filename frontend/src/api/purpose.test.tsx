@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { PurposeBar, clearAllPurposes, setPurpose } from '@infra/ui'
 import { ApiError, PURPOSE_SCOPE, apiDelete, apiGet, apiPatch, apiPost, apiPut, setOwnerParam } from './client'
 import { streamSse, type SseEvent } from './sse'
-import { streamUpload } from './upload'
+import { UPLOAD_STALL_MS, streamUpload } from './upload'
 import { FakeXhr, installFakeXhr } from '@/test/fakeXhr'
 
 const HEADER = 'X-Audit-Purpose'
@@ -48,6 +48,7 @@ async function drain(gen: AsyncGenerator<SseEvent, void, unknown>): Promise<SseE
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   clearAllPurposes()
   sessionStorage.clear()
   setOwnerParam(null)
@@ -238,4 +239,28 @@ describe('a 428 for want of a purpose', () => {
     expect(resent.body).toBe(body)
     expect(resent.url).toBe(refused.url)
   })
+
+  it('counts the upload stall timeout per attempt, not across the time spent in the dialog', async () => {
+    // Fake time that still moves on its own, so the dialog's own waits resolve.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    installFakeXhr()
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    render(<PurposeBar scope={PURPOSE_SCOPE} />)
+
+    const events = drain(streamUpload('/ingest/upload', new FormData()))
+    FakeXhr.instances[0].finish(428)
+    const reason = await screen.findByLabelText('Reason')
+    // The user takes longer to answer than one attempt may stall.
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_MS + 1_000)
+    await user.type(reason, 'Review{Enter}')
+    await waitFor(() => expect(FakeXhr.instances).toHaveLength(2))
+    const resent = FakeXhr.instances[1]
+
+    // The resend has a budget of its own: nothing it inherits has run out.
+    expect(resent.aborted).toBe(false)
+    resent.receive('event: upload_complete\ndata: {"files_saved":1}\n\n')
+    resent.finish()
+    expect(await events).toEqual([{ event: 'upload_complete', data: { files_saved: 1 } }])
+  })
 })
+

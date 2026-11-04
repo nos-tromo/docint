@@ -23,7 +23,7 @@ export const de: Strings = {
   'purpose.title': 'Zweck',
   'purpose.description':
     'Wird mit jeder Ihrer Anfragen in dieser App gesendet, bis Sie ihn ändern oder entfernen oder die Sitzung endet.',
-  'purpose.requested': 'Für diese Aktion ist ein Zweck erforderlich.',
+  'purpose.requested': 'Für diese Aktion muss ein Zweck angegeben werden.',
   'purpose.case_ref': 'Aktenzeichen',
   'purpose.reason': 'Begründung',
   'purpose.save': 'Speichern',
@@ -31,9 +31,9 @@ export const de: Strings = {
   'purpose.clear': 'Entfernen',
   // `{max}` setzt die Zweckleiste selbst ein.
   'purpose.error_length': 'Höchstens {max} Zeichen.',
-  'purpose.error_control': 'Entfernen Sie Zeilenumbrüche, Tabulatoren und andere Steuerzeichen.',
-  'purpose.error_header': 'Zusammen zu lang zum Senden. Kürzen Sie eines der Felder.',
-  'purpose.error_empty': 'Geben Sie ein Aktenzeichen oder eine Begründung an.',
+  'purpose.error_control': 'Bitte entfernen Sie Zeilenumbrüche, Tabulatoren und andere Steuerzeichen.',
+  'purpose.error_header': 'Zusammen zu lang zum Senden. Bitte kürzen Sie eines der Felder.',
+  'purpose.error_empty': 'Bitte geben Sie ein Aktenzeichen oder eine Begründung an.',
 
   // common
   'common.copied': 'Kopiert',
@@ -131,7 +131,7 @@ export const de: Strings = {
   'common.error_network':
     'Dienst nicht erreichbar – Bitte prüfen Sie Ihre Verbindung oder versuchen Sie es später erneut.',
   'common.error_purpose_required':
-    'Zuerst ist ein Zweck anzugeben. Legen Sie ihn in der Kopfzeile fest und versuchen Sie es erneut.',
+    'Für diese Aktion muss ein Zweck angegeben werden – Bitte geben Sie ihn oben in der Kopfzeile an und versuchen Sie es erneut.',
   'common.download_failed': 'Der Download ist fehlgeschlagen. Versuchen Sie es erneut.',
 
   // chat

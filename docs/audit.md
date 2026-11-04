@@ -277,8 +277,12 @@ cannot be saved.
 - **A 428 asks.** The refused request opens the bar's dialog ("This action
   needs a stated purpose") and is sent once more with the purpose saved there
   — to the same URL, owner included, with the same body. Cancelled, the
-  refusal is the request's error ("A purpose must be stated first"), and the
-  queries it left refused are fetched again as soon as a purpose is stated.
+  refusal is the request's error ("This action needs a stated purpose. Please
+  state one in the header and try again."), and the queries it left refused
+  are fetched again as soon as a purpose is stated; a refused change or
+  download stays refused until it is tried again. Every attempt gets its own
+  timeout (the upload's stall watchdog), none counts the time spent in the
+  dialog.
 - **No browser-made requests to audited routes.** An `<a href>`, `<img src>`,
   `<iframe src>`, `window.open` or `EventSource` request cannot carry a
   header. Downloads, previews and thumbnails are therefore fetched through

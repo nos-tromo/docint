@@ -254,7 +254,9 @@ describe('Sidebar collection selection', () => {
 
     renderSidebar()
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('A purpose must be stated first.')
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This action needs a stated purpose. Please state one in the header and try again.'
+    )
   })
 
   it("lists the active collection's sessions and scopes the request", async () => {
