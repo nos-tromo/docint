@@ -94,6 +94,7 @@ from docint.core.retention import (
     run_retention_loop,
     sweep_once,
 )
+from docint.core.retention_sources import extract_expiry
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.retrieval_filters import (
     build_metadata_filters,
@@ -6755,6 +6756,9 @@ def _run_extract_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
                 "pdf_skipped": bundle.pdf_skipped,
                 "reference_number": state.reference_number,
                 "operator": state.operator,
+                "expires_at": extract_expiry(
+                    rag, state.physical, now=now, retention_days=cfg.retention_days
+                ).isoformat(),
             },
             now=now,
         )

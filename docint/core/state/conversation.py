@@ -35,6 +35,9 @@ class Conversation(Base):
     # session with; NULL for none. Stored on the conversation so the topic
     # belongs to this chat alone and survives a reload, the way the scope does.
     topic_focus: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When the session is deleted: the earliest deadline of the documents its
+    # answers drew on (docs/retention.md). Only ever lowered.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     turns: Mapped[list["Turn"]] = relationship(
         argument="Turn",
         back_populates="conversation",

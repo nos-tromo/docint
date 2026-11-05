@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import ColumnElement, or_
 from sqlalchemy.orm import Session
 
+from loguru import logger
+
+from docint.core.retention import inherit
+from docint.core.retention_sources import report_item_expiry
 from docint.core.state.base import _make_session_maker
 from docint.core.state.report import Report
 from docint.core.state.report_item import ReportItem
@@ -440,6 +444,8 @@ class ReportManager:
             report.collection_overview_snapshot = cast(
                 Any, json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
             )
+            if snapshot is not None:
+                self._lower_report_expiry(report, "collection_overview", snapshot)
             return self._commit_returning(s, report)
 
     def delete_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> bool:
@@ -539,6 +545,7 @@ class ReportManager:
                 note=note,
                 position=position,
             )
+            self._lower_report_expiry(report, artifact_type, snapshot)
             report.updated_at = cast(Any, datetime.now(UTC))
             return self._commit_returning(s, item)
 
@@ -614,6 +621,7 @@ class ReportManager:
                     note=entry.get("note"),
                     position=position,
                 )
+                self._lower_report_expiry(report, str(entry["artifact_type"]), entry.get("snapshot") or {})
                 position += 1
                 added += 1
             updated = self._backfill_translations(s, report_id, backfill) if backfill else 0
@@ -663,6 +671,34 @@ class ReportManager:
                 item.snapshot = cast(Any, json.dumps(snapshot, ensure_ascii=False))
                 updated += 1
         return updated
+
+    def _lower_report_expiry(self, report: Report, artifact_type: str, snapshot: dict[str, Any]) -> None:
+        """Lower a report's deadline to the earliest of the documents an item draws on.
+
+        Best-effort: a failure leaves the deadline as it was and is logged.
+
+        Args:
+            report (Report): The report, inside the open transaction.
+            artifact_type (str): The item's kind (``collection_overview`` for
+                the overview snapshot, which is collection-wide).
+            snapshot (dict[str, Any]): The item's frozen content.
+        """
+        try:
+            logical = report.collection_name
+            if not logical:
+                return
+            physical = self.rag.ensure_collection_owner_manager().resolve(report.owner, logical) or logical
+            inherited = report_item_expiry(self.rag, str(physical), artifact_type, snapshot, now=datetime.now(UTC))
+            if not isinstance(inherited, datetime):
+                return
+            current = report.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, inherited)
+            if lowered != current:
+                report.expires_at = lowered
+        except Exception as exc:
+            logger.warning("Report deadline not updated: {}", exc)
 
     @staticmethod
     def _stage_item(

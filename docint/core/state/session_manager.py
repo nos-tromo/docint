@@ -40,6 +40,8 @@ from docint.agents.turn.history import (
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
+from docint.core.retention import inherit
+from docint.core.retention_sources import source_expiry
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
@@ -1797,6 +1799,7 @@ class SessionManager:
                 s.add(t)
             s.flush()
 
+            cited: set[str] = set()
             for src_node in getattr(resp, "source_nodes", []) or []:
                 node = getattr(src_node, "node", None)
                 meta_node = getattr(node, "metadata", {}) or {}
@@ -1810,6 +1813,8 @@ class SessionManager:
                 )
                 filetype = meta_node.get("mimetype") or meta_node.get("filetype") or meta_node.get("content_type") or ""
                 file_hash = source_file_hash(meta_node) or None
+                if file_hash:
+                    cited.add(str(file_hash))
                 source_kind = meta_node.get("source", "")
                 page = meta_node.get("page_label") or meta_node.get("page") or None
                 table_meta = meta_node.get("table") or {}
@@ -1839,8 +1844,40 @@ class SessionManager:
                     )
                 )
 
+            self._lower_session_expiry(conv, cited)
             s.commit()
             return next_idx
+
+    def _lower_session_expiry(self, conv: Conversation, cited: set[str]) -> None:
+        """Lower a session's deadline to the earliest of the documents this turn drew on.
+
+        A turn that names no source, or a session with a scope or a topic
+        focus, may have drawn on anything in the collection, so the
+        collection's oldest live document counts. Never raises the deadline.
+        Best-effort: a failure leaves the deadline as it was and is logged.
+
+        Args:
+            conv (Conversation): The session, inside the open transaction.
+            cited (set[str]): The file hashes this turn's citations name.
+        """
+        try:
+            collection_wide = not cited or bool(conv.scope_chunk_ids) or bool(conv.topic_focus)
+            physical = conv.collection_name or self.rag.qdrant_collection
+            if not isinstance(physical, str):
+                return
+            inherited = source_expiry(
+                self.rag, physical, set() if collection_wide else cited, now=datetime.now(UTC)
+            )
+            if not isinstance(inherited, datetime):
+                return
+            current = conv.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, inherited)
+            if lowered != current:
+                conv.expires_at = lowered
+        except Exception as exc:
+            logger.warning("Session deadline not updated: {}", exc)
 
     def update_turn_validation(
         self,

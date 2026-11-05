@@ -266,6 +266,8 @@ class TopicsDeps:
         stop_words: Words kept out of keywords.
         stop_words_sha256: Their digest, recorded with each run.
         on_written: Called with the collection once per job that wrote assignments, failed or not.
+        expiry: The deadline a run built now inherits (ISO text, ``None`` while
+            retention is off), written into its ``run.json``.
         now: The clock.
         sleep: The sleep used between polls and busy retries.
     """
@@ -279,6 +281,7 @@ class TopicsDeps:
     stop_words: tuple[str, ...]
     stop_words_sha256: str
     on_written: Callable[[str], None] = _noop
+    expiry: Callable[[str], str | None] = lambda physical: None
     now: Callable[[], datetime] = _utcnow
     sleep: Callable[[float], None] = time.sleep
 
@@ -834,6 +837,7 @@ class TopicsService:
             "created_at": at,
             "updated_at": at,
             "fits": [self._fit_entry("build", fitted)],
+            "expires_at": deps.expiry(physical),
         }
         run = TopicRun(run_id, record, table)
         try:

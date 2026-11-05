@@ -239,6 +239,7 @@ from docint.core.search.index import (
     write_search_text,
 )
 from docint.core.retention import RetentionPeriodState
+from docint.core.retention_sources import collection_expiry_iso
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.document_retention_manager import DocumentRetentionManager, PayloadDocument
 from docint.core.state.report_manager import ReportManager
@@ -11488,6 +11489,7 @@ class RAG:
                 stop_words=stop_words,
                 stop_words_sha256=stop_words_digest(stop_words),
                 on_written=self.forget_documents,
+                expiry=lambda physical: collection_expiry_iso(self, physical, now=datetime.now(UTC)),
             )
         )
 
