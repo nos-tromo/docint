@@ -15,10 +15,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from loguru import logger
 from sqlalchemy import ColumnElement, or_
 from sqlalchemy.orm import Session
-
-from loguru import logger
 
 from docint.core.retention import inherit
 from docint.core.retention_sources import report_item_expiry
@@ -447,6 +446,52 @@ class ReportManager:
             if snapshot is not None:
                 self._lower_report_expiry(report, "collection_overview", snapshot)
             return self._commit_returning(s, report)
+
+    def due_reports(self, now: datetime) -> list[tuple[int, str | None, str | None]]:
+        """List reports whose inherited deadline has been reached.
+
+        Args:
+            now (datetime): The current time.
+
+        Returns:
+            list[tuple[int, str | None, str | None]]: ``(id, owner, logical collection)``.
+        """
+        with self._session_scope() as s:
+            rows = (
+                s.query(Report.id, Report.owner, Report.collection_name)
+                .filter(Report.expires_at.is_not(None), Report.expires_at <= now.replace(tzinfo=None))
+                .all()
+            )
+            return [(int(row[0]), row[1], row[2]) for row in rows]
+
+    def reports_without_deadline(self) -> list[tuple[int, str | None, str | None]]:
+        """List reports no deadline was stamped on yet (they predate retention).
+
+        Returns:
+            list[tuple[int, str | None, str | None]]: ``(id, owner, logical collection)``.
+        """
+        with self._session_scope() as s:
+            rows = s.query(Report.id, Report.owner, Report.collection_name).filter(Report.expires_at.is_(None)).all()
+            return [(int(row[0]), row[1], row[2]) for row in rows]
+
+    def set_report_expiry(self, report_id: int, expires_at: datetime) -> None:
+        """Stamp a report's deadline (lowering only).
+
+        Args:
+            report_id (int): The report.
+            expires_at (datetime): The deadline.
+        """
+        with self._write_scope() as s:
+            report = s.get(Report, report_id)
+            if report is None:
+                return
+            current = report.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, expires_at)
+            if lowered != current:
+                report.expires_at = lowered
+                s.commit()
 
     def delete_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> bool:
         """Delete a report (and its items) the caller owns.

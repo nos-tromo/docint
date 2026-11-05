@@ -53,7 +53,9 @@ def rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RAG:
 
 
 def _node(file_hash: str, **extra: Any) -> TextNode:
-    return TextNode(text="zz synthetic text", metadata={"file_hash": file_hash, "file_name": f"{file_hash}.pdf", **extra})
+    return TextNode(
+        text="zz synthetic text", metadata={"file_hash": file_hash, "file_name": f"{file_hash}.pdf", **extra}
+    )
 
 
 def test_persist_stamps_the_ingest_time_and_hides_it(rag: RAG) -> None:
@@ -120,8 +122,14 @@ def test_payload_documents_groups_points_by_document(rag: RAG) -> None:
     client.upsert(
         "phys",
         points=[
-            models.PointStruct(id=1, vector=[1, 0], payload={"file_hash": "a", "file_name": "a.pdf", RETENTION_STAMP_KEY: stamp}),
-            models.PointStruct(id=2, vector=[0, 1], payload={"file_hash": "a", "media_file_hash": "a-clip", RETENTION_STAMP_KEY: stamp + 5}),
+            models.PointStruct(
+                id=1, vector=[1, 0], payload={"file_hash": "a", "file_name": "a.pdf", RETENTION_STAMP_KEY: stamp}
+            ),
+            models.PointStruct(
+                id=2,
+                vector=[0, 1],
+                payload={"file_hash": "a", "media_file_hash": "a-clip", RETENTION_STAMP_KEY: stamp + 5},
+            ),
             models.PointStruct(id=3, vector=[1, 1], payload={"file_hash": "b", "filename": "b.txt"}),
         ],
     )

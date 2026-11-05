@@ -103,7 +103,10 @@ def test_pdf_document_goes_with_points_nodes_file_manifest_and_artifacts(rag: RA
     rag.qdrant_client.upsert("c1", [_point(1, file_hash="h1", file_path=a), _point(2, file_hash="h2", file_path=b)])
     rag.qdrant_client.upsert("c1_dockv", [_point(1, file_hash="h1"), _point(2, file_hash="h2")])
     _docstore(rag).add_documents(
-        [TextNode(id_="n1", text="x", metadata={"file_hash": "h1"}), TextNode(id_="n2", text="y", metadata={"file_hash": "h2"})]
+        [
+            TextNode(id_="n1", text="x", metadata={"file_hash": "h1"}),
+            TextNode(id_="n2", text="y", metadata={"file_hash": "h2"}),
+        ]
     )
     _manifest(rag, "h1", "h2")
     _artifacts(rag, "h1", source=a)
@@ -118,7 +121,13 @@ def test_pdf_document_goes_with_points_nodes_file_manifest_and_artifacts(rag: RA
     assert IngestManifest(rag._ingest_manifest_path("c1")).completed_files("c1") == {"h2"}
     assert not (rag.path_config.artifacts / "h1").exists() and (rag.path_config.artifacts / "h2").exists()
     assert [r.file_hash for r in rag.ensure_document_retention_manager().rows_for("c1")] == ["h2"]
-    assert (result.points, result.nodes, result.source_files, result.artifacts, result.collection_empty) == (1, 1, 1, 1, False)
+    assert (result.points, result.nodes, result.source_files, result.artifacts, result.collection_empty) == (
+        1,
+        1,
+        1,
+        1,
+        False,
+    )
 
 
 def test_video_with_transcript_and_keyframes_goes_whole(rag: RAG) -> None:
@@ -151,12 +160,16 @@ def test_shared_image_keeps_the_other_documents_occurrence(rag: RAG) -> None:
                 image_id="img",
                 source_doc_id="h1",
                 source_path="/x/a.pdf",
-                occurrences=[{"source_doc_id": "h1", "source_path": "/x/a.pdf"}, {"source_doc_id": "h2", "source_path": "/x/b.pdf"}],
+                occurrences=[
+                    {"source_doc_id": "h1", "source_path": "/x/a.pdf"},
+                    {"source_doc_id": "h2", "source_path": "/x/b.pdf"},
+                ],
             )
         ],
     )
     result = rag.delete_documents("c1", [_row(rag, "h1", ["h1"])])
     (point,) = rag.qdrant_client.retrieve("c1_images", ids=[10], with_payload=True)
+    assert point.payload is not None
     assert point.payload["occurrences"] == [{"source_doc_id": "h2", "source_path": "/x/b.pdf"}]
     assert (point.payload["source_doc_id"], point.payload["source_path"]) == ("h2", "/x/b.pdf")
     assert (result.image_points, result.image_occurrences) == (0, 1)

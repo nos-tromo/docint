@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, M
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -86,15 +86,14 @@ from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preproce
 from docint.core.jobs import IngestJobManager, IngestJobState, JobCancelled, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retention import (
-    RetentionClock,
+    RetentionPeriodState,
     SweepReport,
     expires_at,
-    is_expired,
+    is_due,
     is_warning,
     run_retention_loop,
-    sweep_once,
 )
-from docint.core.retention_sources import extract_expiry
+from docint.core.retention_sources import extract_expiry, source_expiry
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.retrieval_filters import (
     build_metadata_filters,
@@ -104,22 +103,23 @@ from docint.core.retrieval_filters import (
 from docint.core.search.fields import SEARCH_FIELDS, UnknownSearchFieldError, field_indexes_ready
 from docint.core.search.fulltext import KeywordTooShortError, parse_keywords
 from docint.core.search.index import search_index_status
-from docint.core.state.collection_owner_manager import RetentionWindowState, validate_collection_name
+from docint.core.state.collection_owner_manager import validate_collection_name
 from docint.core.state.pdf_progress import ProgressCallback
 from docint.core.state.report_pdf_store import ReportPdfStore
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
-from docint.core.topics.store import RUN_ID_PATTERN
+from docint.core.topics.store import RUN_ID_PATTERN, TopicStore
 from docint.utils.audit_event import AiCall, Target, sha256_text
 from docint.utils.audit_meter import TransferMeter, metering, staged_meter, take_staged
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
+    DocumentRetentionConfig,
     PrincipalConfig,
-    RetentionConfig,
     load_audit_env,
     load_corrective_retry_env,
+    load_document_retention_env,
     load_extract_env,
     load_frontend_env,
     load_hate_speech_env,
@@ -131,7 +131,6 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_resolution_env,
     load_response_validation_env,
-    load_document_retention_env,
     load_retention_env,
     load_summary_env,
     load_topics_env,
@@ -216,12 +215,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     auditor = _start_audit(principal_cfg)
     audit.install(auditor)
     try:
-        retention = load_retention_env()
+        retention = load_document_retention_env()
         await to_thread.run_sync(_init_session_store)
         await to_thread.run_sync(rag.probe_qdrant)
         await to_thread.run_sync(rag.probe_rerank_endpoint)
         await to_thread.run_sync(rag.reconcile_quantization)
-        state = await to_thread.run_sync(partial(_record_retention_window, retention))
+        state = await to_thread.run_sync(partial(_record_retention_period, retention))
         application.state.retention_task = _start_retention_sweeper(retention, state)
         yield
         await _stop_retention_sweeper(application.state.retention_task)
@@ -257,48 +256,64 @@ def _start_audit(principal_cfg: PrincipalConfig) -> audit.Auditor:
 #: Seconds from startup to the first retention sweep, and between sweeps.
 _RETENTION_FIRST_SWEEP_S = 300.0
 _RETENTION_SWEEP_INTERVAL_S = 86_400.0
+#: Due documents read per sweep, at most; the rest wait for the next one.
+_RETENTION_SWEEP_LIMIT = 5_000
 
 
-def _record_retention_window(retention: RetentionConfig) -> RetentionWindowState | None:
-    """Record the retention window in force and log it once per startup.
+def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPeriodState | None:
+    """Record the document retention period in force, set every deadline under it, and say so once.
 
-    A window that differs from the last startup's — switched on, off, or to
-    another length — restarts the grace period (``docs/retention.md``). The
-    log line is written either way, so a typo that left retention off is
-    visible in one grep.
+    A period that is new on this host, or changed, takes effect now and
+    deletes nothing for the notice period (``docs/retention.md``). The chain
+    states the period, the notice and when it took effect
+    (``admin`` / ``retention.config``).
 
     Args:
-        retention (RetentionConfig): The window resolved from the environment.
+        retention (DocumentRetentionConfig): The period resolved from the environment.
 
     Returns:
-        RetentionWindowState | None: The recorded window, or ``None`` when it
-            could not be recorded — which keeps the sweeper from starting.
+        RetentionPeriodState | None: The recorded period, or ``None`` when it
+            could not be recorded, which keeps the sweeper from starting.
     """
-    state: RetentionWindowState | None = None
+    if os.getenv("COLLECTION_RETENTION", "").strip():
+        logger.warning("COLLECTION_RETENTION is no longer read; documents follow DOCUMENT_RETENTION_DAYS.")
     try:
-        state = rag.ensure_collection_owner_manager().record_retention_window(retention.window, now=datetime.now(UTC))
+        state = rag.ensure_collection_owner_manager().record_retention_period(retention.days, now=datetime.now(UTC))
+        rag.ensure_document_retention_manager().recompute(state, notice_days=retention.notice_days)
     except Exception as exc:
-        logger.error("Could not record the collection retention window: {}", exc)
+        logger.error("Could not record the document retention period: {}", exc)
+        return None
+    audit.current().emit(
+        "admin",
+        "retention.config",
+        audit.SYSTEM_ACTOR,
+        criteria={
+            "period_days": retention.days,
+            "notice_days": retention.notice_days,
+            "since": state.set_at.isoformat(),
+        },
+    )
     logger.info(
-        "Collection retention | window={} set_at={}",
-        retention.window,
-        state.set_at.isoformat() if state is not None else "unknown",
+        "Document retention | period={} notice={}d since={}",
+        "off" if retention.days is None else f"{retention.days}d",
+        retention.notice_days,
+        state.set_at.isoformat(),
     )
     return state
 
 
 def _start_retention_sweeper(
-    retention: RetentionConfig, state: RetentionWindowState | None
+    retention: DocumentRetentionConfig, state: RetentionPeriodState | None
 ) -> asyncio.Task[None] | None:
     """Schedule the daily retention sweep, or nothing while retention is off.
 
-    Without a recorded window there is no grace anchor, and deleting without
+    Without a recorded period there is no grace anchor, and deleting without
     one could skip the notice period, so the sweeper stays off until a
     startup manages to record it.
 
     Args:
-        retention (RetentionConfig): The window resolved from the environment.
-        state (RetentionWindowState | None): The recorded window.
+        retention (DocumentRetentionConfig): The period resolved from the environment.
+        state (RetentionPeriodState | None): The recorded period.
 
     Returns:
         asyncio.Task[None] | None: The running sweeper.
@@ -306,7 +321,7 @@ def _start_retention_sweeper(
     if not retention.enabled:
         return None
     if state is None:
-        logger.error("Collection retention is on but its window could not be recorded; nothing is deleted.")
+        logger.error("Document retention is on but its period could not be recorded; nothing is deleted.")
         return None
     sweep = partial(_retention_sweep, retention, state, job_manager)
     return asyncio.create_task(
@@ -328,92 +343,329 @@ async def _stop_retention_sweeper(task: asyncio.Task[None] | None) -> None:
 
 
 async def _retention_sweep(
-    retention: RetentionConfig, state: RetentionWindowState, jobs: IngestJobManager
+    retention: DocumentRetentionConfig, state: RetentionPeriodState, jobs: IngestJobManager
 ) -> SweepReport:
     """Run one retention sweep and log its summary line.
 
-    Blocking work runs in worker threads. ``anyio`` waits for a thread it
-    started even when the sweep is cancelled, so a shutdown never leaves a
-    cascade half-done.
+    In order: repair the document index from Qdrant (restored or unindexed
+    documents get rows, never a fresh clock); stamp deadlines on sessions and
+    reports that predate retention; delete due documents per collection (a
+    collection left empty goes with the existing cascade); then due sessions,
+    reports, extracts and topic runs. Every deletion is recorded first. A
+    failure leaves that item for the next sweep; the others continue.
+    Blocking work runs in worker threads, which ``anyio`` lets finish when the
+    sweep is cancelled.
 
     Args:
-        retention (RetentionConfig): The window in force.
-        state (RetentionWindowState): When it was set; anchors the grace period.
+        retention (DocumentRetentionConfig): The period in force.
+        state (RetentionPeriodState): When it took effect; anchors the grace period.
         jobs (IngestJobManager): The job registry, for the busy check.
 
     Returns:
         SweepReport: What the sweep did.
     """
     now = datetime.now(UTC)
-    rows = await to_thread.run_sync(lambda: rag.ensure_collection_owner_manager().list_all_activity())
-
-    async def is_busy(physical: str) -> bool:
-        running, queued = get_preprocess_pool().inflight(physical)
-        return running + queued > 0 or await jobs.any_active_for(physical)
-
-    async def purge(row: RetentionClock) -> bool:
-        return await to_thread.run_sync(partial(_purge_if_still_expired, row, retention.months, state.set_at, now))
-
-    report = await sweep_once(
-        rows, months=retention.months, window_set_at=state.set_at, now=now, is_busy=is_busy, purge=purge
+    report = SweepReport()
+    try:
+        report.repaired = await to_thread.run_sync(
+            partial(rag.repair_retention_index, state, notice_days=retention.notice_days)
+        )
+    except Exception as exc:
+        logger.warning("Retention index repair failed ({}); the next sweep retries.", exc)
+    await to_thread.run_sync(partial(_stamp_derived_deadlines, now))
+    due = await to_thread.run_sync(
+        partial(rag.ensure_document_retention_manager().due, now, limit=_RETENTION_SWEEP_LIMIT)
     )
+    for physical in sorted({row.physical for row in due}):
+        running, queued = get_preprocess_pool().inflight(physical)
+        if running + queued > 0 or await jobs.any_active_for(physical):
+            logger.info("Retention postponed collection '{}': a job is still working on it.", physical)
+            report.skipped_busy.append(physical)
+            continue
+        try:
+            deleted, gone = await to_thread.run_sync(partial(_purge_due_documents, physical, now, retention))
+        except Exception:
+            logger.exception("Retention could not delete documents of '{}'; the next sweep retries.", physical)
+            report.failed.append(physical)
+            continue
+        report.documents += deleted
+        report.collections += int(gone)
+    for kind, sweep in (
+        ("sessions", _purge_due_sessions),
+        ("reports", _purge_due_reports),
+        ("extracts", _purge_due_extracts),
+        ("topic_runs", _purge_due_topic_runs),
+    ):
+        try:
+            setattr(report, kind, await to_thread.run_sync(partial(sweep, now, retention)))
+        except Exception:
+            logger.exception("Retention could not delete due {}; the next sweep retries.", kind)
+            report.failed.append(kind)
     logger.info(
-        "Retention sweep complete | window={} scanned={} expired={} deleted={} skipped_busy={} "
-        "skipped_active={} failed={}",
-        retention.window,
-        report.scanned,
-        report.expired,
-        len(report.deleted),
+        "Retention sweep complete | period={}d documents={} sessions={} reports={} extracts={} topic_runs={} "
+        "collections={} repaired={} skipped_busy={} failed={}",
+        retention.days,
+        report.documents,
+        report.sessions,
+        report.reports,
+        report.extracts,
+        report.topic_runs,
+        report.collections,
+        report.repaired,
         len(report.skipped_busy),
-        len(report.skipped_active),
         len(report.failed),
     )
     return report
 
 
-def _purge_if_still_expired(row: RetentionClock, months: int, window_set_at: datetime, now: datetime) -> bool:
-    """Delete a collection the sweep found expired, unless it was used since.
-
-    Re-reads the clock first: this, not the scan, is the last word, so a
-    collection someone opened after the scan — in this process or another —
-    is spared. Runs in a worker thread.
+def _stamp_derived_deadlines(now: datetime) -> None:
+    """Stamp deadlines on sessions and reports that predate retention (best-effort).
 
     Args:
-        row (RetentionClock): The collection as the scan read it.
-        months (int): The retention window.
-        window_set_at (datetime): When the window was set.
-        now (datetime): The scan time.
+        now (datetime): The sweep time.
+    """
+    try:
+        sessions = rag.ensure_session_manager()
+        for session_id, physical, cited, wide in sessions.sessions_without_deadline():
+            if not physical:
+                continue
+            deadline = source_expiry(rag, physical, set() if wide else cited, now=now)
+            if deadline is not None:
+                sessions.set_session_expiry(session_id, deadline)
+        reports = rag.ensure_report_manager()
+        owners = rag.ensure_collection_owner_manager()
+        for report_id, owner, logical in reports.reports_without_deadline():
+            if not logical:
+                continue
+            physical = owners.resolve(owner, logical) or logical
+            deadline = source_expiry(rag, str(physical), [], now=now)
+            if deadline is not None:
+                reports.set_report_expiry(report_id, deadline)
+    except Exception as exc:
+        logger.warning("Deadlines of older sessions or reports not stamped ({}); the next sweep retries.", exc)
+
+
+def _purge_due_documents(physical: str, now: datetime, retention: DocumentRetentionConfig) -> tuple[int, bool]:
+    """Delete a collection's due documents, recorded first; delete the collection if nothing is left.
+
+    Runs in a worker thread.
+
+    Args:
+        physical (str): The Qdrant collection.
+        now (datetime): The sweep time.
+        retention (DocumentRetentionConfig): The period in force.
 
     Returns:
-        bool: Whether the collection was deleted.
+        tuple[int, bool]: Documents deleted, and whether the collection went too.
     """
-    current = rag.ensure_collection_owner_manager().get_activity(row.physical)
-    if current is None:
-        return False
-    if not is_expired(expires_at(current.last_activity_at, months, window_set_at=window_set_at), now):
-        return False
-    # The sweep is the system acting on its own; the owner whose data goes is
-    # named in the criteria, since no request carries them.
-    op = Operation(
+    owners = rag.ensure_collection_owner_manager()
+    activity = owners.get_activity(physical)
+    with _purge_guard(physical):
+        rows = [
+            row for row in rag.ensure_document_retention_manager().rows_for(physical) if is_due(row.expires_at, now)
+        ]
+        if not rows:
+            return 0, False
+        owner = activity.owner if activity is not None else rows[0].owner
+        logical = activity.logical if activity is not None else rows[0].logical
+        # The sweep is the system acting on its own; the owner whose data goes
+        # is named in the criteria, since no request carries them.
+        op = Operation(
+            audit.current(),
+            audit.SYSTEM_CONTEXT,
+            "delete",
+            "retention.document",
+            container=logical,
+            criteria={"owner": owner, "period_days": retention.days},
+        )
+        target = document_target([{"file_hash": row.file_hash} for row in rows], container=logical)
+        op.record(target=target)
+        try:
+            result = rag.delete_documents(physical, rows)
+        except Exception:
+            op.child("delete", "retention.document.failed", target=target, outcome="error")
+            raise
+    if not result.collection_empty:
+        if result.entities_dropped:
+            _resolve_after_retention(physical, logical)
+        return len(rows), False
+    collection_op = Operation(
         audit.current(),
         audit.SYSTEM_CONTEXT,
         "delete",
-        "retention.purge",
-        container=current.logical,
-        criteria={
-            "owner": current.owner,
-            "window_months": months,
-            "last_activity_at": current.last_activity_at.isoformat() if current.last_activity_at else None,
-        },
+        "retention.collection",
+        container=logical,
+        criteria={"owner": owner},
     )
-    target = Target(kind="collection", ids=[current.logical], count=1)
+    collection_op.record(target=Target(kind="collection", ids=[logical], count=1))
+    if activity is not None:
+        _purge_collection(activity.owner, activity.logical, physical)
+    else:
+        rag.delete_collection(physical)
+    return len(rows), True
+
+
+def _resolve_after_retention(physical: str, logical: str) -> None:
+    """Resolve a collection's entities again after deleted documents took the ``_entities`` store with them.
+
+    Canonical entities carry no per-document provenance, so the store is
+    rebuilt from what is left. Runs like the resolution after an ingest (and
+    only where that one would), as the system's ``combine``. A failure leaves
+    the collection unresolved until the next resolve; the deletion stands.
+
+    Args:
+        physical (str): The Qdrant collection.
+        logical (str): Its logical name, the event's container.
+    """
+    if not load_resolution_env().auto_resolve:
+        return
+    op = Operation(audit.current(), audit.SYSTEM_CONTEXT, "combine", "entities.resolve", container=logical)
     try:
-        counts = _purge_collection(current.owner, current.logical, current.physical)
-    except Exception:
-        op.fail(target=target)
+        with rag.collection_scope(physical):
+            _run_resolution(op)
+    except audit.AUDIT_FAILURES:
         raise
-    op.record(target=target, criteria=counts)
-    return True
+    except Exception:
+        logger.exception("Entity resolution after retention failed for '{}'; entity views stay unresolved.", physical)
+
+
+def _purge_due_sessions(now: datetime, retention: DocumentRetentionConfig) -> int:
+    """Delete chat sessions past their inherited deadline, each recorded first.
+
+    Args:
+        now (datetime): The sweep time.
+        retention (DocumentRetentionConfig): The period in force.
+
+    Returns:
+        int: Sessions deleted.
+    """
+    sessions = rag.ensure_session_manager()
+    deleted = 0
+    for session_id, owner, _physical in sessions.due_sessions(now):
+        op = Operation(
+            audit.current(),
+            audit.SYSTEM_CONTEXT,
+            "delete",
+            "retention.session",
+            criteria={"owner": owner, "period_days": retention.days},
+        )
+        op.record(target=session_target([{"id": session_id}]))
+        if sessions.delete_session(session_id, owner):
+            deleted += 1
+    return deleted
+
+
+def _purge_due_reports(now: datetime, retention: DocumentRetentionConfig) -> int:
+    """Delete reports past their inherited deadline, with their stored PDFs, each recorded first.
+
+    Args:
+        now (datetime): The sweep time.
+        retention (DocumentRetentionConfig): The period in force.
+
+    Returns:
+        int: Reports deleted.
+    """
+    reports = rag.ensure_report_manager()
+    deleted = 0
+    for report_id, owner, logical in reports.due_reports(now):
+        op = Operation(
+            audit.current(),
+            audit.SYSTEM_CONTEXT,
+            "delete",
+            "retention.report",
+            container=logical,
+            criteria={"owner": owner, "period_days": retention.days},
+        )
+        op.record(target=report_target([{"id": report_id}], container=logical))
+        if reports.delete_report(report_id, owner):
+            _discard_report_pdfs([report_id])
+            deleted += 1
+    return deleted
+
+
+def _parse_deadline(value: object) -> datetime | None:
+    """Read an ISO deadline stored in a sidecar or ``run.json``.
+
+    Args:
+        value (object): The stored value.
+
+    Returns:
+        datetime | None: The aware deadline, ``None`` when absent or unreadable.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _purge_due_extracts(now: datetime, retention: DocumentRetentionConfig) -> int:
+    """Delete stored extracts past their deadline, each recorded first.
+
+    Args:
+        now (datetime): The sweep time.
+        retention (DocumentRetentionConfig): The period in force.
+
+    Returns:
+        int: Extracts deleted.
+    """
+    store = _extract_store()
+    deleted = 0
+    for physical in rag.list_collections():
+        for record in store.list(physical):
+            if not is_due(_parse_deadline(record.get("expires_at")), now):
+                continue
+            extract_id = str(record.get("extract_id") or "")
+            op = Operation(
+                audit.current(),
+                audit.SYSTEM_CONTEXT,
+                "delete",
+                "retention.extract",
+                container=str(record.get("collection") or "") or None,
+                criteria={"period_days": retention.days},
+            )
+            op.record(target=Target(kind="extract", ids=[extract_id], count=1))
+            if store.delete(physical, extract_id):
+                deleted += 1
+    return deleted
+
+
+def _purge_due_topic_runs(now: datetime, retention: DocumentRetentionConfig) -> int:
+    """Delete topic runs past their deadline (``run.json``'s, else its creation plus the period), recorded first.
+
+    Args:
+        now (datetime): The sweep time.
+        retention (DocumentRetentionConfig): The period in force.
+
+    Returns:
+        int: Runs deleted.
+    """
+    store = TopicStore(rag.path_config.topics)
+    deleted = 0
+    for physical in rag.list_collections():
+        for run_id in store.run_ids(physical):
+            run = store.load(physical, run_id)
+            if run is None:
+                continue
+            deadline = _parse_deadline(run.record.get("expires_at"))
+            created = _parse_deadline(run.record.get("created_at"))
+            if deadline is None and created is not None and retention.days is not None:
+                deadline = created + timedelta(days=retention.days)
+            if not is_due(deadline, now):
+                continue
+            op = Operation(
+                audit.current(),
+                audit.SYSTEM_CONTEXT,
+                "delete",
+                "retention.topic_run",
+                criteria={"period_days": retention.days},
+            )
+            op.record(target=Target(kind="topic_run", ids=[run_id], count=1))
+            store.delete_run(physical, run_id)
+            deleted += 1
+    return deleted
 
 
 app = FastAPI(title="Document Intelligence", lifespan=_lifespan)

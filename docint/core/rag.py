@@ -12,15 +12,15 @@ import operator
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import sys
 import threading
-import sqlite3
 import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -188,6 +188,8 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.retention import RetentionPeriodState
+from docint.core.retention_sources import collection_expiry_iso
 from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import (
     BLOB_PAYLOAD_KEYS,
@@ -238,8 +240,6 @@ from docint.core.search.index import (
     search_index_status,
     write_search_text,
 )
-from docint.core.retention import RetentionPeriodState
-from docint.core.retention_sources import collection_expiry_iso
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.document_retention import DocumentRetention
 from docint.core.state.document_retention_manager import DocumentRetentionManager, PayloadDocument
@@ -355,6 +355,8 @@ class DocumentDeletion:
     artifacts: int = 0
     entities_dropped: bool = False
     collection_empty: bool = False
+
+
 #: Source keys that name the physical collection; the topic reads drop them.
 _PHYSICAL_SOURCE_KEYS: tuple[str, ...] = ("preview_url", "document_url", "image_collection")
 
@@ -8726,7 +8728,9 @@ class RAG:
                 if offset is None:
                     break
             if points:
-                client.delete(collection_name=physical, points_selector=qdrant_models.FilterSelector(filter=main_filter))
+                client.delete(
+                    collection_name=physical, points_selector=qdrant_models.FilterSelector(filter=main_filter)
+                )
         dockv = f"{physical}_dockv"
         if client.collection_exists(dockv):
             client.delete(collection_name=dockv, points_selector=qdrant_models.FilterSelector(filter=main_filter))
@@ -8823,7 +8827,7 @@ class RAG:
             for point in found:
                 payload = dict(point.payload or {})
                 occurrences = payload.get("occurrences")
-                listed = occurrences if isinstance(occurrences, list) else []
+                listed: list[Any] = occurrences if isinstance(occurrences, list) else []
                 remaining = [entry for entry in listed if isinstance(entry, dict) and not names_document(entry)]
                 if not remaining:
                     deleted.append(point.id)
@@ -8933,7 +8937,9 @@ class RAG:
                 other_manifest_hashes=manifest_hashes,
                 inflight=inflight_pdf_hashes(),
             )
-            keep |= {name for name, source in recorded.items() if Path(source).is_relative_to(own) and Path(source).exists()}
+            keep |= {
+                name for name, source in recorded.items() if Path(source).is_relative_to(own) and Path(source).exists()
+            }
             return remove_artifacts(root, candidates - keep)
         except Exception as exc:
             logger.warning("Could not remove a document's PDF artifacts: {}", exc)
@@ -9026,7 +9032,15 @@ class RAG:
         """
         found: dict[str, tuple[str, set[str], float | None]] = {}
         offset: Any = None
-        keys = ["file_hash", "media_file_hash", "source_doc_id", "posting_uuid", "file_name", "filename", RETENTION_STAMP_KEY]
+        keys = [
+            "file_hash",
+            "media_file_hash",
+            "source_doc_id",
+            "posting_uuid",
+            "file_name",
+            "filename",
+            RETENTION_STAMP_KEY,
+        ]
         while True:
             points, offset = self.qdrant_client.scroll(
                 collection_name=physical, offset=offset, limit=256, with_vectors=False, with_payload=keys

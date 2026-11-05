@@ -91,7 +91,7 @@ def test_grace_after_switch_on() -> None:
 def test_naive_times_are_refused() -> None:
     """A timestamp without a timezone is a bug, never a guess."""
     with pytest.raises(ValueError):
-        document_expires_at(datetime(2026, 1, 1), 365, set_at=NOW, notice_days=30)  # noqa: DTZ001
+        document_expires_at(datetime(2026, 1, 1), 365, set_at=NOW, notice_days=30)
 
 
 def test_inherit_takes_the_earliest_and_never_raises() -> None:

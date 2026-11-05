@@ -211,6 +211,13 @@ class SweepReport:
     skipped_busy: list[str] = field(default_factory=list)
     skipped_active: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    documents: int = 0
+    collections: int = 0
+    sessions: int = 0
+    reports: int = 0
+    extracts: int = 0
+    topic_runs: int = 0
+    repaired: int = 0
 
 
 async def sweep_once(

@@ -12,8 +12,6 @@ import io
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -983,84 +981,3 @@ def test_the_admin_listing_across_owners_is_an_admin_event(
     assert (event["action"], event["operation"]) == ("admin", "collections.list_all")
     assert event["target"] == {"kind": "collection", "count": 3}
     assert event["criteria"] == {"owners": 2}
-
-
-@dataclass(frozen=True)
-class _Clock:
-    """A collection's retention clock."""
-
-    owner: str | None
-    logical: str
-    physical: str
-    last_activity_at: datetime | None
-
-
-def test_the_retention_sweep_records_a_system_delete(
-    rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An expired collection's purge is the system's erasure, naming the owner it belonged to.
-
-    Args:
-        rag (DummyRAG): The RAG double.
-        audit_stream (io.StringIO): The test's audit stream.
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-    """
-    now = datetime.now(UTC)
-    idle = now - timedelta(days=400)
-    clock = _Clock("alice", "old-docs", "u000000000000__old-docs", idle)
-
-    class _Owners:
-        def get_activity(self, physical: str) -> _Clock:
-            return clock
-
-    monkeypatch.setattr(rag, "ensure_collection_owner_manager", lambda: _Owners())
-    monkeypatch.setattr(
-        api_module, "_purge_collection", lambda owner, logical, physical: {"sessions_deleted": 1, "reports_deleted": 2}
-    )
-
-    assert api_module._purge_if_still_expired(clock, 6, idle, now) is True
-
-    (event,) = _ops(audit_stream)
-    assert (event["action"], event["operation"], event["outcome"]) == ("delete", "retention.purge", "ok")
-    assert event["actor"] == {"user": None, "via": "system"}
-    assert event["target"] == {"kind": "collection", "ids": ["old-docs"], "count": 1, "container": "old-docs"}
-    assert event["criteria"] == {
-        "owner": "alice",
-        "window_months": 6,
-        "last_activity_at": idle.isoformat(),
-        "sessions_deleted": 1,
-        "reports_deleted": 2,
-    }
-    assert "purpose" not in event and "request_id" not in event
-
-
-def test_a_failed_retention_purge_is_recorded_as_failed(
-    rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A purge that raises is an ``error`` delete, and the sweep sees the failure.
-
-    Args:
-        rag (DummyRAG): The RAG double.
-        audit_stream (io.StringIO): The test's audit stream.
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-    """
-    now = datetime.now(UTC)
-    idle = now - timedelta(days=400)
-    clock = _Clock("alice", "old-docs", "u000000000000__old-docs", idle)
-
-    class _Owners:
-        def get_activity(self, physical: str) -> _Clock:
-            return clock
-
-    def _purge(owner: str | None, logical: str, physical: str) -> dict[str, int]:
-        raise RuntimeError("store offline")
-
-    monkeypatch.setattr(rag, "ensure_collection_owner_manager", lambda: _Owners())
-    monkeypatch.setattr(api_module, "_purge_collection", _purge)
-
-    with pytest.raises(RuntimeError):
-        api_module._purge_if_still_expired(clock, 6, idle, now)
-
-    (event,) = _ops(audit_stream)
-    assert (event["operation"], event["outcome"]) == ("retention.purge", "error")
-    assert event["target"]["ids"] == ["old-docs"]

@@ -13,11 +13,10 @@ fall back to ``DOCINT_DEFAULT_IDENTITY`` ("test-operator").
 import io
 import json
 from collections.abc import Generator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-import anyio
 import pytest
 from _pytest.logging import LogCaptureFixture
 from fastapi.testclient import TestClient
@@ -26,13 +25,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import docint.core.api as api_module
-from docint.core.retention import NOTICE_DAYS
 from docint.core.state.base import Base
-from docint.core.state.collection_owner_manager import CollectionOwnerManager, RetentionWindowState
+from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.collection_ownership import CollectionOwnership
+from docint.core.state.document_retention_manager import DocumentRetentionManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.report_pdf_store import ReportPdfStore
-from docint.utils.env_cfg import RetentionConfig
 
 
 class _FakeIngest:
@@ -84,6 +82,8 @@ class _OwnRAG:
         self._com._SessionMaker = sessionmaker(bind=engine)
         self._rm = ReportManager(rag=cast(Any, self))
         self._rm._SessionMaker = sessionmaker(bind=engine)
+        self._drm = DocumentRetentionManager(rag=cast(Any, self))
+        self._drm._SessionMaker = sessionmaker(bind=engine)
         self.existing: set[str] = set()
         self.active: str = ""
         self.deleted: list[str] = []
@@ -116,6 +116,12 @@ class _OwnRAG:
 
     def ensure_report_manager(self) -> ReportManager:
         return self._rm
+
+    def ensure_document_retention_manager(self) -> DocumentRetentionManager:
+        return self._drm
+
+    def repair_retention_index(self, period: Any, *, notice_days: int) -> int:
+        return 0
 
     def select_collection(self, name: str) -> None:
         if name not in self.existing:
@@ -571,30 +577,6 @@ def test_retention_listing_when_retention_is_off(client: TestClient, _patch_rag:
     assert row["warning"] is False
 
 
-def test_retention_listing_dates_and_flags_each_collection(
-    monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG
-) -> None:
-    """A collection idle past the window is due when the grace period ends, and is flagged."""
-    monkeypatch.setenv("COLLECTION_RETENTION", "6m")
-    with TestClient(api_module.app) as client:
-        _ingest(client, "alice", "fresh")
-        _ingest(client, "alice", "stale")
-        _age(_patch_rag, "alice", "stale")
-        state = _patch_rag.ensure_collection_owner_manager().retention_window()
-        assert state is not None and state.window == "6m"
-
-        body = client.get("/collections/retention", headers={"X-Auth-User": "alice"}).json()
-
-    assert body["window"] == "6m"
-    stale, fresh = body["collections"]
-    assert stale["name"] == "stale"
-    assert datetime.fromisoformat(stale["expires_at"]) == state.set_at + timedelta(days=NOTICE_DAYS)
-    assert stale["warning"] is True
-    assert fresh["name"] == "fresh"
-    assert datetime.fromisoformat(fresh["expires_at"]) > datetime.now(UTC) + timedelta(days=150)
-    assert fresh["warning"] is False
-
-
 def test_an_unstamped_collection_never_expires(monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG) -> None:
     """No recorded activity is listed without a deadline, and last."""
     monkeypatch.setenv("COLLECTION_RETENTION", "6m")
@@ -631,25 +613,36 @@ def test_retention_listing_shows_admins_every_owner(client: TestClient) -> None:
     assert sorted((row["name"], row["owner"]) for row in body["collections"]) == [("alpha", "alice"), ("own", None)]
 
 
-def test_startup_records_the_window_in_force(monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG) -> None:
-    """The grace period is anchored on the startup that changed the window."""
-    monkeypatch.setenv("COLLECTION_RETENTION", "12m")
+def test_startup_records_the_period_in_force(monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG) -> None:
+    """The grace period is anchored on the startup that changed the period."""
+    monkeypatch.setenv("DOCUMENT_RETENTION_DAYS", "200")
     with TestClient(api_module.app):
         pass
 
-    state = _patch_rag.ensure_collection_owner_manager().retention_window()
-    assert state is not None and state.window == "12m"
+    state = _patch_rag.ensure_collection_owner_manager().retention_period()
+    assert state is not None and state.days == 200
 
 
-def test_startup_logs_the_window(
+def test_startup_logs_the_period(
     monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG, loguru_caplog_info: LogCaptureFixture
 ) -> None:
     """One greppable line says whether retention is on — a typo that disabled it shows up here."""
-    monkeypatch.setenv("COLLECTION_RETENTION", "18m")
+    monkeypatch.setenv("DOCUMENT_RETENTION_DAYS", "200")
     with TestClient(api_module.app):
         pass
 
-    assert any("Collection retention | window=18m" in str(r.msg) for r in loguru_caplog_info.records)
+    assert any("Document retention | period=200d notice=30d" in str(r.msg) for r in loguru_caplog_info.records)
+
+
+def test_startup_warns_that_the_old_window_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG, loguru_caplog: LogCaptureFixture
+) -> None:
+    """A leftover ``COLLECTION_RETENTION`` is named as no longer read."""
+    monkeypatch.setenv("COLLECTION_RETENTION", "6m")
+    with TestClient(api_module.app):
+        pass
+
+    assert any("COLLECTION_RETENTION is no longer read" in r.getMessage() for r in loguru_caplog.records)
 
 
 def test_startup_refuses_a_short_edge_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -773,80 +766,9 @@ def test_a_collection_being_deleted_refuses_new_work(client: TestClient, _patch_
     )
 
 
-class _IdleJobs:
-    """A job registry with nothing running, or with work on ``busy`` collections."""
-
-    def __init__(self, busy: frozenset[str] = frozenset()) -> None:
-        self.busy = busy
-
-    async def any_active_for(self, physical: str) -> bool:
-        return physical in self.busy
-
-
-def _run_sweep(rag: _OwnRAG, jobs: _IdleJobs, *, set_at: datetime = LONG_AGO) -> Any:
-    """Run one retention sweep under a 6-month window set at ``set_at``."""
-    state = RetentionWindowState(window="6m", set_at=set_at)
-    return anyio.run(api_module._retention_sweep, RetentionConfig(window="6m", months=6), state, cast(Any, jobs))
-
-
-def test_the_sweep_deletes_an_idle_collection_with_everything_connected(
-    client: TestClient, _patch_rag: _OwnRAG
-) -> None:
-    """Qdrant data, chat sessions, reports and the ownership row all go; a recent collection stays."""
-    _ingest(client, "alice", "alt")
-    _ingest(client, "alice", "laufend")
-    physical = _patch_rag.ensure_collection_owner_manager().resolve("alice", "alt")
-    report = _report(_patch_rag, "alice", "alt")
-    _age(_patch_rag, "alice", "alt")
-
-    result = _run_sweep(_patch_rag, _IdleJobs())
-
-    assert result.deleted == ["alt"]
-    assert _patch_rag.deleted == [physical]
-    assert _patch_rag._sessions.deleted_for == [physical]
-    assert _patch_rag.ensure_report_manager().get_report(report, "alice") is None
-    assert _list(client, "alice") == ["laufend"]
-
-
-def test_the_sweep_leaves_a_collection_a_job_is_working_on(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """An ingest still writing would re-create a collection deleted under it."""
-    _ingest(client, "alice", "alt")
-    physical = _patch_rag.ensure_collection_owner_manager().resolve("alice", "alt")
-    assert physical is not None
-    _age(_patch_rag, "alice", "alt")
-
-    result = _run_sweep(_patch_rag, _IdleJobs(busy=frozenset({physical})))
-
-    assert result.skipped_busy == ["alt"]
-    assert _patch_rag.deleted == []
-
-
-def test_the_sweep_rechecks_the_clock_before_deleting(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """A collection used after the scan read its clock is spared."""
-    _ingest(client, "alice", "alt")
-    _age(_patch_rag, "alice", "alt")
-    [stale] = _patch_rag.ensure_collection_owner_manager().list_activity("alice")
-    _patch_rag.ensure_collection_owner_manager().touch("alice", "alt")
-
-    purged = api_module._purge_if_still_expired(stale, 6, LONG_AGO, datetime.now(UTC))
-
-    assert purged is False
-    assert _patch_rag.deleted == []
-
-
-def test_the_sweep_honours_the_grace_period(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """Right after retention is switched on nothing goes, however long it sat idle."""
-    _ingest(client, "alice", "alt")
-    _age(_patch_rag, "alice", "alt")
-
-    result = _run_sweep(_patch_rag, _IdleJobs(), set_at=datetime.now(UTC))
-
-    assert result.deleted == []
-    assert _patch_rag.deleted == []
-
-
-def test_retention_off_starts_no_sweeper(_patch_rag: _OwnRAG) -> None:
+def test_retention_off_starts_no_sweeper(monkeypatch: pytest.MonkeyPatch, _patch_rag: _OwnRAG) -> None:
     """With retention off nothing is ever scheduled."""
+    monkeypatch.setenv("DOCUMENT_RETENTION_DAYS", "off")
     with TestClient(api_module.app):
         assert api_module.app.state.retention_task is None
 
@@ -859,7 +781,7 @@ def test_retention_on_starts_the_sweeper_and_shutdown_stops_it(
     Stopped first so a delete in progress finishes before the workers and the
     registry it checks go away.
     """
-    monkeypatch.setenv("COLLECTION_RETENTION", "6m")
+    monkeypatch.setenv("DOCUMENT_RETENTION_DAYS", "365")
     sweeper_done_at_registry_stop: list[bool] = []
     registry_stop = api_module.job_manager.stop
 

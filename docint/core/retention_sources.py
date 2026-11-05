@@ -66,7 +66,7 @@ def source_expiry(
     values: list[datetime] = []
     if wanted:
         found = manager.expiry_of(physical, wanted)
-        known = found if isinstance(found, Mapping) else {}
+        known: Mapping[str, Any] = found if isinstance(found, Mapping) else {}
         values = [value for value in known.values() if isinstance(value, datetime)]
         if wanted - set(known):
             oldest = _oldest(manager, physical)

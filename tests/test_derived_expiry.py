@@ -45,8 +45,15 @@ def stores() -> Generator[tuple[MagicMock, DocumentRetentionManager, SessionMana
     sessions._SessionMaker = sessionmaker(bind=engine)
     for file_hash, days_ago in (("old", 300), ("mid", 200), ("new", 10)):
         retention.record_ingest(
-            "phys", "docs", "alice", file_hash, f"{file_hash}.pdf", [file_hash], now=NOW - days_ago * DAY,
-            period=PERIOD, notice_days=30,
+            "phys",
+            "docs",
+            "alice",
+            file_hash,
+            f"{file_hash}.pdf",
+            [file_hash],
+            now=NOW - days_ago * DAY,
+            period=PERIOD,
+            notice_days=30,
         )
     yield rag, retention, sessions
     engine.dispose()
@@ -80,13 +87,17 @@ def _turn(sessions: SessionManager, session_id: str, cited: list[str]) -> None:
     sessions._persist_turn(session_id, "q", _response(cited), {"response": "a", "reasoning": None}, owner="alice")
 
 
-def test_source_expiry_takes_the_earliest_cited_document(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_source_expiry_takes_the_earliest_cited_document(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """The earliest deadline among the named documents wins."""
     rag, _, _ = stores
     assert source_expiry(rag, "phys", ["mid", "new"], now=NOW) == NOW - 200 * DAY + 365 * DAY
 
 
-def test_a_source_already_gone_falls_back_to_the_oldest(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_a_source_already_gone_falls_back_to_the_oldest(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """A cited document no longer indexed counts as the collection's oldest one, never as 'never'."""
     rag, _, _ = stores
     assert source_expiry(rag, "phys", ["new", "gone"], now=NOW) == NOW - 300 * DAY + 365 * DAY
@@ -98,7 +109,9 @@ def test_no_sources_take_the_oldest(stores: tuple[MagicMock, DocumentRetentionMa
     assert source_expiry(rag, "phys", [], now=NOW) == NOW - 300 * DAY + 365 * DAY
 
 
-def test_a_collection_without_documents_gets_its_own_period(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_a_collection_without_documents_gets_its_own_period(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """With nothing indexed to inherit from, the item still expires a period after it was made."""
     rag, _, _ = stores
     assert source_expiry(rag, "empty", [], now=NOW, period_days=365) == NOW + 365 * DAY
@@ -111,14 +124,18 @@ def test_turn_inherits_its_cited_documents(stores: tuple[MagicMock, DocumentRete
     assert _expiry(sessions, "s1") == NOW - 200 * DAY + 365 * DAY
 
 
-def test_uncited_turn_takes_the_oldest_document(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_uncited_turn_takes_the_oldest_document(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """An answer without citations may have drawn on anything in the collection."""
     _, _, sessions = stores
     _turn(sessions, "s1", [])
     assert _expiry(sessions, "s1") == NOW - 300 * DAY + 365 * DAY
 
 
-def test_scoped_or_focused_session_takes_the_oldest(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_scoped_or_focused_session_takes_the_oldest(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """A session with a scope or a topic focus counts as collection-wide."""
     _, _, sessions = stores
     _turn(sessions, "s1", ["new"])
@@ -177,25 +194,33 @@ def test_report_item_inherits_its_sources(stores: tuple[MagicMock, DocumentReten
     reports = _reports(rag, sessions)
     report = reports.create_report(title="r", owner="alice", collection_name="docs")
     report_id = int(report["id"])
-    reports.add_item(report_id, "alice", artifact_type="chat_answer", dedupe_key="a:1", snapshot={"sources": [{"file_hash": "new"}]})
+    reports.add_item(
+        report_id, "alice", artifact_type="chat_answer", dedupe_key="a:1", snapshot={"sources": [{"file_hash": "new"}]}
+    )
     assert _report_expiry(reports, report_id) == NOW - 10 * DAY + 365 * DAY
     reports.add_item(report_id, "alice", artifact_type="entity_finding", dedupe_key="e:1", snapshot={"chunk_id": "p1"})
     assert _report_expiry(reports, report_id) == NOW - 200 * DAY + 365 * DAY
 
 
-def test_summary_item_and_overview_take_the_oldest(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_summary_item_and_overview_take_the_oldest(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """Collection-wide items and the collection overview inherit from the oldest live document."""
     rag, _, sessions = stores
     reports = _reports(rag, sessions)
     first = int(reports.create_report(title="r1", owner="alice", collection_name="docs")["id"])
-    reports.add_items(first, "alice", items=[{"artifact_type": "summary", "dedupe_key": "s:1", "snapshot": {"collection": "docs"}}])
+    reports.add_items(
+        first, "alice", items=[{"artifact_type": "summary", "dedupe_key": "s:1", "snapshot": {"collection": "docs"}}]
+    )
     assert _report_expiry(reports, first) == NOW - 300 * DAY + 365 * DAY
     second = int(reports.create_report(title="r2", owner="alice", collection_name="docs")["id"])
     reports.set_collection_overview_snapshot(second, "alice", {"documents": []})
     assert _report_expiry(reports, second) == NOW - 300 * DAY + 365 * DAY
 
 
-def test_extract_takes_the_earlier_of_its_two_deadlines(stores: tuple[MagicMock, DocumentRetentionManager, SessionManager]) -> None:
+def test_extract_takes_the_earlier_of_its_two_deadlines(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
     """An extract goes after its own short retention, or with the oldest document if that comes first."""
     from docint.core.retention_sources import extract_expiry
 

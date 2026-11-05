@@ -35,7 +35,9 @@ def mgr() -> DocumentRetentionManager:
     return m
 
 
-def _record(mgr: DocumentRetentionManager, file_hash: str, *, at: datetime, physical: str = "c1", owner: str = "alice") -> None:
+def _record(
+    mgr: DocumentRetentionManager, file_hash: str, *, at: datetime, physical: str = "c1", owner: str = "alice"
+) -> None:
     mgr.record_ingest(
         physical, "docs", owner, file_hash, f"{file_hash}.pdf", [file_hash], now=at, period=PERIOD, notice_days=30
     )

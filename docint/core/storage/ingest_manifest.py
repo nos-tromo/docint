@@ -270,7 +270,7 @@ class IngestManifest:
                 chunk = hashes[start : start + 500]
                 marks = ", ".join("?" * len(chunk))
                 cursor = self._conn.execute(
-                    f"DELETE FROM ingest_manifest WHERE collection = ? AND file_hash IN ({marks})",  # noqa: S608
+                    f"DELETE FROM ingest_manifest WHERE collection = ? AND file_hash IN ({marks})",
                     (collection, *chunk),
                 )
                 removed += cursor.rowcount

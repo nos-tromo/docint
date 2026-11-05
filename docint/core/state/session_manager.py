@@ -1865,9 +1865,7 @@ class SessionManager:
             physical = conv.collection_name or self.rag.qdrant_collection
             if not isinstance(physical, str):
                 return
-            inherited = source_expiry(
-                self.rag, physical, set() if collection_wide else cited, now=datetime.now(UTC)
-            )
+            inherited = source_expiry(self.rag, physical, set() if collection_wide else cited, now=datetime.now(UTC))
             if not isinstance(inherited, datetime):
                 return
             current = conv.expires_at
@@ -2261,6 +2259,57 @@ class SessionManager:
         if citation_index is not None:
             src["citation_index"] = citation_index
         return src
+
+    def due_sessions(self, now: datetime) -> list[tuple[str, str | None, str | None]]:
+        """List sessions whose inherited deadline has been reached.
+
+        Args:
+            now (datetime): The current time.
+
+        Returns:
+            list[tuple[str, str | None, str | None]]: ``(id, owner, physical collection)``.
+        """
+        with self._session_scope() as s:
+            rows = (
+                s.query(Conversation.id, Conversation.owner, Conversation.collection_name)
+                .filter(Conversation.expires_at.is_not(None), Conversation.expires_at <= now.replace(tzinfo=None))
+                .all()
+            )
+            return [(str(row[0]), row[1], row[2]) for row in rows]
+
+    def sessions_without_deadline(self) -> list[tuple[str, str | None, set[str], bool]]:
+        """List sessions no deadline was stamped on yet (they predate retention).
+
+        Returns:
+            list[tuple[str, str | None, set[str], bool]]: ``(id, physical collection,
+                cited file hashes, collection-wide)`` per session.
+        """
+        with self._session_scope() as s:
+            found = []
+            for convo in s.query(Conversation).filter(Conversation.expires_at.is_(None)).all():
+                cited = {str(c.file_hash) for t in convo.turns for c in t.citations if c.file_hash}
+                wide = not cited or bool(convo.scope_chunk_ids) or bool(convo.topic_focus)
+                found.append((str(convo.id), convo.collection_name, cited, wide))
+            return found
+
+    def set_session_expiry(self, session_id: str, expires_at: datetime) -> None:
+        """Stamp a session's deadline (lowering only).
+
+        Args:
+            session_id (str): The session.
+            expires_at (datetime): The deadline.
+        """
+        with self._session_scope() as s:
+            convo = s.get(Conversation, session_id)
+            if convo is None:
+                return
+            current = convo.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, expires_at)
+            if lowered != current:
+                convo.expires_at = lowered
+                s.commit()
 
     def delete_session(self, session_id: str, owner: str | None) -> bool:
         """Delete a session the caller owns.
