@@ -70,6 +70,10 @@ class _SpySessions:
         """Satisfy the lifespan's eager store init without touching a DB."""
         return None
 
+    def clear_session_expiries(self) -> int:
+        """Satisfy the startup's period change without touching a DB."""
+        return 0
+
 
 class _OwnRAG:
     """Minimal RAG stand-in for collection-ownership endpoint tests."""

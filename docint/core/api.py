@@ -89,6 +89,7 @@ from docint.core.retention import (
     RetentionPeriodState,
     SweepReport,
     expires_at,
+    inherit,
     is_due,
     is_warning,
     run_retention_loop,
@@ -277,9 +278,15 @@ def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPer
     """
     if os.getenv("COLLECTION_RETENTION", "").strip():
         logger.warning("COLLECTION_RETENTION is no longer read; documents follow DOCUMENT_RETENTION_DAYS.")
+    now = datetime.now(UTC)
     try:
-        state = rag.ensure_collection_owner_manager().record_retention_period(retention.days, now=datetime.now(UTC))
+        state = rag.ensure_collection_owner_manager().record_retention_period(retention.days, now=now)
         rag.ensure_document_retention_manager().recompute(state, notice_days=retention.notice_days)
+        if state.set_at == now:
+            # Derived deadlines only go down; under a new period each is
+            # derived again from its sources by the next sweep.
+            rag.ensure_session_manager().clear_session_expiries()
+            rag.ensure_report_manager().clear_report_expiries()
     except Exception as exc:
         logger.error("Could not record the document retention period: {}", exc)
         return None
@@ -373,6 +380,10 @@ async def _retention_sweep(
     except Exception as exc:
         logger.warning("Retention index repair failed ({}); the next sweep retries.", exc)
     await to_thread.run_sync(partial(_stamp_derived_deadlines, now))
+    # Collection-wide items follow the collection's earliest document, read
+    # before any document goes: one stamped under a longer period still goes
+    # with it.
+    floors = await to_thread.run_sync(partial(_collection_floors, now))
     due = await to_thread.run_sync(
         partial(rag.ensure_document_retention_manager().due, now, limit=_RETENTION_SWEEP_LIMIT)
     )
@@ -393,8 +404,8 @@ async def _retention_sweep(
     for kind, sweep in (
         ("sessions", _purge_due_sessions),
         ("reports", _purge_due_reports),
-        ("extracts", _purge_due_extracts),
-        ("topic_runs", _purge_due_topic_runs),
+        ("extracts", partial(_purge_due_extracts, floors=floors)),
+        ("topic_runs", partial(_purge_due_topic_runs, floors=floors)),
     ):
         try:
             setattr(report, kind, await to_thread.run_sync(partial(sweep, now, retention)))
@@ -443,6 +454,24 @@ def _stamp_derived_deadlines(now: datetime) -> None:
                 reports.set_report_expiry(report_id, deadline)
     except Exception as exc:
         logger.warning("Deadlines of older sessions or reports not stamped ({}); the next sweep retries.", exc)
+
+
+def _collection_floors(now: datetime) -> dict[str, datetime]:
+    """Each collection's earliest document deadline, the bound for its collection-wide items.
+
+    Args:
+        now (datetime): The sweep time.
+
+    Returns:
+        dict[str, datetime]: Per physical collection; absent when it holds no indexed document.
+    """
+    floors: dict[str, datetime] = {}
+    manager = rag.ensure_document_retention_manager()
+    for physical in rag.list_collections():
+        oldest = manager.oldest_live(physical)
+        if oldest is not None and oldest.expires_at is not None:
+            floors[physical] = oldest.expires_at
+    return floors
 
 
 def _purge_due_documents(physical: str, now: datetime, retention: DocumentRetentionConfig) -> tuple[int, bool]:
@@ -601,12 +630,15 @@ def _parse_deadline(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def _purge_due_extracts(now: datetime, retention: DocumentRetentionConfig) -> int:
+def _purge_due_extracts(
+    now: datetime, retention: DocumentRetentionConfig, *, floors: Mapping[str, datetime] | None = None
+) -> int:
     """Delete stored extracts past their deadline, each recorded first.
 
     Args:
         now (datetime): The sweep time.
         retention (DocumentRetentionConfig): The period in force.
+        floors (Mapping[str, datetime] | None): From :func:`_collection_floors`.
 
     Returns:
         int: Extracts deleted.
@@ -615,7 +647,8 @@ def _purge_due_extracts(now: datetime, retention: DocumentRetentionConfig) -> in
     deleted = 0
     for physical in rag.list_collections():
         for record in store.list(physical):
-            if not is_due(_parse_deadline(record.get("expires_at")), now):
+            deadline = inherit(_parse_deadline(record.get("expires_at")), (floors or {}).get(physical))
+            if not is_due(deadline, now):
                 continue
             extract_id = str(record.get("extract_id") or "")
             op = Operation(
@@ -632,12 +665,15 @@ def _purge_due_extracts(now: datetime, retention: DocumentRetentionConfig) -> in
     return deleted
 
 
-def _purge_due_topic_runs(now: datetime, retention: DocumentRetentionConfig) -> int:
+def _purge_due_topic_runs(
+    now: datetime, retention: DocumentRetentionConfig, *, floors: Mapping[str, datetime] | None = None
+) -> int:
     """Delete topic runs past their deadline (``run.json``'s, else its creation plus the period), recorded first.
 
     Args:
         now (datetime): The sweep time.
         retention (DocumentRetentionConfig): The period in force.
+        floors (Mapping[str, datetime] | None): From :func:`_collection_floors`.
 
     Returns:
         int: Runs deleted.
@@ -653,6 +689,7 @@ def _purge_due_topic_runs(now: datetime, retention: DocumentRetentionConfig) -> 
             created = _parse_deadline(run.record.get("created_at"))
             if deadline is None and created is not None and retention.days is not None:
                 deadline = created + timedelta(days=retention.days)
+            deadline = inherit(deadline, (floors or {}).get(physical))
             if not is_due(deadline, now):
                 continue
             op = Operation(

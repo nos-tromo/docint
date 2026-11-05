@@ -303,3 +303,33 @@ def test_resolution_failure_never_fails_the_sweep(fake: _SweepRAG, monkeypatch: 
     monkeypatch.setattr(_SweepRAG, "resolve_entities", lambda self: (_ for _ in ()).throw(RuntimeError("llm down")))
     report = _sweep()
     assert report.documents == 1 and report.failed == []
+
+
+def test_a_changed_period_restamps_sessions_and_reports(fake: _SweepRAG) -> None:
+    """Deadlines only go down, so a new period clears them for the sweep to stamp again under it."""
+    fake.owners.record_retention_period(365, now=NOW - 400 * DAY)
+    with fake.sessions._session_scope() as s:
+        s.add(Conversation(id="s1", owner="alice", collection_name="phys", expires_at=NOW + 300 * DAY))
+        s.commit()
+    rid = int(fake.reports.create_report(title="r", owner="alice", collection_name="docs")["id"])
+    fake.reports.set_report_expiry(rid, NOW + 300 * DAY)
+
+    api_module._record_retention_period(DocumentRetentionConfig(days=365, notice_days=30))
+    assert [sid for sid, *_ in fake.sessions.sessions_without_deadline()] == []
+
+    api_module._record_retention_period(DocumentRetentionConfig(days=180, notice_days=30))
+    assert [sid for sid, *_ in fake.sessions.sessions_without_deadline()] == ["s1"]
+    assert [row[0] for row in fake.reports.reports_without_deadline()] == [rid]
+
+
+def test_collection_wide_items_follow_a_shortened_period(fake: _SweepRAG, tmp_path: Path) -> None:
+    """An extract stamped under a longer period still goes with the collection's earliest document."""
+    _doc(fake, "old", days_ago=370)
+    _doc(fake, "young", days_ago=10)
+    store = api_module.ExtractStore(tmp_path / "extracts")
+    store.write(
+        "phys", zip_bytes=b"zip", meta={"collection": "docs", "expires_at": (NOW + 200 * DAY).isoformat()}, now=NOW
+    )
+    report = _sweep()
+    assert report.documents == 1
+    assert report.extracts == 1

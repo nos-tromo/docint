@@ -493,6 +493,21 @@ class ReportManager:
                 report.expires_at = lowered
                 s.commit()
 
+    def clear_report_expiries(self) -> int:
+        """Forget every report's deadline, for the sweep to stamp again under a new period.
+
+        Returns:
+            int: Reports cleared.
+        """
+        with self._write_scope() as s:
+            cleared = (
+                s.query(Report)
+                .filter(Report.expires_at.is_not(None))
+                .update({Report.expires_at: None}, synchronize_session=False)
+            )
+            s.commit()
+        return int(cleared)
+
     def delete_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> bool:
         """Delete a report (and its items) the caller owns.
 

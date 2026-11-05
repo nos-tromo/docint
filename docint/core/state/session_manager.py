@@ -2311,6 +2311,24 @@ class SessionManager:
                 convo.expires_at = lowered
                 s.commit()
 
+    def clear_session_expiries(self) -> int:
+        """Forget every session's deadline, for the sweep to stamp again under a new period.
+
+        Deadlines only ever go down, so a changed period could leave a session
+        outliving its sources; the sweep re-derives each from its sources.
+
+        Returns:
+            int: Sessions cleared.
+        """
+        with self._session_scope() as s:
+            cleared = (
+                s.query(Conversation)
+                .filter(Conversation.expires_at.is_not(None))
+                .update({Conversation.expires_at: None}, synchronize_session=False)
+            )
+            s.commit()
+        return int(cleared)
+
     def delete_session(self, session_id: str, owner: str | None) -> bool:
         """Delete a session the caller owns.
 
