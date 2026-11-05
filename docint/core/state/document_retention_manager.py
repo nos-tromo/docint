@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from docint.core.retention import RetentionPeriodState, document_expires_at
+from docint.core.retention import ExpiringItem, RetentionPeriodState, document_expires_at
 from docint.core.state.base import _make_session_maker
 from docint.core.state.document_retention import DocumentRetention
 
@@ -198,6 +198,48 @@ class DocumentRetentionManager:
                     changed += 1
             s.commit()
         return changed
+
+    def all_rows(self) -> list[DocumentRetention]:
+        """Return every indexed document of every collection.
+
+        Returns:
+            list[DocumentRetention]: Sorted by collection, then ingest time.
+        """
+        with self._session_scope() as s:
+            rows = s.scalars(
+                select(DocumentRetention).order_by(
+                    DocumentRetention.physical, DocumentRetention.ingested_at, DocumentRetention.file_hash
+                )
+            )
+            return [self._detached(row) for row in rows]
+
+    def expiring_items(self, until: datetime | None) -> list[ExpiringItem]:
+        """Return every owner's documents with a deadline by ``until``.
+
+        Args:
+            until (datetime | None): The horizon; ``None`` for every deadline.
+
+        Returns:
+            list[ExpiringItem]: Sorted by deadline.
+        """
+        query = select(DocumentRetention).where(DocumentRetention.expires_at.is_not(None))
+        if until is not None:
+            query = query.where(DocumentRetention.expires_at <= until)
+        with self._session_scope() as s:
+            rows = [self._detached(row) for row in s.scalars(query.order_by(DocumentRetention.expires_at))]
+        return [
+            ExpiringItem(
+                "document",
+                row.physical,
+                row.logical,
+                row.owner,
+                row.file_hash,
+                row.filename or row.file_hash,
+                row.ingested_at,
+                row.expires_at,
+            )
+            for row in rows
+        ]
 
     def rows_for(self, physical: str) -> list[DocumentRetention]:
         """Return every indexed document of a collection.

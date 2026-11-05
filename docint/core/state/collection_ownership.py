@@ -30,7 +30,7 @@ class CollectionOwnership(Base):
     owner: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     logical_name: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
-    # The retention clock (docs/retention.md). NULL never expires.
+    # Clock of the retired idle-window retention; kept, read for no deadline (docs/retention.md).
     last_activity_at: Mapped[datetime | None] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), nullable=True
     )

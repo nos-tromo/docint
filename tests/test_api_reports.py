@@ -30,7 +30,6 @@ from docint.core.jobs import TERMINAL_STATUSES, IngestJobManager
 from docint.core.state import report_render
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
-from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.report_pdf_store import ReportPdfRecord, ReportPdfStore
 
@@ -876,30 +875,6 @@ def test_batch_add_survives_companion_scroll_failure(client: TestClient, monkeyp
     assert "thumbnail" not in client.get(f"/reports/{rid}").json()["items"][0]["snapshot"]
 
 
-def _backdate(mgr: CollectionOwnerManager, owner: str, logical: str, stamp: datetime) -> None:
-    """Set a collection's last activity and forget the in-memory throttle."""
-    with mgr._session_scope() as s:
-        s.query(CollectionOwnership).filter(
-            CollectionOwnership.owner == owner, CollectionOwnership.logical_name == logical
-        ).update({CollectionOwnership.last_activity_at: stamp})
-        s.commit()
-    mgr._touch_due.clear()
-
-
-def test_report_work_moves_its_collections_retention_clock(client: TestClient) -> None:
-    """Building a report from a collection is work on that collection."""
-    mgr = cast(_ReportRAG, api_module.rag)._com
-    mgr.register("test-operator", "docs")
-    rid = _create(client, collection="docs")["id"]
-    long_ago = datetime(2020, 1, 1, tzinfo=UTC)
-    _backdate(mgr, "test-operator", "docs", long_ago)
-
-    assert client.get(f"/reports/{rid}").status_code == 200
-
-    [row] = mgr.list_activity("test-operator")
-    assert row.last_activity_at is not None and row.last_activity_at > long_ago
-
-
 # ---------------------------------------------------------------------------
 # PDF as a background job — POST /reports/{id}/pdf, GET …/pdf, GET …/pdf/status
 # ---------------------------------------------------------------------------
@@ -1170,21 +1145,6 @@ def test_a_reused_report_id_never_serves_the_deleted_reports_pdf(
 
     assert client.get(f"/reports/{rid}/pdf").status_code == 404
     assert client.get(f"/reports/{rid}/pdf/status").json()["pdf"] is None
-
-
-def test_queueing_a_pdf_counts_as_activity_on_its_collection(
-    client: TestClient, pdf_jobs: IngestJobManager, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Exporting a collection's report keeps it alive under retention, like every other export."""
-    _fake_engine(monkeypatch)
-    touched: list[tuple[str | None, str]] = []
-    monkeypatch.setattr(api_module, "_record_activity", lambda owner, logical: touched.append((owner, logical)))
-    rid = _create(client, collection="docs")["id"]
-    touched.clear()
-
-    client.post(f"/reports/{rid}/pdf")
-
-    assert touched == [("test-operator", "docs")]
 
 
 def test_a_reused_report_id_does_not_inherit_the_deleted_reports_render(

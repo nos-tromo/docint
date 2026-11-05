@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, M
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -86,12 +87,12 @@ from docint.core.ingest.preprocess import get_preprocess_pool, shutdown_preproce
 from docint.core.jobs import IngestJobManager, IngestJobState, JobCancelled, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError, IngestStats
 from docint.core.retention import (
+    ExpiringItem,
     RetentionPeriodState,
     SweepReport,
-    expires_at,
     inherit,
     is_due,
-    is_warning,
+    is_warning_within,
     run_retention_loop,
 )
 from docint.core.retention_sources import extract_expiry, source_expiry
@@ -132,7 +133,6 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_resolution_env,
     load_response_validation_env,
-    load_retention_env,
     load_summary_env,
     load_topics_env,
     resolve_enable_hybrid,
@@ -280,13 +280,10 @@ def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPer
         logger.warning("COLLECTION_RETENTION is no longer read; documents follow DOCUMENT_RETENTION_DAYS.")
     now = datetime.now(UTC)
     try:
-        state = rag.ensure_collection_owner_manager().record_retention_period(retention.days, now=now)
+        owners = rag.ensure_collection_owner_manager()
+        _carry_derived_deadlines(owners.retention_period(), retention, now)
+        state = owners.record_retention_period(retention.days, now=now)
         rag.ensure_document_retention_manager().recompute(state, notice_days=retention.notice_days)
-        if state.set_at == now:
-            # Derived deadlines only go down; under a new period each is
-            # derived again from its sources by the next sweep.
-            rag.ensure_session_manager().clear_session_expiries()
-            rag.ensure_report_manager().clear_report_expiries()
     except Exception as exc:
         logger.error("Could not record the document retention period: {}", exc)
         return None
@@ -307,6 +304,43 @@ def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPer
         state.set_at.isoformat(),
     )
     return state
+
+
+def _carry_derived_deadlines(
+    previous: RetentionPeriodState | None, retention: DocumentRetentionConfig, now: datetime
+) -> None:
+    """Carry chat and report deadlines over to a changed period, before it is recorded.
+
+    A document's deadline is its ingest plus the period, or the grace end when
+    that is later, and a chat's or report's is its earliest source's. So a
+    period shortened by ``n`` days moves every stored deadline ``n`` days
+    forward, though never inside the new notice period, which is exact in
+    both cases. A longer period keeps the earlier dates: nothing outlives its
+    sources. Switching off clears them, as nothing is deleted then, and the
+    first sweep after switching on stamps them afresh. Running before the
+    period is recorded means a failure is retried at the next startup, where
+    at worst it moves dates forward twice.
+
+    Args:
+        previous (RetentionPeriodState | None): The period recorded so far.
+        retention (DocumentRetentionConfig): The period now configured.
+        now (datetime): The startup time; the new grace starts here.
+    """
+    if previous is None or previous.days is None or previous.days == retention.days:
+        return
+    sessions, reports = rag.ensure_session_manager(), rag.ensure_report_manager()
+    if retention.days is None:
+        sessions.clear_session_expiries()
+        reports.clear_report_expiries()
+        return
+    if retention.days > previous.days:
+        return
+    sooner = timedelta(days=previous.days - retention.days)
+    floor = now + timedelta(days=retention.notice_days)
+    moved = sessions.shift_session_expiries(sooner, floor=floor) + reports.shift_report_expiries(sooner, floor=floor)
+    logger.info(
+        "Document retention shortened by {} days; {} chat and report deadlines moved forward.", sooner.days, moved
+    )
 
 
 def _start_retention_sweeper(
@@ -383,7 +417,11 @@ async def _retention_sweep(
     # Collection-wide items follow the collection's earliest document, read
     # before any document goes: one stamped under a longer period still goes
     # with it.
-    floors = await to_thread.run_sync(partial(_collection_floors, now))
+    floors: dict[str, datetime] = {}
+    try:
+        floors = await to_thread.run_sync(partial(_collection_floors, now))
+    except Exception as exc:
+        logger.warning("Collection floors not read ({}); extracts and topic runs keep their own deadlines.", exc)
     due = await to_thread.run_sync(
         partial(rag.ensure_document_retention_manager().due, now, limit=_RETENTION_SWEEP_LIMIT)
     )
@@ -870,7 +908,6 @@ def _require_owned_collection(logical_name: str, principal: Principal) -> str:
     if physical is None:
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
     _refuse_while_purging(physical)
-    _record_activity(principal.effective_owner, name)
     return physical
 
 
@@ -923,29 +960,8 @@ def _refuse_while_purging(physical: str) -> None:
         raise HTTPException(status_code=409, detail="Collection is being deleted.")
 
 
-def _record_activity(owner: str | None, logical: str) -> None:
-    """Stamp activity on a collection, restarting its retention window.
-
-    Called from the ownership gate, the register path and report lookups, so
-    every route that works on a collection counts without opting in. Never
-    fails the request that caused it: the clock is bookkeeping, and a failed
-    write is retried by the next request a minute later.
-
-    Args:
-        owner (str | None): The collection's owner (the effective owner).
-        logical (str): The user-visible collection name.
-    """
-    try:
-        rag.ensure_collection_owner_manager().touch(owner, logical)
-    except Exception as exc:
-        logger.warning("Could not record activity on collection '{}': {}", logical, exc)
-
-
 def _register_collection(principal: Principal, name: str) -> str:
-    """Register the caller's collection (idempotently) and stamp its activity.
-
-    ``register`` writes nothing for a collection that already exists, so
-    re-ingesting into one is stamped here.
+    """Register the caller's collection (idempotently).
 
     Args:
         principal (Principal): The resolved calling principal.
@@ -956,7 +972,6 @@ def _register_collection(principal: Principal, name: str) -> str:
     """
     physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
     _refuse_while_purging(physical)
-    _record_activity(principal.effective_owner, name)
     return physical
 
 
@@ -1753,27 +1768,29 @@ class AdminCollectionsOut(BaseModel):
     others: list[AdminOwnerCollections]
 
 
-class CollectionRetentionOut(BaseModel):
-    """One collection's retention clock and deadline.
+class RetentionItemOut(BaseModel):
+    """One document, chat or report due for deletion within the notice period.
 
-    ``owner`` is ``None`` for the caller's own collections and names the owner
-    otherwise (admins with ``all=true`` only). ``expires_at`` is ``None`` when
-    retention is off or the collection has no recorded activity, which never
-    expires.
+    ``owner`` is ``None`` for the caller's own items and names the owner
+    otherwise (admins with ``all=true`` only). ``name`` is the file name, the
+    chat's first question, or the report title.
     """
 
-    name: str
+    kind: Literal["document", "session", "report"]
+    collection: str
     owner: str | None = None
-    last_activity_at: datetime | None
-    expires_at: datetime | None
+    id: str
+    name: str
+    expires_at: datetime
     warning: bool
 
 
-class CollectionsRetentionOut(BaseModel):
-    """The retention window in force and each listed collection's deadline."""
+class RetentionOut(BaseModel):
+    """The retention period in force and what falls due within the notice period."""
 
-    window: str
-    collections: list[CollectionRetentionOut]
+    period_days: int | None
+    notice_days: int
+    items: list[RetentionItemOut]
 
 
 class MetadataFilterIn(BaseModel):
@@ -2249,7 +2266,8 @@ class FrontendConfigOut(BaseModel):
     max_upload_bytes: int
     report_batch_max_items: int
     language: str
-    collection_retention: str
+    document_retention_days: int | None
+    retention_notice_days: int
     topics_enabled: bool
     require_purpose: list[str]
 
@@ -2402,7 +2420,7 @@ class ReportListOut(BaseModel):
 
 
 @app.get("/config", response_model=FrontendConfigOut, tags=["Meta"])
-def get_frontend_config() -> dict[str, int | str | bool | list[str]]:
+def get_frontend_config() -> dict[str, int | str | bool | list[str] | None]:
     """Return deploy-time frontend configuration for the SPA.
 
     Served without a principal dependency so the SPA can read it on first load,
@@ -2421,15 +2439,17 @@ def get_frontend_config() -> dict[str, int | str | bool | list[str]]:
         its upload batches), ``report_batch_max_items`` (the most artifacts
         one report batch add may carry, which the SPA refuses an oversize
         section against), ``language`` (the active ``RESPONSE_LANGUAGE``
-        locale, ``"en"`` or ``"de"``), ``collection_retention``
-        (``COLLECTION_RETENTION``: ``"off"`` or the idle window, which the SPA
-        checks before asking for expiry dates), ``topics_enabled``
+        locale, ``"en"`` or ``"de"``), ``document_retention_days``
+        (``DOCUMENT_RETENTION_DAYS``, ``None`` when off, which the SPA checks
+        before asking what falls due) and ``retention_notice_days``
+        (``RETENTION_NOTICE_DAYS``), ``topics_enabled``
         (``TOPICS_ENABLED``), and ``require_purpose`` (the audit actions
         ``AUDIT_REQUIRE_PURPOSE`` makes a stated purpose mandatory for,
         sorted; the SPA's purpose bar insists on a purpose while it is not
         empty).
     """
     cfg = load_frontend_env()
+    retention = load_document_retention_env()
     return {
         "graph_top_k": cfg.graph_top_k,
         "graph_max_top_k": cfg.graph_max_top_k,
@@ -2437,7 +2457,8 @@ def get_frontend_config() -> dict[str, int | str | bool | list[str]]:
         "max_upload_bytes": cfg.max_upload_bytes,
         "report_batch_max_items": REPORT_BATCH_MAX_ITEMS,
         "language": load_language_env().code,
-        "collection_retention": load_retention_env().window,
+        "document_retention_days": retention.days,
+        "retention_notice_days": retention.notice_days,
         "topics_enabled": load_topics_env().enabled,
         "require_purpose": sorted(audit.current().require_purpose),
     }
@@ -2578,72 +2599,85 @@ def collections_list(
     )
 
 
-@app.get("/collections/retention", response_model=CollectionsRetentionOut, tags=["Collections"])
+@app.get("/collections/retention", response_model=RetentionOut, tags=["Collections"])
 def collections_retention(
     request: Request,
     all: bool = False,
     principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
-) -> CollectionsRetentionOut:
-    """List when each collection is due for deletion for inactivity.
+) -> RetentionOut:
+    """List the caller's documents, chats and reports due for deletion within the notice period.
 
-    Reads the retention clock without moving it, so looking at a deadline never
-    postpones it — which is why this route bypasses the ownership gate and
-    scopes its rows itself. ``all`` behaves as on ``/collections/list``: an
-    admin also gets every other owner's collections, a non-admin's flag is
-    ignored. Sorted soonest deadline first; collections that never expire
-    come last.
-
-    Like ``/collections/list``, only an admin's listing across owners is
-    audited, as an ``admin`` event.
+    Reads deadlines without touching them, so it bypasses the ownership gate
+    and scopes its rows itself. ``all`` behaves as on ``/collections/list``:
+    an admin also gets every other owner's items, a non-admin's flag is
+    ignored, and only the admin's listing across owners is audited, as an
+    ``admin`` event. Items of collections without an owner are never listed
+    (the operator report shows them). Sorted soonest first.
 
     Args:
         request (Request): The incoming request, for the audit trail.
         all (bool): When true and the caller is an admin, include every
-            other owner's collections. Ignored otherwise.
+            other owner's items. Ignored otherwise.
         principal (Principal): The resolved request principal.
 
     Returns:
-        CollectionsRetentionOut: The window in force (``off`` or e.g. ``6m``)
-            and one entry per collection.
+        RetentionOut: The period in force, the notice in days, and the items.
 
     Raises:
-        HTTPException: 500 if the ownership store cannot be read.
+        HTTPException: 500 if a store cannot be read.
     """
-    retention = load_retention_env()
+    retention = load_document_retention_env()
     everyone = all and principal.is_admin
     op = audit.begin(request, principal, "admin", "collections.retention_all") if everyone else None
     now = datetime.now(UTC)
-    try:
-        mgr = rag.ensure_collection_owner_manager()
-        rows = mgr.list_all_activity() if everyone else mgr.list_activity(principal.name)
-        state = mgr.retention_window() if retention.enabled else None
-    except Exception:
-        logger.exception("Error listing collection retention")
-        raise HTTPException(status_code=500, detail="Request failed.") from None
-    # A window the last startup did not record is as good as set now: that
-    # never shows a date earlier than the sweep would act on.
-    set_at = state.set_at if state is not None and state.window == retention.window else now
-    entries: list[CollectionRetentionOut] = []
-    for row in rows:
-        if everyone and row.owner is None:
-            continue
-        deadline = expires_at(row.last_activity_at, retention.months, window_set_at=set_at)
-        entries.append(
-            CollectionRetentionOut(
-                name=row.logical,
-                owner=None if row.owner == principal.name else row.owner,
-                last_activity_at=row.last_activity_at,
-                expires_at=deadline,
-                warning=is_warning(deadline, now),
+    items: list[RetentionItemOut] = []
+    if retention.enabled:
+        try:
+            found = _expiring_items(now + timedelta(days=retention.notice_days))
+        except Exception:
+            logger.exception("Error listing what falls due")
+            raise HTTPException(status_code=500, detail="Request failed.") from None
+        for item in found:
+            if item.owner is None or item.expires_at is None or not item.logical:
+                continue
+            if not everyone and item.owner != principal.name:
+                continue
+            items.append(
+                RetentionItemOut(
+                    kind=item.kind,
+                    collection=item.logical,
+                    owner=None if item.owner == principal.name else item.owner,
+                    id=item.id,
+                    name=item.name,
+                    expires_at=item.expires_at,
+                    warning=is_warning_within(item.expires_at, now, retention.notice_days),
+                )
             )
-        )
-    entries.sort(key=lambda e: (e.expires_at is None, e.expires_at or now, e.name, e.owner or ""))
+    items.sort(key=lambda i: (i.expires_at, i.collection, i.kind, i.name, i.owner or ""))
     if op is not None:
         op.record(
-            target=Target(kind="collection", count=len(entries)),
-            criteria={"owners": len({entry.owner for entry in entries if entry.owner is not None})},
+            target=Target(kind="retention_item", count=len(items)),
+            criteria={"owners": len({item.owner for item in items if item.owner is not None})},
         )
-    return CollectionsRetentionOut(window=retention.window, collections=entries)
+    return RetentionOut(period_days=retention.days, notice_days=retention.notice_days, items=items)
+
+
+def _expiring_items(until: datetime | None) -> list[ExpiringItem]:
+    """Every owner's documents, chats and reports with a deadline by ``until``, collection names resolved.
+
+    Args:
+        until (datetime | None): The horizon; ``None`` for every deadline.
+
+    Returns:
+        list[ExpiringItem]: Each with its logical collection name where one is known.
+    """
+    owners = rag.ensure_collection_owner_manager()
+    logical_of = {row.physical: row.logical for row in owners.list_all_activity()}
+    items: list[ExpiringItem] = list(rag.ensure_document_retention_manager().expiring_items(until))
+    for session in rag.ensure_session_manager().expiring_sessions(until):
+        items.append(dataclass_replace(session, logical=logical_of.get(session.physical or "", session.physical)))
+    items.extend(rag.ensure_report_manager().expiring_reports(until))
+    return items
 
 
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
@@ -4632,8 +4666,6 @@ def _get_owned_report(report_id: int, principal: str, collection: str) -> dict[s
     report = rag.ensure_report_manager().get_report(report_id, principal, collection=collection)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
-    if report.get("collection_name"):
-        _record_activity(principal, str(report["collection_name"]))
     return report
 
 
@@ -8049,8 +8081,6 @@ def _report_pdf_preflight(report_id: int, owner: str) -> dict[str, Any]:
             PDF engine is not installed, before a job that cannot run is queued.
     """
     meta = _owned_report_meta(report_id, owner)
-    if meta.get("collection_name"):
-        _record_activity(owner, str(meta["collection_name"]))
     if not pdf_engine_available():
         raise HTTPException(status_code=503, detail="PDF export is not available.")
     return meta
@@ -8129,8 +8159,6 @@ def download_report_pdf(
     record = store.get(report_id, str(meta["created_at"]))
     if record is None:
         raise HTTPException(status_code=404, detail="No rendered PDF.")
-    if meta.get("collection_name"):
-        _record_activity(owner, str(meta["collection_name"]))
     op.record(
         target=Target(kind="report", ids=[str(report_id)], count=1),
         criteria={"pages": record.get("pages"), "rendered_at": record.get("created_at")},

@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,7 +40,7 @@ from docint.agents.turn.history import (
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
-from docint.core.retention import inherit
+from docint.core.retention import ExpiringItem, inherit
 from docint.core.retention_sources import source_expiry
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
@@ -205,6 +205,20 @@ def _answer_mode_of(turn: Turn) -> str:
         str: ``assessment`` or ``lookup``.
     """
     return turn.answer_mode or ("assessment" if turn.agent_trail else "lookup")
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """Read a stored timestamp as aware UTC (SQLite keeps them naive).
+
+    Args:
+        value (datetime | None): As stored.
+
+    Returns:
+        datetime | None: Aware UTC, or ``None``.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class AgentTurnFallback(Exception):
@@ -2310,6 +2324,65 @@ class SessionManager:
             if lowered != current:
                 convo.expires_at = lowered
                 s.commit()
+
+    def expiring_sessions(self, until: datetime | None) -> list[ExpiringItem]:
+        """Return every owner's sessions with a deadline by ``until``.
+
+        A session is named like the session list names it: its first
+        question, cut to 50 characters.
+
+        Args:
+            until (datetime | None): The horizon; ``None`` for every deadline.
+
+        Returns:
+            list[ExpiringItem]: With the physical collection; the caller resolves its logical name.
+        """
+        with self._session_scope() as s:
+            query = s.query(Conversation).filter(Conversation.expires_at.is_not(None))
+            if until is not None:
+                query = query.filter(Conversation.expires_at <= until.astimezone(UTC).replace(tzinfo=None))
+            found = []
+            for convo in query.all():
+                title = "New Chat"
+                if convo.turns:
+                    text = convo.turns[0].user_text
+                    title = text[:50] + "..." if len(text) > 50 else text
+                found.append(
+                    ExpiringItem(
+                        "session",
+                        convo.collection_name,
+                        None,
+                        convo.owner,
+                        str(convo.id),
+                        title,
+                        _aware(convo.created_at),
+                        _aware(convo.expires_at),
+                    )
+                )
+            return found
+
+    def shift_session_expiries(self, sooner: timedelta, *, floor: datetime) -> int:
+        """Move every session's deadline ``sooner`` forward, never before ``floor`` and never later.
+
+        Args:
+            sooner (timedelta): How much shorter the period became.
+            floor (datetime): The end of the new notice period.
+
+        Returns:
+            int: Sessions whose deadline moved.
+        """
+        moved = 0
+        with self._session_scope() as s:
+            for convo in s.query(Conversation).filter(Conversation.expires_at.is_not(None)).all():
+                current = _aware(convo.expires_at)
+                if current is None:
+                    continue
+                lowered = min(current, max(current - sooner, floor))
+                if lowered != current:
+                    convo.expires_at = lowered
+                    moved += 1
+            s.commit()
+        return moved
 
     def clear_session_expiries(self) -> int:
         """Forget every session's deadline, for the sweep to stamp again under a new period.

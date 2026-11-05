@@ -12,14 +12,14 @@ import json
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 from sqlalchemy import ColumnElement, or_
 from sqlalchemy.orm import Session
 
-from docint.core.retention import inherit
+from docint.core.retention import ExpiringItem, inherit
 from docint.core.retention_sources import report_item_expiry
 from docint.core.state.base import _make_session_maker
 from docint.core.state.report import Report
@@ -41,6 +41,20 @@ def _without_collection() -> ColumnElement[bool]:
 def _belongs(report: Report, owner: str | None, collection: str | None) -> bool:
     """Whether ``report`` is ``owner``'s and, when a ``collection`` is named, in that collection."""
     return report.owner == owner and (collection is None or report.collection_name == collection)
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    """Read a stored timestamp as aware UTC (SQLite keeps them naive).
+
+    Args:
+        value (datetime | None): As stored.
+
+    Returns:
+        datetime | None: Aware UTC, or ``None``.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(slots=True)
@@ -492,6 +506,56 @@ class ReportManager:
             if lowered != current:
                 report.expires_at = lowered
                 s.commit()
+
+    def expiring_reports(self, until: datetime | None) -> list[ExpiringItem]:
+        """Return every owner's reports with a deadline by ``until``.
+
+        Args:
+            until (datetime | None): The horizon; ``None`` for every deadline.
+
+        Returns:
+            list[ExpiringItem]: With the logical collection the report was built from.
+        """
+        with self._session_scope() as s:
+            query = s.query(Report).filter(Report.expires_at.is_not(None))
+            if until is not None:
+                query = query.filter(Report.expires_at <= until.astimezone(UTC).replace(tzinfo=None))
+            return [
+                ExpiringItem(
+                    "report",
+                    None,
+                    report.collection_name,
+                    report.owner,
+                    str(report.id),
+                    report.title,
+                    _aware_utc(report.created_at),
+                    _aware_utc(report.expires_at),
+                )
+                for report in query.all()
+            ]
+
+    def shift_report_expiries(self, sooner: timedelta, *, floor: datetime) -> int:
+        """Move every report's deadline ``sooner`` forward, never before ``floor`` and never later.
+
+        Args:
+            sooner (timedelta): How much shorter the period became.
+            floor (datetime): The end of the new notice period.
+
+        Returns:
+            int: Reports whose deadline moved.
+        """
+        moved = 0
+        with self._write_scope() as s:
+            for report in s.query(Report).filter(Report.expires_at.is_not(None)).all():
+                current = _aware_utc(report.expires_at)
+                if current is None:
+                    continue
+                lowered = min(current, max(current - sooner, floor))
+                if lowered != current:
+                    report.expires_at = lowered
+                    moved += 1
+            s.commit()
+        return moved
 
     def clear_report_expiries(self) -> int:
         """Forget every report's deadline, for the sweep to stamp again under a new period.

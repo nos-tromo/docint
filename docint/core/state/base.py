@@ -254,11 +254,10 @@ def _ensure_derived_expiry_columns(engine: Engine) -> None:
 def _ensure_collection_owner_activity_column(engine: Engine) -> None:
     """Add ``last_activity_at`` to ``collection_owners`` and stamp unstamped rows.
 
-    The column is the retention clock (``docs/retention.md``). Rows without a
-    stamp get the migration time, not ``created_at``: no activity history
-    exists to reconstruct, and a guess that is too old deletes data. This runs
-    on every startup, so a row an older release inserted without the column
-    joins retention from then on.
+    The column was the clock of the idle-window collection retention that
+    document retention replaced (``docs/retention.md``); it is kept so older
+    stores still open, and nothing reads it for a deadline any more. Rows
+    without a stamp get the migration time.
 
     The stamp is bound through SQLAlchemy's ``DateTime`` so it is stored in the
     same form the ORM writes; a plain ``datetime`` parameter would be stored
