@@ -73,7 +73,7 @@ export function RetentionCard() {
                   <li key={`${item.kind}:${item.id}`} className="flex items-center justify-between gap-3">
                     <span className="flex min-w-0 items-baseline gap-2">
                       <span className="shrink-0 text-xs text-muted-foreground">{t(KIND_KEY[item.kind])}</span>
-                      <span className="min-w-0 truncate">{item.name}</span>
+                      <span className="min-w-0 truncate">{item.name ?? item.id}</span>
                     </span>
                     <span className="shrink-0 tabular-nums text-[var(--status-amber-fg)]">
                       {t('dashboard.retention_due', { date: formatDate(item.expires_at, lang) })}

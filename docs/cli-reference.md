@@ -228,7 +228,10 @@ Run it before changing `DOCUMENT_RETENTION_DAYS` ([retention.md](retention.md)).
 Without `--days` it shows what the running backend acts on: the configured
 period, anchored on the moment the backend's startup recorded it. It also names
 the collections whose documents have no owner — ingested with the `ingest`
-CLI — which expire like any other while no one is notified.
+CLI — which expire like any other while no one is notified. Documents Qdrant
+holds that the index does not list yet — right after an upgrade or a restore,
+before the backend's first sweep repairs the index — are dated as that repair
+would date them, in memory.
 
 It is not audited, so it names every item by reference only: the file hash,
 the chat id or the report id, never a file name, a question or a title.

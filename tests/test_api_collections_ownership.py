@@ -557,6 +557,8 @@ def test_admin_all_is_recorded(client: TestClient, _patch_rag: _OwnRAG, audit_st
     alone = _retention(client, {"X-Auth-User": "alice"}, all="true")["items"]
 
     assert [(i["owner"], i["id"]) for i in items] == [("alice", "doc")]
+    # Another owner's file names, questions and titles are content: references only.
+    assert items[0]["name"] is None
     assert [i["owner"] for i in alone] == [None]
     events = [json.loads(line) for line in audit_stream.getvalue().splitlines()]
     (event,) = [e for e in events if e["operation"] == "collections.retention_all"]

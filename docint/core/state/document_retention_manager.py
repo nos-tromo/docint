@@ -277,6 +277,24 @@ class DocumentRetentionManager:
             )
             return [self._detached(row) for row in rows]
 
+    def due_collections(self, now: datetime) -> list[str]:
+        """Return every collection holding at least one due document.
+
+        Args:
+            now (datetime): The current time.
+
+        Returns:
+            list[str]: Physical names, sorted.
+        """
+        with self._session_scope() as s:
+            found = s.scalars(
+                select(DocumentRetention.physical)
+                .where(DocumentRetention.expires_at.is_not(None), DocumentRetention.expires_at <= now)
+                .distinct()
+                .order_by(DocumentRetention.physical)
+            )
+            return [str(value) for value in found]
+
     def warning_for(self, owner: str | None, now: datetime, notice_days: int) -> list[DocumentRetention]:
         """Return an owner's documents due within the notice period (or overdue).
 

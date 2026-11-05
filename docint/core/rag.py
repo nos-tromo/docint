@@ -8681,7 +8681,11 @@ class RAG:
         (then a summary revision bump); source files inside the collection's
         source directory; manifest rows; PDF artifacts nothing else uses;
         the ``_entities`` companion (canonical entities carry no per-document
-        provenance, so they are rebuilt); the caches; the index rows.
+        provenance, so they are rebuilt); the caches; the index rows (kept when
+        the collection is left empty, for the collection cascade). The main
+        points go late, so a retry after a failed step still finds the files.
+        A hash another indexed document also carries never selects that
+        document's points.
 
         Args:
             physical (str): The Qdrant collection.
@@ -8691,17 +8695,31 @@ class RAG:
             DocumentDeletion: What was removed.
         """
         docs = list(documents)
-        keys = {doc.file_hash for doc in docs}
-        hashes = set(keys).union(*(set(doc.point_hashes or []) for doc in docs)) if docs else set()
-        names = {doc.filename for doc in docs if doc.filename}
         client = self.qdrant_client
         if not docs:
             return DocumentDeletion(collection_empty=self._collection_is_empty(physical))
-        any_hash = sorted(hashes)
+        keys = {doc.file_hash for doc in docs}
+        hashes = set(keys).union(*(set(doc.point_hashes or []) for doc in docs))
+        names = {doc.filename for doc in docs if doc.filename}
+        manager = self.ensure_document_retention_manager()
+        # A hash another document also carries (a clip that is both a file of
+        # its own and a dossier's attachment) names that document too: only
+        # the hashes no surviving document lists select anything beyond this
+        # document's own points.
+        surviving: set[str] = set()
+        for row in manager.rows_for(physical):
+            if row.file_hash not in keys:
+                surviving.add(row.file_hash)
+                surviving.update(row.point_hashes or [])
+        exclusive = hashes - surviving
         main_filter = qdrant_models.Filter(
             should=[
-                qdrant_models.FieldCondition(key=key, match=qdrant_models.MatchAny(any=any_hash))
-                for key in ("file_hash", "media_file_hash", "source_doc_id")
+                qdrant_models.FieldCondition(key="file_hash", match=qdrant_models.MatchAny(any=sorted(keys))),
+                *(
+                    qdrant_models.FieldCondition(key=key, match=qdrant_models.MatchAny(any=sorted(exclusive)))
+                    for key in ("media_file_hash", "source_doc_id")
+                    if exclusive
+                ),
             ]
         )
         paths: set[str] = set()
@@ -8727,21 +8745,22 @@ class RAG:
                         postings.add(str(payload["posting_uuid"]))
                 if offset is None:
                     break
-            if points:
-                client.delete(
-                    collection_name=physical, points_selector=qdrant_models.FilterSelector(filter=main_filter)
-                )
+        # The main points are what a retry finds the files and postings by,
+        # so they go last: a step that fails leaves them for the next sweep.
         dockv = f"{physical}_dockv"
         if client.collection_exists(dockv):
             client.delete(collection_name=dockv, points_selector=qdrant_models.FilterSelector(filter=main_filter))
-        image_points, image_occurrences = self._delete_document_images(physical, hashes, postings)
-        nodes = self._delete_document_nodes(physical, hashes)
-        self._forget_document_summaries(physical, keys, names)
-        source_files = self._delete_document_sources(physical, paths)
+        image_points, image_occurrences, image_paths = self._delete_document_images(physical, exclusive, postings)
+        nodes = self._delete_document_nodes(physical, keys, exclusive)
+        self._forget_document_summaries(physical, keys, names, social=bool(postings))
+        source_files = self._delete_document_sources(physical, paths | image_paths)
         manifest_path = self._ingest_manifest_path(physical)
         if manifest_path.is_file():
-            self._build_ingest_manifest(physical).forget(physical, keys)
+            # Cached transcripts are keyed by the media hash, not the document's.
+            self._build_ingest_manifest(physical).forget(physical, keys | exclusive)
         artifacts = self._delete_document_artifacts(physical, keys)
+        if points:
+            client.delete(collection_name=physical, points_selector=qdrant_models.FilterSelector(filter=main_filter))
         entities = f"{physical}_entities"
         entities_dropped = False
         if client.collection_exists(entities):
@@ -8752,9 +8771,12 @@ class RAG:
             self._query_engine_cache.pop(physical, None)
         self.forget_keyword_readiness(physical)
         self._invalidate_ner_cache(physical)
-        manager = self.ensure_document_retention_manager()
-        for key in keys:
-            manager.delete(physical, key)
+        collection_empty = self._collection_is_empty(physical)
+        if not collection_empty:
+            # When the collection is left empty its rows stay until the
+            # collection cascade drops them, so a failed cascade is retried.
+            for key in keys:
+                manager.delete(physical, key)
         return DocumentDeletion(
             points=points,
             image_points=image_points,
@@ -8763,7 +8785,7 @@ class RAG:
             source_files=source_files,
             artifacts=artifacts,
             entities_dropped=entities_dropped,
-            collection_empty=self._collection_is_empty(physical),
+            collection_empty=collection_empty,
         )
 
     def _collection_is_empty(self, physical: str) -> bool:
@@ -8779,25 +8801,29 @@ class RAG:
             return True
         return int(self.qdrant_client.count(collection_name=physical, exact=True).count) == 0
 
-    def _delete_document_images(self, physical: str, hashes: set[str], postings: set[str]) -> tuple[int, int]:
+    def _delete_document_images(self, physical: str, hashes: set[str], postings: set[str]) -> tuple[int, int, set[str]]:
         """Delete the ``_images`` points of documents, or their occurrences on shared images.
 
         Args:
             physical (str): The Qdrant collection.
-            hashes (set[str]): Every hash the documents' points carry.
+            hashes (set[str]): The hashes that name only these documents.
             postings (set[str]): The posting uuids the documents' points carry.
 
         Returns:
-            tuple[int, int]: Points deleted, occurrences dropped from kept points.
+            tuple[int, int, set[str]]: Points deleted, occurrences dropped from
+                kept points, and the file paths the deleted points and dropped
+                occurrences name (a posting image lives only here).
         """
         images = f"{physical}_images"
         client = self.qdrant_client
-        if not client.collection_exists(images):
-            return 0, 0
+        # An empty ``should`` would match every image: nothing to name, nothing to touch.
+        if not (hashes or postings) or not client.collection_exists(images):
+            return 0, 0, set()
         any_hash = sorted(hashes)
         conditions = [
             qdrant_models.FieldCondition(key=key, match=qdrant_models.MatchAny(any=any_hash))
             for key in ("source_doc_id", "media_file_hash", "image_id")
+            if any_hash
         ]
         if postings:
             conditions.append(
@@ -8812,8 +8838,12 @@ class RAG:
                 or str(entry.get("posting_uuid") or "") in postings
             )
 
+        def paths_of(entry: Mapping[str, Any]) -> set[str]:
+            return {str(entry[key]) for key in ("file_path", "source_path") if isinstance(entry.get(key), str)}
+
         deleted: list[Any] = []
         dropped = 0
+        paths: set[str] = set()
         offset: Any = None
         while True:
             found, offset = client.scroll(
@@ -8831,8 +8861,16 @@ class RAG:
                 remaining = [entry for entry in listed if isinstance(entry, dict) and not names_document(entry)]
                 if not remaining:
                     deleted.append(point.id)
+                    paths |= paths_of(payload)
+                    for entry in listed:
+                        if isinstance(entry, dict):
+                            paths |= paths_of(entry)
                     continue
                 dropped += len(listed) - len(remaining)
+                kept = set().union(*(paths_of(entry) for entry in remaining))
+                for entry in listed:
+                    if isinstance(entry, dict) and names_document(entry):
+                        paths |= paths_of(entry) - kept
                 payload["occurrences"] = remaining
                 if names_document(payload) or str(payload.get("image_id") or "") in hashes:
                     for key in _IMAGE_IDENTITY_KEYS:
@@ -8843,14 +8881,15 @@ class RAG:
                 break
         if deleted:
             client.delete(collection_name=images, points_selector=qdrant_models.PointIdsList(points=deleted))
-        return len(deleted), dropped
+        return len(deleted), dropped, paths
 
-    def _delete_document_nodes(self, physical: str, hashes: set[str]) -> int:
+    def _delete_document_nodes(self, physical: str, keys: set[str], hashes: set[str]) -> int:
         """Delete the documents' docstore nodes, coarse parents included.
 
         Args:
             physical (str): The Qdrant collection.
-            hashes (set[str]): Every hash the documents' points carry.
+            keys (set[str]): The documents' file hashes; a node with a file hash goes by it.
+            hashes (set[str]): The hashes that name only these documents, for a node without one.
 
         Returns:
             int: Nodes deleted.
@@ -8861,25 +8900,39 @@ class RAG:
         doomed = [
             node_id
             for node_id, node in store.docs.items()
-            if str((node.metadata or {}).get("file_hash") or "") in hashes
-            or source_file_hash(dict(node.metadata or {})) in hashes
+            if (
+                str((node.metadata or {}).get("file_hash") or "") in keys
+                if (node.metadata or {}).get("file_hash")
+                else source_file_hash(dict(node.metadata or {})) in hashes
+            )
         ]
         for node_id in doomed:
             store.delete_document(node_id, raise_error=False)
         return len(doomed)
 
-    def _forget_document_summaries(self, physical: str, keys: set[str], names: set[str]) -> None:
-        """Drop the documents' summary map-cache entries and invalidate the collection summary.
+    def _forget_document_summaries(self, physical: str, keys: set[str], names: set[str], *, social: bool) -> None:
+        """Delete what the summary caches hold of the documents, and invalidate the collection summary.
+
+        The cached collection summary is deleted, not just outdated: it quotes
+        the documents. Social map units are keyed by bucket, not by document,
+        so a document with postings takes every one of them (they are rebuilt).
 
         Args:
             physical (str): The Qdrant collection.
             keys (set[str]): The documents' file hashes.
             names (set[str]): Their file names.
+            social (bool): Whether the documents carry postings.
         """
         if (self.qdrant_src_dir / physical / f"{physical}_kv.db").is_file():
             kv = self._build_kv_store(physical)
-            for unit_key in [*(f"doc:{key}" for key in keys), *(f"doc:name:{name}" for name in names)]:
+            doomed = [*(f"doc:{key}" for key in keys), *(f"doc:name:{name}" for name in names)]
+            if social:
+                doomed += [
+                    key for key in kv.get_all(collection=SUMMARY_MAP_CACHE_NAMESPACE) if key.startswith("social:")
+                ]
+            for unit_key in doomed:
                 kv.delete(unit_key, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+            kv.delete(SUMMARY_CACHE_PAYLOAD_KEY, collection=SUMMARY_CACHE_NAMESPACE)
         self._bump_summary_revision(physical, allow_create=False)
 
     def _delete_document_sources(self, physical: str, paths: set[str]) -> int:

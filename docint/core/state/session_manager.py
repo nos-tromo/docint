@@ -1858,24 +1858,27 @@ class SessionManager:
                     )
                 )
 
-            self._lower_session_expiry(conv, cited)
+            self._lower_session_expiry(conv, cited, agent=bool(agent_trail))
             s.commit()
             return next_idx
 
-    def _lower_session_expiry(self, conv: Conversation, cited: set[str]) -> None:
+    def _lower_session_expiry(self, conv: Conversation, cited: set[str], *, agent: bool = False) -> None:
         """Lower a session's deadline to the earliest of the documents this turn drew on.
 
-        A turn that names no source, or a session with a scope or a topic
-        focus, may have drawn on anything in the collection, so the
-        collection's oldest live document counts. Never raises the deadline.
-        Best-effort: a failure leaves the deadline as it was and is logged.
+        A turn that names no source, an agent-answered turn (its tools may
+        list topics or keywords of the whole collection), or a session with a
+        scope or a topic focus may have drawn on anything in the collection,
+        so the collection's oldest live document counts. Never raises the
+        deadline. Best-effort: a failure leaves the deadline as it was and is
+        logged.
 
         Args:
             conv (Conversation): The session, inside the open transaction.
             cited (set[str]): The file hashes this turn's citations name.
+            agent (bool): Whether an agent answered the turn.
         """
         try:
-            collection_wide = not cited or bool(conv.scope_chunk_ids) or bool(conv.topic_focus)
+            collection_wide = agent or not cited or bool(conv.scope_chunk_ids) or bool(conv.topic_focus)
             physical = conv.collection_name or self.rag.qdrant_collection
             if not isinstance(physical, str):
                 return
@@ -2302,7 +2305,8 @@ class SessionManager:
             found = []
             for convo in s.query(Conversation).filter(Conversation.expires_at.is_(None)).all():
                 cited = {str(c.file_hash) for t in convo.turns for c in t.citations if c.file_hash}
-                wide = not cited or bool(convo.scope_chunk_ids) or bool(convo.topic_focus)
+                agent = any(t.agent_trail for t in convo.turns)
+                wide = agent or not cited or bool(convo.scope_chunk_ids) or bool(convo.topic_focus)
                 found.append((str(convo.id), convo.collection_name, cited, wide))
             return found
 

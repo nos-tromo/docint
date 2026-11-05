@@ -48,7 +48,9 @@ the operator report and the sweep can never disagree about a date.
 One uploaded file, keyed by its content hash: every chunk of a PDF, a video
 with its transcript segments and keyframes, a social-media export with all its
 postings and their images. Images that two documents contain are kept for the
-other one.
+other one, and so is anything named by a hash another indexed document also
+carries — a clip that is both a file of its own and a dossier's attachment is
+two documents, each with its own clock.
 
 ## Where the clock lives
 
@@ -75,7 +77,7 @@ collection's oldest document counts.
 
 | Item | Inherits from |
 |---|---|
-| Chat session | the documents its answers cite; an answer without citations, a scoped session or one with a topic focus counts as collection-wide |
+| Chat session | the documents its answers cite; an answer without citations, an agent-answered turn (its tools may list the whole collection's topics or keywords), a scoped session or one with a topic focus counts as collection-wide |
 | Report | each item's sources (a chat answer's citations, a finding's chunk); summaries, topics and the collection overview count as collection-wide |
 | Stored extract | collection-wide, and its own `EXTRACT_RETENTION_DAYS` if that comes first |
 | Topic run | collection-wide |
@@ -111,8 +113,9 @@ Every deletion is recorded in the audit trail first, as `delete` by the system,
 with references and never content ([audit.md](audit.md#retention-sweep)). A
 deletion whose record cannot be written does not happen. A document deletion
 that fails afterwards adds an `error` event; whatever fails is retried by the
-next sweep, while the others still go. At most 5,000 due
-documents are taken per sweep; the rest follow the next day. Each sweep ends
+next sweep, while the others still go. At most 5,000 due documents of one
+collection are deleted per sweep, soonest first; the rest follow the next day,
+and every collection with due documents is visited each sweep. Each sweep ends
 with one line to grep for:
 
 ```text
@@ -125,23 +128,31 @@ when the startup could not record the period, the sweep does not start.
 
 ## What deleting a document removes
 
-In order, each step a no-op on what is already gone:
+Its points are found by its own `file_hash`, and by any `media_file_hash` or
+`source_doc_id` it carries that no other indexed document carries too. In
+order, each step a no-op on what is already gone:
 
-1. its points in the collection (by `file_hash`, `media_file_hash` or
-   `source_doc_id`) and in the `_dockv` companion;
+1. its points in the `_dockv` companion;
 2. its `_images` points — an image another document also contains loses only
-   this document's occurrence;
-3. its docstore nodes, and its entries in the summary cache (the collection's
-   cached summary is invalidated);
-4. its source file, only inside the collection's source directory;
-5. its ingest manifest row;
-6. its PDF pipeline artifacts, unless another collection still uses them (below);
-7. the collection's `_entities` companion — canonical entities record no
+   this document's occurrence — and the image files they name (a social
+   export's posting images live only there);
+3. its docstore nodes;
+4. what the summary caches hold of it: its map units, every social map unit
+   when it carries postings, and the cached collection summary itself;
+5. its source files, only inside the collection's source directory;
+6. its ingest manifest rows, the transcript cached under its media hash
+   included;
+7. its PDF pipeline artifacts, unless another collection still uses them (below);
+8. its points in the collection — last, so a retry after a failed step still
+   finds which files to remove;
+9. the collection's `_entities` companion — canonical entities record no
    per-document provenance, so the store is rebuilt from what is left: while
    `RES_AUTO_RESOLVE` is on, resolution runs again right after (`combine`
    `entities.resolve`, by the system); until it completes, or with it off until
    the next resolve, entity views show the collection as unresolved;
-8. its row in the document index.
+10. its row in the document index — unless the collection is left empty: then
+    the row stays until the collection cascade drops it, so a failed cascade is
+    retried by the next sweep.
 
 While a collection is being worked on by the sweep, requests that would work on
 it get `409`.
@@ -161,11 +172,15 @@ artifact is removed.
   with its date; the sidebar says how many items are due and links to it. See
   [ui-guide.md](ui-guide.md#dashboard-srcroutesdashboardtsx).
 - `GET /collections/retention` — the same for the caller; admins pass
-  `all=true` for everyone's (recorded as `admin`). See
+  `all=true` for everyone's (recorded as `admin`), other owners' items by
+  reference only, without their file names, questions or titles. See
   [api-reference.md](api-reference.md#get-collectionsretention).
 - `GET /config` — `document_retention_days` and `retention_notice_days`.
-- `make retention-report` — the operator's view of everything with a date;
-  `DAYS=N` shows what another period would do. See
+- `make retention-report` — the operator's view of everything with a date,
+  by reference only; `DAYS=N` shows what another period would do. Documents
+  Qdrant holds that the index does not list yet (right after an upgrade or a
+  restore, before the first sweep) are dated as the sweep's repair would date
+  them, without writing anything. See
   [cli-reference.md](cli-reference.md#retention-report--what-retention-deletes-and-when).
 
 **Collections without an owner** — ingested with the `ingest` CLI, or from

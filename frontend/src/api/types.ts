@@ -857,8 +857,11 @@ export interface RetentionItem {
   /** `null` for the caller's own items; another owner's name otherwise. */
   owner: string | null
   id: string
-  /** The file name, the chat's first question, or the report title. */
-  name: string
+  /**
+   * The file name, the chat's first question, or the report title; `null` for
+   * another owner's item (an admin's listing names those by `id` only).
+   */
+  name: string | null
   expires_at: string
   warning: boolean
 }

@@ -115,9 +115,19 @@ class _StubRAG:
         self.session_store = session_store
         self.qdrant_collection = ""
         self.unloaded = False
+        self.payload: dict[str, list[Any]] = {}
 
     def unload_models(self) -> None:
         self.unloaded = True
+
+    def list_collections(self) -> list[str]:
+        return sorted(self.payload)
+
+    def payload_documents(self, physical: str) -> list[Any]:
+        return self.payload.get(physical, [])
+
+    def _manifest_completion_times(self, physical: str) -> dict[str, datetime]:
+        return {}
 
 
 def test_the_cli_reads_the_store_and_writes_nothing(
@@ -157,3 +167,23 @@ def test_the_cli_reads_the_store_and_writes_nothing(
     assert "as if switched on now" in capsys.readouterr().out
     after = CollectionOwnerManager(rag=rag).retention_period()
     assert after is not None and after.days == 365
+
+
+def test_the_report_dates_documents_the_index_does_not_hold_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Before the first sweep repairs the index, the report still dates what Qdrant holds, writing nothing."""
+    from docint.core.state.document_retention_manager import PayloadDocument
+
+    rag: Any = _StubRAG(f"sqlite:///{tmp_path / 'sessions.sqlite3'}")
+    owners = CollectionOwnerManager(rag=rag)
+    physical = owners.register("alice", "docs")
+    owners.record_retention_period(365, now=LONG_AGO)
+    rag.payload[physical] = [PayloadDocument("h9", frozenset({"h9"}), "z.pdf", NOW - 340 * DAY)]
+    monkeypatch.setattr(retention_report, "RAG", lambda **_kw: rag)
+
+    retention_report.main([])
+
+    line = next(line for line in capsys.readouterr().out.splitlines() if " h9 " in f" {line} ")
+    assert "alice" in line and (NOW + 25 * DAY).date().isoformat()[:7] in line
+    assert DocumentRetentionManager(rag=rag).all_rows() == []

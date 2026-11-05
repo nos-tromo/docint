@@ -235,3 +235,26 @@ def test_topic_run_records_its_expiry(stores: tuple[MagicMock, DocumentRetention
 
     rag, _, _ = stores
     assert collection_expiry_iso(rag, "phys", now=NOW) == (NOW - 300 * DAY + 365 * DAY).isoformat()
+
+
+def test_an_agent_answered_turn_counts_as_collection_wide(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
+    """An agent may have drawn on topics or keyword listings of the whole collection, whatever it cites."""
+    _, _, sessions = stores
+    sessions._persist_turn(
+        "s1",
+        "q",
+        _response(["new"]),
+        {"response": "a", "reasoning": None},
+        owner="alice",
+        agent_trail={"steps": [{"tool": "topics"}]},
+    )
+    assert _expiry(sessions, "s1") == NOW - 300 * DAY + 365 * DAY
+    with sessions._session_scope() as s:
+        convo = s.get(Conversation, "s1")
+        assert convo is not None
+        convo.expires_at = None
+        s.commit()
+    [(session_id, _physical, _cited, wide)] = sessions.sessions_without_deadline()
+    assert (session_id, wide) == ("s1", True)

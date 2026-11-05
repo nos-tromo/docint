@@ -16,6 +16,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from loguru import logger
+
 from docint.core.rag import RAG
 from docint.core.retention import ExpiringItem, RetentionPeriodState, document_expires_at, is_due, is_warning_within
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
@@ -110,6 +112,59 @@ def hypothetical_items(
     ]
 
 
+def unindexed_rows(
+    rag: RAG,
+    indexed: Sequence[DocumentRetention],
+    owner_of: dict[str, tuple[str | None, str]],
+    set_at: datetime,
+) -> list[DocumentRetention]:
+    """Date, in memory, the documents Qdrant holds that the index does not list yet.
+
+    The first sweep after an upgrade or a restore adds them to the index; the
+    report must not wait for it. Each is timed as that repair would time it:
+    its payload stamp, else the ingest manifest's completion time, else when
+    the period took effect. Nothing is written.
+
+    Args:
+        rag (RAG): The engine, for Qdrant and the manifests.
+        indexed (Sequence[DocumentRetention]): The index's rows.
+        owner_of (dict[str, tuple[str | None, str]]): Owner and logical name per physical collection.
+        set_at (datetime): When the period took effect (or would).
+
+    Returns:
+        list[DocumentRetention]: Transient rows, never added to the store.
+    """
+    known = {(row.physical, row.file_hash) for row in indexed}
+    found: list[DocumentRetention] = []
+    try:
+        collections = rag.list_collections()
+    except Exception as exc:
+        logger.warning("Qdrant not listed ({}); only indexed documents are shown.", exc)
+        return found
+    for physical in collections:
+        try:
+            docs = [doc for doc in rag.payload_documents(physical) if (physical, doc.file_hash) not in known]
+            manifest: dict[str, datetime] = rag._manifest_completion_times(physical) if docs else {}
+        except Exception as exc:
+            logger.warning("Collection '{}' not read ({}); its unindexed documents are not shown.", physical, exc)
+            continue
+        owner, logical = owner_of.get(physical, (None, physical))
+        for doc in docs:
+            found.append(
+                DocumentRetention(
+                    physical=physical,
+                    logical=logical,
+                    owner=owner,
+                    file_hash=doc.file_hash,
+                    filename=doc.filename,
+                    point_hashes=sorted(doc.point_hashes),
+                    ingested_at=doc.ingested_at or manifest.get(doc.file_hash) or set_at,
+                    expires_at=None,
+                )
+            )
+    return found
+
+
 def render_report(
     items: Sequence[ExpiringItem],
     *,
@@ -194,26 +249,30 @@ def main(argv: list[str] | None = None) -> None:
     try:
         owners = CollectionOwnerManager(rag)
         state = owners.retention_period()
-        logical_of = {row.physical: row.logical for row in owners.list_all_activity()}
+        activity = owners.list_all_activity()
+        logical_of = {row.physical: row.logical for row in activity}
         documents = DocumentRetentionManager(rag)
         rows = documents.all_rows()
         now = datetime.now(UTC)
         recorded = days is not None and state is not None and state.days == days
+        set_at = state.set_at if recorded and state is not None else now
+        missing = unindexed_rows(rag, rows, {row.physical: (row.owner, row.logical) for row in activity}, set_at)
         if recorded:
             assert state is not None
-            set_at = state.set_at
             items = documents.expiring_items(None)
+            items += hypothetical_items(missing, state, notice_days=configured.notice_days)
             items += [
                 replace(i, logical=logical_of.get(i.physical or "", i.physical))
                 for i in SessionManager(rag).expiring_sessions(None)
             ]
             items += ReportManager(rag).expiring_reports(None)
         else:
-            set_at = now
-            items = hypothetical_items(rows, RetentionPeriodState(days, now), notice_days=configured.notice_days)
+            items = hypothetical_items(
+                [*rows, *missing], RetentionPeriodState(days, now), notice_days=configured.notice_days
+            )
     finally:
         rag.unload_models()
-    unowned = sorted({row.physical for row in rows if row.owner is None})
+    unowned = sorted({row.physical for row in [*rows, *missing] if row.owner is None})
     lines = render_report(
         items,
         period_days=days,

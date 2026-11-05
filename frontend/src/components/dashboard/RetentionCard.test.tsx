@@ -72,11 +72,13 @@ describe('RetentionCard', () => {
     expect(row).toHaveTextContent('Deleted on Nov 22, 2026')
   })
 
-  it("names the owner of another user's collection", async () => {
-    vi.stubGlobal('fetch', retentionFetch(365, [item('document', 'a.pdf', 'shared-notes', '2026-11-22T08:00:00Z', 'a.beispiel')]))
+  it("names the owner of another user's collection, and its items by reference", async () => {
+    const foreign = { ...item('document', 'a.pdf', 'shared-notes', '2026-11-22T08:00:00Z', 'a.beispiel'), name: null }
+    vi.stubGlobal('fetch', retentionFetch(365, [foreign]))
     renderCard()
 
     expect(await screen.findByRole('heading', { name: /shared-notes \(owner: a\.beispiel\)/ })).toBeInTheDocument()
+    expect(screen.getByRole('listitem')).toHaveTextContent('document-a.pdf')
   })
 
   it('renders nothing when retention is off, and asks for nothing', async () => {

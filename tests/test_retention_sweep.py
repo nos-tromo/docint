@@ -86,8 +86,9 @@ class _SweepRAG:
         if self.fail_delete:
             raise RuntimeError("qdrant down")
         self.deleted_docs.append((physical, sorted(row.file_hash for row in rows)))
-        for row in rows:
-            self.retention.delete(physical, row.file_hash)
+        if not self.empty_after:
+            for row in rows:
+                self.retention.delete(physical, row.file_hash)
         return DocumentDeletion(
             points=len(rows), entities_dropped=self.entities_dropped, collection_empty=self.empty_after
         )
@@ -107,6 +108,7 @@ class _SweepRAG:
     def delete_collection(self, name: str) -> None:
         self.existing.discard(name)
         self.deleted_collections.append(name)
+        self.retention.delete_collection(name)
 
 
 class _IdleJobs:
@@ -391,3 +393,56 @@ def test_items_with_nothing_to_inherit_from_get_their_own_period(fake: _SweepRAG
         assert stamped is not None and abs(stamped - (NOW + 365 * DAY)) < timedelta(minutes=5)
     stamped = _report_expiry(fake, rid)
     assert stamped is not None and abs(stamped - (NOW + 365 * DAY)) < timedelta(minutes=5)
+
+
+def test_a_failed_collection_cascade_is_retried(fake: _SweepRAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last document's row stays until the collection is gone, so the next sweep finishes the cascade."""
+    physical = fake.owners.register("alice", "docs")
+    _doc(fake, "old", days_ago=370, physical=physical)
+    fake.empty_after = True
+    real = api_module._purge_collection
+    calls: list[str] = []
+
+    def flaky(owner: str | None, logical: str, phys: str) -> object:
+        calls.append(phys)
+        if len(calls) == 1:
+            raise RuntimeError("store offline")
+        return real(owner, logical, phys)
+
+    monkeypatch.setattr(api_module, "_purge_collection", flaky)
+    first = _sweep()
+    assert first.failed == [physical] and fake.deleted_collections == []
+    second = _sweep()
+    assert second.collections == 1 and fake.deleted_collections == [physical]
+    assert fake.retention.rows_for(physical) == []
+
+
+def test_every_collection_with_due_documents_is_visited(fake: _SweepRAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-sweep bound applies per collection: one large collection never starves the others."""
+    monkeypatch.setattr(api_module, "_RETENTION_SWEEP_LIMIT", 1)
+    _doc(fake, "a1", days_ago=380, physical="a")
+    _doc(fake, "a2", days_ago=380, physical="a")
+    _doc(fake, "b1", days_ago=370, physical="b")
+    report = _sweep()
+    assert [physical for physical, _ in fake.deleted_docs] == ["a", "b"]
+    assert report.documents == 2
+
+
+def test_one_unreadable_session_never_blocks_the_others(fake: _SweepRAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stamping goes item by item: a session that fails is skipped, the rest and every report still get dates."""
+    with fake.sessions._session_scope() as s:
+        s.add(Conversation(id="bad", owner="alice", collection_name="phys"))
+        s.add(Conversation(id="good", owner="alice", collection_name="phys"))
+        s.commit()
+    rid = int(fake.reports.create_report(title="r", owner="alice", collection_name=None)["id"])
+    real = SessionManager.set_session_expiry
+
+    def picky(self: SessionManager, session_id: str, expires_at: datetime) -> None:
+        if session_id == "bad":
+            raise RuntimeError("locked")
+        real(self, session_id, expires_at)
+
+    monkeypatch.setattr(SessionManager, "set_session_expiry", picky)
+    _sweep()
+    assert _session_expiry(fake, "good") is not None
+    assert _report_expiry(fake, rid) is not None

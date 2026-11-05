@@ -257,7 +257,7 @@ def _start_audit(principal_cfg: PrincipalConfig) -> audit.Auditor:
 #: Seconds from startup to the first retention sweep, and between sweeps.
 _RETENTION_FIRST_SWEEP_S = 300.0
 _RETENTION_SWEEP_INTERVAL_S = 86_400.0
-#: Due documents read per sweep, at most; the rest wait for the next one.
+#: Due documents deleted per collection per sweep, at most; the rest wait for the next one.
 _RETENTION_SWEEP_LIMIT = 5_000
 
 
@@ -422,10 +422,8 @@ async def _retention_sweep(
         floors = await to_thread.run_sync(partial(_collection_floors, now))
     except Exception as exc:
         logger.warning("Collection floors not read ({}); extracts and topic runs keep their own deadlines.", exc)
-    due = await to_thread.run_sync(
-        partial(rag.ensure_document_retention_manager().due, now, limit=_RETENTION_SWEEP_LIMIT)
-    )
-    for physical in sorted({row.physical for row in due}):
+    due = await to_thread.run_sync(partial(rag.ensure_document_retention_manager().due_collections, now))
+    for physical in due:
         running, queued = get_preprocess_pool().inflight(physical)
         if running + queued > 0 or await jobs.any_active_for(physical):
             logger.info("Retention postponed collection '{}': a job is still working on it.", physical)
@@ -481,7 +479,18 @@ def _stamp_derived_deadlines(now: datetime, period_days: int | None) -> None:
     own = None if period_days is None else now + timedelta(days=period_days)
     try:
         sessions = rag.ensure_session_manager()
-        for session_id, physical, cited, wide in sessions.sessions_without_deadline():
+        reports = rag.ensure_report_manager()
+        owners = rag.ensure_collection_owner_manager()
+        unstamped_sessions = sessions.sessions_without_deadline()
+        unstamped_reports = reports.reports_without_deadline()
+    except Exception as exc:
+        logger.warning("Older sessions and reports not read ({}); the next sweep retries.", exc)
+        return
+    failed = 0
+    # Item by item: one that fails is retried by the next sweep and never
+    # keeps the others from getting their date.
+    for session_id, physical, cited, wide in unstamped_sessions:
+        try:
             deadline = (
                 source_expiry(rag, physical, set() if wide else cited, now=now, period_days=period_days)
                 if physical
@@ -489,17 +498,20 @@ def _stamp_derived_deadlines(now: datetime, period_days: int | None) -> None:
             )
             if deadline is not None:
                 sessions.set_session_expiry(session_id, deadline)
-        reports = rag.ensure_report_manager()
-        owners = rag.ensure_collection_owner_manager()
-        for report_id, owner, logical in reports.reports_without_deadline():
+        except Exception:
+            failed += 1
+    for report_id, owner, logical in unstamped_reports:
+        try:
             deadline = own
             if logical:
                 physical = owners.resolve(owner, logical) or logical
                 deadline = source_expiry(rag, str(physical), [], now=now, period_days=period_days)
             if deadline is not None:
                 reports.set_report_expiry(report_id, deadline)
-    except Exception as exc:
-        logger.warning("Deadlines of older sessions or reports not stamped ({}); the next sweep retries.", exc)
+        except Exception:
+            failed += 1
+    if failed:
+        logger.warning("{} older sessions or reports not stamped; the next sweep retries.", failed)
 
 
 def _collection_floors(now: datetime) -> dict[str, datetime]:
@@ -539,6 +551,7 @@ def _purge_due_documents(physical: str, now: datetime, retention: DocumentRetent
         rows = [
             row for row in rag.ensure_document_retention_manager().rows_for(physical) if is_due(row.expires_at, now)
         ]
+        rows = sorted(rows, key=lambda row: (row.expires_at or now, row.file_hash))[:_RETENTION_SWEEP_LIMIT]
         if not rows:
             return 0, False
         owner = activity.owner if activity is not None else rows[0].owner
@@ -1781,14 +1794,15 @@ class RetentionItemOut(BaseModel):
 
     ``owner`` is ``None`` for the caller's own items and names the owner
     otherwise (admins with ``all=true`` only). ``name`` is the file name, the
-    chat's first question, or the report title.
+    chat's first question, or the report title — for the caller's own items
+    only: another owner's are content, so an admin gets them by ``id``.
     """
 
     kind: Literal["document", "session", "report"]
     collection: str
     owner: str | None = None
     id: str
-    name: str
+    name: str | None
     expires_at: datetime
     warning: bool
 
@@ -2656,7 +2670,7 @@ def collections_retention(
                     collection=item.logical,
                     owner=None if item.owner == principal.name else item.owner,
                     id=item.id,
-                    name=item.name,
+                    name=item.name if item.owner == principal.name else None,
                     expires_at=item.expires_at,
                     warning=is_warning_within(item.expires_at, now, retention.notice_days),
                 )

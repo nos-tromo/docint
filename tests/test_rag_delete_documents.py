@@ -229,3 +229,83 @@ def test_deleting_a_collection_drops_its_index_rows(rag: RAG) -> None:
     _row(rag, "h1", ["h1"])
     rag.delete_collection("c1")
     assert rag.ensure_document_retention_manager().rows_for("c1") == []
+
+
+def test_social_export_media_files_go(rag: RAG) -> None:
+    """Posting images live only in ``_images``; their files go with the export, a neighbour's stay."""
+    dossier = _source(rag, "dossier.json")
+    image = _source(rag, "p1-photo.jpg")
+    neighbour = _source(rag, "other.jpg")
+    rag.qdrant_client.upsert("c1", [_point(1, file_hash="dossier", posting_uuid="p1", file_path=dossier)])
+    rag.qdrant_client.upsert(
+        "c1_images",
+        [
+            _point(10, image_id="i1", posting_uuid="p1", file_path=image, source_path=image),
+            _point(11, image_id="i2", source_doc_id="h2", file_path=neighbour, source_path=neighbour),
+        ],
+    )
+    rag.delete_documents("c1", [_row(rag, "dossier", ["dossier"])])
+    assert not Path(dossier).exists() and not Path(image).exists()
+    assert Path(neighbour).exists()
+
+
+def test_cached_transcript_is_forgotten(rag: RAG) -> None:
+    """A clip's transcript, cached under its media hash, goes with the document."""
+    manifest = IngestManifest(rag._ingest_manifest_path("c1"))
+    manifest.cache_nextext_transcript("c1", "clip-media", '{"text": "zz synthetic"}')
+    rag.qdrant_client.upsert("c1", [_point(1, file_hash="tj", media_file_hash="clip-media")])
+    rag.delete_documents("c1", [_row(rag, "tj", ["tj", "clip-media"])])
+    assert IngestManifest(rag._ingest_manifest_path("c1")).get_nextext_transcript("c1", "clip-media") is None
+
+
+def test_shared_media_hash_keeps_the_neighbour(rag: RAG) -> None:
+    """A standalone clip and a dossier's transcript of the same clip are two documents; each goes alone."""
+    rag.qdrant_client.upsert(
+        "c1", [_point(1, file_hash="V", media_file_hash="V"), _point(2, file_hash="T", media_file_hash="V")]
+    )
+    rag.qdrant_client.upsert("c1_images", [_point(10, image_id="k1", media_file_hash="V")])
+    v_row = _row(rag, "V", ["V"])
+    t_row = _row(rag, "T", ["T", "V"])
+    rag.delete_documents("c1", [v_row])
+    assert _ids(rag, "c1") == {2}
+    assert _ids(rag, "c1_images") == {10}
+    rag.delete_documents("c1", [t_row])
+    assert _ids(rag, "c1") == set()
+    assert _ids(rag, "c1_images") == set()
+
+
+def test_last_document_keeps_its_row_for_the_collection_cascade(rag: RAG) -> None:
+    """The row stays until the collection is deleted, so a failed cascade is retried by the next sweep."""
+    rag.qdrant_client.upsert("c1", [_point(1, file_hash="h1")])
+    assert rag.delete_documents("c1", [_row(rag, "h1", ["h1"])]).collection_empty is True
+    assert [r.file_hash for r in rag.ensure_document_retention_manager().rows_for("c1")] == ["h1"]
+
+
+def test_summary_caches_are_deleted(rag: RAG) -> None:
+    """The cached collection summary and social map units hold the document's content; they go."""
+    from docint.core.rag import SUMMARY_CACHE_NAMESPACE, SUMMARY_CACHE_PAYLOAD_KEY, SUMMARY_MAP_CACHE_NAMESPACE
+
+    kv = rag._build_kv_store("c1")
+    kv.put(SUMMARY_CACHE_PAYLOAD_KEY, {"response": "zz synthetic"}, collection=SUMMARY_CACHE_NAMESPACE)
+    kv.put("social:b1", {"summary": "zz"}, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+    kv.put("doc:h2", {"summary": "zz"}, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+    rag.qdrant_client.upsert("c1", [_point(1, file_hash="dossier", posting_uuid="p1"), _point(2, file_hash="h2")])
+    rag.delete_documents("c1", [_row(rag, "dossier", ["dossier"])])
+    kv = rag._build_kv_store("c1")
+    assert kv.get(SUMMARY_CACHE_PAYLOAD_KEY, collection=SUMMARY_CACHE_NAMESPACE) is None
+    assert kv.get("social:b1", collection=SUMMARY_MAP_CACHE_NAMESPACE) is None
+    assert kv.get("doc:h2", collection=SUMMARY_MAP_CACHE_NAMESPACE) is not None
+
+
+def test_a_retry_after_a_partial_failure_still_removes_the_file(rag: RAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A step that fails leaves the points, so the retry still knows which files to remove."""
+    a = _source(rag, "a.pdf")
+    rag.qdrant_client.upsert("c1", [_point(1, file_hash="h1", file_path=a), _point(2, file_hash="h2")])
+    row = _row(rag, "h1", ["h1"])
+    with monkeypatch.context() as mp:
+        mp.setattr(RAG, "_delete_document_nodes", lambda *_: (_ for _ in ()).throw(OSError("x")))
+        with pytest.raises(OSError):
+            rag.delete_documents("c1", [row])
+    rag.delete_documents("c1", [row])
+    assert not Path(a).exists()
+    assert _ids(rag, "c1") == {2}
