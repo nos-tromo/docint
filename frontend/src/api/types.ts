@@ -829,11 +829,13 @@ export interface AppConfig {
   /** Active UI/response locale, driven by `RESPONSE_LANGUAGE` on the backend. */
   language: 'en' | 'de'
   /**
-   * `COLLECTION_RETENTION`: `'off'` or the idle window after which a
-   * collection is deleted (`'6m'` … `'24m'`). Optional: a backend predating
+   * `DOCUMENT_RETENTION_DAYS`: days after its ingest a document is deleted;
+   * `null` while retention is off. Optional: a backend predating document
    * retention leaves every deadline surface hidden.
    */
-  collection_retention?: string
+  document_retention_days?: number | null
+  /** `RETENTION_NOTICE_DAYS`: how long before its deletion an item is listed. */
+  retention_notice_days?: number
   /**
    * `TOPICS_ENABLED`. Optional: a backend predating topics leaves every topics
    * surface hidden.
@@ -847,20 +849,24 @@ export interface AppConfig {
   require_purpose?: string[]
 }
 
-/** One collection's retention clock and deletion date (`GET /collections/retention`). */
-export interface CollectionRetention {
-  name: string
-  /** `null` for the caller's own collections; another owner's name otherwise. */
+/** A document, chat or report due for deletion within the notice period (`GET /collections/retention`). */
+export interface RetentionItem {
+  kind: 'document' | 'session' | 'report'
+  /** The collection's user-visible name. */
+  collection: string
+  /** `null` for the caller's own items; another owner's name otherwise. */
   owner: string | null
-  last_activity_at: string | null
-  /** `null` while retention is off, and for a collection that never expires. */
-  expires_at: string | null
-  /** True from 30 days before the deletion date onwards. */
+  id: string
+  /** The file name, the chat's first question, or the report title. */
+  name: string
+  expires_at: string
   warning: boolean
 }
 
-export interface CollectionsRetention {
-  window: string
-  /** Soonest deletion first; collections that never expire last. */
-  collections: CollectionRetention[]
+export interface RetentionNotice {
+  /** `null` while retention is off. */
+  period_days: number | null
+  notice_days: number
+  /** Soonest deletion first. */
+  items: RetentionItem[]
 }

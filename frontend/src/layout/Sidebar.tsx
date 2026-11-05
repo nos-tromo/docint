@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { HoverIconAction, NewButton, SelectMenu, TrashIcon, WarningIcon } from '@infra/ui'
 import { ApiError, isPurposeRefusal } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
-import { useCollectionsRetention } from '@/hooks/useRetention'
+import { useRetentionNotice } from '@/hooks/useRetention'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { useChatFiltersStore } from '@/stores/chatFilters'
@@ -45,7 +45,7 @@ export function Sidebar() {
   const navigate = useNavigate()
   const location = useLocation()
   const { data: collections } = useCollections()
-  const { data: retention } = useCollectionsRetention()
+  const { data: retention } = useRetentionNotice()
   const selectMutation = useSelectCollection()
   const deleteCollectionMutation = useDeleteCollection()
   const { data: sessionsData, isLoading: sessionsLoading, error: sessionsError } = useSessions()
@@ -61,10 +61,7 @@ export function Sidebar() {
   const sessions = sessionsData?.sessions ?? []
   const entries = collections ? buildCollectionEntries(collections) : []
   const selectedEntry = entries.find((e) => entryMatches(e, selected, selectedOwner)) ?? null
-  // The active collection is left out: using it restarts its clock.
-  const expiringCount = (retention?.collections ?? []).filter(
-    (r) => r.warning && !entryMatches(r, selected, selectedOwner)
-  ).length
+  const expiringCount = (retention?.items ?? []).filter((item) => item.warning).length
 
   // A persisted collection can point at one this user no longer has access to
   // (deleted, or a foreign one no longer shared, since last visit). Once the
@@ -259,7 +256,8 @@ export function Sidebar() {
           >
             <WarningIcon className="mt-px size-3.5 shrink-0" />
             {t(expiringCount === 1 ? 'common.collections_expiring_one' : 'common.collections_expiring_other', {
-              count: expiringCount
+              count: expiringCount,
+              days: retention?.notice_days ?? 30
             })}
           </NavLink>
         )}

@@ -1,6 +1,6 @@
 import { apiDelete, apiGet, apiPost } from './client'
 import type {
-  CollectionsRetention,
+  RetentionNotice,
   DocumentRecord,
   DocumentsSummary,
   EntityMergeMode,
@@ -37,9 +37,8 @@ export const listCollections = async (): Promise<CollectionsView> => {
   return Array.isArray(resp) ? { mine: resp, others: [], isAdmin: false } : { ...resp, isAdmin: true }
 }
 
-/** Every listed collection's deletion date. `all` is honoured for admins only, as on /collections/list. */
-export const getCollectionsRetention = () =>
-  apiGet<CollectionsRetention>('/collections/retention', { all: true })
+/** What falls due within the notice period. `all` is honoured for admins only, as on /collections/list. */
+export const getRetentionNotice = () => apiGet<RetentionNotice>('/collections/retention', { all: true })
 
 export const selectCollection = (name: string, owner?: string | null) =>
   apiPost<{ ok: boolean; name: string }>('/collections/select', { name }, owner)
