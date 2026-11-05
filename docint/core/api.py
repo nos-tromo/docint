@@ -130,6 +130,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_resolution_env,
     load_response_validation_env,
+    load_document_retention_env,
     load_retention_env,
     load_summary_env,
     load_topics_env,
@@ -243,7 +244,13 @@ def _start_audit(principal_cfg: PrincipalConfig) -> audit.Auditor:
     Returns:
         audit.Auditor: The started chain.
     """
-    return audit.open_auditor(load_audit_env(), mode=audit.identity_mode(principal_cfg))
+    retention = load_document_retention_env()
+    mode = {
+        **audit.identity_mode(principal_cfg),
+        "document_retention_days": retention.days,
+        "retention_notice_days": retention.notice_days,
+    }
+    return audit.open_auditor(load_audit_env(), mode=mode)
 
 
 #: Seconds from startup to the first retention sweep, and between sweeps.

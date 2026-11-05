@@ -179,6 +179,8 @@ def test_the_api_chain_opens_with_its_operating_mode(client: TestClient, audit_s
     assert configs[0]["criteria"] == {
         "edge_secret_enforced": False,
         "default_identity_enabled": True,
+        "document_retention_days": 365,
+        "retention_notice_days": 30,
         "require_purpose": [],
     }
 

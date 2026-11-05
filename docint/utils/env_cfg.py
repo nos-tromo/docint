@@ -3151,6 +3151,79 @@ def load_topics_client_env() -> TopicsClientConfig:
     return TopicsClientConfig(api_base=raw_base.rstrip("/"), api_key=raw_key or None, timeout=timeout)
 
 
+DEFAULT_DOCUMENT_RETENTION_DAYS = 365
+MAX_DOCUMENT_RETENTION_DAYS = 3650
+DEFAULT_RETENTION_NOTICE_DAYS = 30
+MAX_RETENTION_NOTICE_DAYS = 365
+
+
+@dataclass(frozen=True)
+class DocumentRetentionConfig:
+    """Document retention: how long a document stays after its ingest.
+
+    Attributes:
+        days (int | None): Days from ingest to deletion; ``None`` is off
+            (development only).
+        notice_days (int): How long a new or changed period deletes nothing
+            after it took effect; also the notice lead time.
+    """
+
+    days: int | None
+    notice_days: int
+
+    @property
+    def enabled(self) -> bool:
+        """Whether documents are deleted at all."""
+        return self.days is not None
+
+
+def _retention_days(name: str, default: int, maximum: int, *, allow_off: bool) -> int | None:
+    """Read a period in whole days, fail-closed.
+
+    Args:
+        name (str): The environment variable.
+        default (int): The value when unset or blank.
+        maximum (int): The longest period accepted.
+        allow_off (bool): Whether ``off`` is accepted.
+
+    Returns:
+        int | None: The days, or ``None`` for ``off``.
+
+    Raises:
+        ValueError: If the value is neither whole days from 1 to ``maximum``
+            nor an allowed ``off``: a typo must never pick a period nobody chose.
+    """
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw == "off" and allow_off:
+        return None
+    if raw.isascii() and raw.isdigit() and 1 <= int(raw) <= maximum:
+        return int(raw)
+    off = " or off" if allow_off else ""
+    raise ValueError(f"{name} must be whole days from 1 to {maximum}{off}, not {raw!r}")
+
+
+def load_document_retention_env() -> DocumentRetentionConfig:
+    """Load ``DOCUMENT_RETENTION_DAYS`` and ``RETENTION_NOTICE_DAYS``.
+
+    Returns:
+        DocumentRetentionConfig: 365 and 30 days unless configured.
+
+    Raises:
+        ValueError: If either is not a valid period.
+    """
+    days = _retention_days(
+        "DOCUMENT_RETENTION_DAYS", DEFAULT_DOCUMENT_RETENTION_DAYS, MAX_DOCUMENT_RETENTION_DAYS, allow_off=True
+    )
+    notice = _retention_days(
+        "RETENTION_NOTICE_DAYS", DEFAULT_RETENTION_NOTICE_DAYS, MAX_RETENTION_NOTICE_DAYS, allow_off=False
+    )
+    if days is None:
+        logger.warning("DOCUMENT_RETENTION_DAYS=off: no document is ever deleted (development only).")
+    return DocumentRetentionConfig(days=days, notice_days=DEFAULT_RETENTION_NOTICE_DAYS if notice is None else notice)
+
+
 #: The idle windows ``COLLECTION_RETENTION`` accepts, in calendar months.
 RETENTION_WINDOWS: dict[str, int] = {"off": 0, "6m": 6, "12m": 12, "18m": 18, "24m": 24}
 

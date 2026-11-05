@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from docint.core.retention import RetentionPeriodState
 from docint.core.state.base import _make_session_maker
 from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.retention_state import RetentionState
@@ -65,6 +66,23 @@ class RetentionWindowState:
 
     window: str
     set_at: datetime
+
+
+def _period_days(token: str) -> int | None | bool:
+    """Read a recorded period token.
+
+    Args:
+        token (str): ``<days>d`` or ``off``.
+
+    Returns:
+        int | None | bool: The days, ``None`` for off, ``False`` when the
+            token is no period (an idle-window row).
+    """
+    if token == "off":
+        return None
+    if token.endswith("d") and token[:-1].isdigit():
+        return int(token[:-1])
+    return False
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -428,6 +446,47 @@ class CollectionOwnerManager:
             if row is None:
                 return None
             return RetentionWindowState(window=str(row.window), set_at=_as_utc(cast(datetime, row.window_set_at)))
+
+    def retention_period(self) -> RetentionPeriodState | None:
+        """Return the document retention period recorded at the last startup, if any.
+
+        The ``retention_state`` row keeps it as ``<days>d`` or ``off``; a row
+        the idle-window rule left (``6m`` …) holds no period.
+
+        Returns:
+            RetentionPeriodState | None: ``None`` before the first startup with a period.
+        """
+        with self._session_scope() as s:
+            row = s.get(RetentionState, 1)
+            if row is None:
+                return None
+            days = _period_days(str(row.window))
+            if days is False:
+                return None
+            return RetentionPeriodState(days=days, set_at=_as_utc(cast(datetime, row.window_set_at)))
+
+    def record_retention_period(self, days: int | None, *, now: datetime) -> RetentionPeriodState:
+        """Record the period in force at startup; a new or changed one takes effect now.
+
+        Args:
+            days (int | None): The period; ``None`` is off.
+            now (datetime): The startup time, timezone-aware.
+
+        Returns:
+            RetentionPeriodState: The period and when it took effect.
+        """
+        token = "off" if days is None else f"{days}d"
+        with self._session_scope() as s:
+            row = s.get(RetentionState, 1)
+            if row is not None and row.window == token:
+                return RetentionPeriodState(days=days, set_at=_as_utc(cast(datetime, row.window_set_at)))
+            if row is None:
+                row = RetentionState(id=1)
+                s.add(row)
+            row.window = cast(Any, token)
+            row.window_set_at = cast(Any, now)
+            s.commit()
+        return RetentionPeriodState(days=days, set_at=_as_utc(now))
 
     def record_retention_window(self, window: str, *, now: datetime) -> RetentionWindowState:
         """Record the window in force at startup; any change restarts the grace period.
