@@ -15,12 +15,13 @@ import shutil
 import stat
 import sys
 import threading
+import sqlite3
 import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
+    load_document_retention_env,
     EmbeddingConfig,
     GraphRAGConfig,
     EmbedClientConfig,
@@ -236,7 +238,9 @@ from docint.core.search.index import (
     search_index_status,
     write_search_text,
 )
+from docint.core.retention import RetentionPeriodState
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
+from docint.core.state.document_retention_manager import DocumentRetentionManager, PayloadDocument
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager, start_agent_turn
 from docint.core.storage.artifact_gc import (
@@ -308,6 +312,10 @@ SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 # single final synthesized payload.
 SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+#: The payload key every point carries its document's ingest time under
+#: (seconds since the epoch), so a restored collection keeps its deadlines
+#: (``docs/retention.md``). Hidden from the embedding and the prompt.
+RETENTION_STAMP_KEY = "docint_ingested_at"
 #: Source keys that name the physical collection; the topic reads drop them.
 _PHYSICAL_SOURCE_KEYS: tuple[str, ...] = ("preview_url", "document_url", "image_collection")
 
@@ -3536,6 +3544,8 @@ class RAG:
     reports: ReportManager | None = field(default=None, init=False)
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
     _collection_backfill_done: bool = field(default=False, init=False, repr=False)
+    document_retention: DocumentRetentionManager | None = field(default=None, init=False)
+    _ingest_doc_meta: dict[str, tuple[str, set[str]]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
@@ -5640,6 +5650,7 @@ class RAG:
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
 
+        self._note_retention_metadata(nodes)
         batches = chunk_nodes(nodes, self.docstore_batch_size)
         for batch_no, batch in enumerate(batches, start=1):
             logger.debug(
@@ -6278,6 +6289,20 @@ class RAG:
                 embed_model=self.embed_model,
                 storage_context=storage_ctx,
             )
+
+        # Best-effort: keyword indexes on the hashes a per-document delete
+        # filters by, and a float index on the retention stamp.
+        for field_name, schema in (
+            ("file_hash", qdrant_models.PayloadSchemaType.KEYWORD),
+            ("media_file_hash", qdrant_models.PayloadSchemaType.KEYWORD),
+            (RETENTION_STAMP_KEY, qdrant_models.PayloadSchemaType.FLOAT),
+        ):
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=self.qdrant_collection, field_name=field_name, field_schema=schema
+                )
+            except Exception as idx_exc:
+                logger.debug("{} index on {} skipped: {}", field_name, self.qdrant_collection, idx_exc)
 
         # Best-effort: index posting_uuid on the main collection so that
         # _fetch_posting_entity_nodes scrolls use an index rather than a full scan.
@@ -8017,6 +8042,7 @@ class RAG:
         Returns:
             IngestStats: What the run did.
         """
+        self._ingest_doc_meta.clear()
         # Make the target Qdrant collection visible to the user before any
         # batch work begins, so it remains selectable even if every embedding
         # batch later fails. A probe failure here surfaces the embedding
@@ -8135,6 +8161,7 @@ class RAG:
                     if file_hash:
                         manifest.mark_completed(self.qdrant_collection, file_hash)
                         manifest_in_flight.discard(file_hash)
+                        self._index_completed_document(file_hash)
 
             # PDFs are owned by the core pipeline reader and should not be
             # re-processed by the legacy ingestion path.
@@ -8173,6 +8200,7 @@ class RAG:
                         for fh in completed_hashes:
                             manifest.mark_completed(self.qdrant_collection, fh)
                             manifest_in_flight.discard(fh)
+                            self._index_completed_document(fh)
             else:
                 for docs, nodes in pipeline.build(processed_hashes):
                     if docs:
@@ -8596,6 +8624,183 @@ class RAG:
         if self.reports is None:
             self.reports = ReportManager(self)
         return self.reports
+
+    def ensure_document_retention_manager(self) -> DocumentRetentionManager:
+        """Ensure the DocumentRetentionManager is initialized and return it.
+
+        Returns:
+            DocumentRetentionManager: The manager of the document retention index.
+        """
+        if self.document_retention is None:
+            self.document_retention = DocumentRetentionManager(self)
+        return self.document_retention
+
+    def _note_retention_metadata(self, nodes: Sequence[BaseNode], *, now: datetime | None = None) -> None:
+        """Stamp each node with its ingest time and gather each document's name and hashes.
+
+        The stamp is hidden from the embedding and the prompt, and an earlier
+        stamp is kept, so a re-persisted node keeps its document's clock.
+
+        Args:
+            nodes (Sequence[BaseNode]): Nodes about to be persisted.
+            now (datetime | None): The ingest time; the current time by default.
+        """
+        stamp = (now or datetime.now(UTC)).timestamp()
+        for node in nodes:
+            metadata = getattr(node, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            metadata.setdefault(RETENTION_STAMP_KEY, stamp)
+            for attribute in ("excluded_embed_metadata_keys", "excluded_llm_metadata_keys"):
+                keys = getattr(node, attribute, None)
+                if isinstance(keys, list) and RETENTION_STAMP_KEY not in keys:
+                    keys.append(RETENTION_STAMP_KEY)
+            file_hash = str(metadata.get("file_hash") or "").strip()
+            if not file_hash:
+                continue
+            name, hashes = self._ingest_doc_meta.get(file_hash, ("", {file_hash}))
+            name = name or str(metadata.get("file_name") or metadata.get("filename") or "")
+            for key in ("media_file_hash", "source_doc_id"):
+                value = str(metadata.get(key) or "").strip()
+                if not value or (key == "source_doc_id" and value == str(metadata.get("posting_uuid") or "").strip()):
+                    continue
+                hashes.add(value)
+            self._ingest_doc_meta[file_hash] = (name, hashes)
+
+    def _index_completed_document(self, file_hash: str, *, now: datetime | None = None) -> None:
+        """Index a document whose ingest into the active collection completed.
+
+        Best-effort: the points already carry the clock, and the next startup
+        repairs a row that could not be written (:meth:`repair_retention_index`).
+
+        Args:
+            file_hash (str): The document's key.
+            now (datetime | None): The completion time; the current time by default.
+        """
+        moment = now or datetime.now(UTC)
+        physical = self.qdrant_collection
+        name, hashes = self._ingest_doc_meta.pop(file_hash, ("", {file_hash}))
+        try:
+            owners = self.ensure_collection_owner_manager()
+            activity = owners.get_activity(physical)
+            owner, logical = (activity.owner, activity.logical) if activity is not None else (None, physical)
+            cfg = load_document_retention_env()
+            period = owners.retention_period() or RetentionPeriodState(days=cfg.days, set_at=moment)
+            self.ensure_document_retention_manager().record_ingest(
+                physical,
+                logical,
+                owner,
+                file_hash,
+                name,
+                sorted(hashes),
+                now=moment,
+                period=period,
+                notice_days=cfg.notice_days,
+            )
+        except Exception as exc:
+            logger.warning("Retention index not written for a document ({}); repaired at the next startup.", exc)
+
+    def payload_documents(self, physical: str) -> list[PayloadDocument]:
+        """Describe each document of a collection from its points' payloads.
+
+        Args:
+            physical (str): The Qdrant collection.
+
+        Returns:
+            list[PayloadDocument]: One per ``file_hash``, with the other hashes
+                its points carry, its name and its stamped ingest time.
+        """
+        found: dict[str, tuple[str, set[str], float | None]] = {}
+        offset: Any = None
+        keys = ["file_hash", "media_file_hash", "source_doc_id", "posting_uuid", "file_name", "filename", RETENTION_STAMP_KEY]
+        while True:
+            points, offset = self.qdrant_client.scroll(
+                collection_name=physical, offset=offset, limit=256, with_vectors=False, with_payload=keys
+            )
+            for point in points:
+                payload = point.payload or {}
+                file_hash = str(payload.get("file_hash") or "").strip()
+                if not file_hash:
+                    continue
+                name, hashes, stamp = found.get(file_hash, ("", {file_hash}, None))
+                name = name or str(payload.get("file_name") or payload.get("filename") or "")
+                media = str(payload.get("media_file_hash") or "").strip()
+                if media:
+                    hashes.add(media)
+                source = str(payload.get("source_doc_id") or "").strip()
+                if source and source != str(payload.get("posting_uuid") or "").strip():
+                    hashes.add(source)
+                value = payload.get(RETENTION_STAMP_KEY)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    stamp = float(value) if stamp is None else min(stamp, float(value))
+                found[file_hash] = (name, hashes, stamp)
+            if offset is None:
+                break
+        return [
+            PayloadDocument(
+                file_hash,
+                frozenset(hashes),
+                name,
+                None if stamp is None else datetime.fromtimestamp(stamp, tz=UTC),
+            )
+            for file_hash, (name, hashes, stamp) in sorted(found.items())
+        ]
+
+    def _manifest_completion_times(self, physical: str) -> dict[str, datetime]:
+        """Read when the ingest manifest last saw each completed document.
+
+        The manifest's ``updated_at`` is never earlier than the real
+        completion, so a clock taken from it never deletes too early.
+
+        Args:
+            physical (str): The Qdrant collection.
+
+        Returns:
+            dict[str, datetime]: Completion time per file hash; empty without a manifest.
+        """
+        path = self._ingest_manifest_path(physical)
+        if not path.is_file():
+            return {}
+        try:
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+                rows = conn.execute(
+                    "SELECT file_hash, updated_at FROM ingest_manifest WHERE collection = ? AND status = 'completed'",
+                    (physical,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("Ingest manifest of {} unreadable for retention: {}", physical, exc)
+            return {}
+        return {str(fh): datetime.fromtimestamp(float(ts), tz=UTC) for fh, ts in rows}
+
+    def repair_retention_index(self, period: RetentionPeriodState, *, notice_days: int) -> int:
+        """Index every document Qdrant holds that the retention index lacks (at startup).
+
+        Args:
+            period (RetentionPeriodState): The period in force.
+            notice_days (int): The grace after it took effect.
+
+        Returns:
+            int: Rows added across all collections.
+        """
+        owners = self.ensure_collection_owner_manager()
+        manager = self.ensure_document_retention_manager()
+        added = 0
+        for physical in self.list_collections():
+            try:
+                activity = owners.get_activity(physical)
+                owner, logical = (activity.owner, activity.logical) if activity is not None else (None, physical)
+                added += manager.repair_from_payload(
+                    physical,
+                    logical,
+                    owner,
+                    self.payload_documents(physical),
+                    manifest_times=self._manifest_completion_times(physical),
+                    period=period,
+                    notice_days=notice_days,
+                )
+            except Exception as exc:
+                logger.warning("Retention index of {} not repaired ({}); retried at the next startup.", physical, exc)
+        return added
 
     def ensure_collection_owner_manager(self) -> CollectionOwnerManager:
         """Ensure the CollectionOwnerManager is initialized and return it.
