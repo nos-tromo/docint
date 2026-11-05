@@ -55,14 +55,14 @@ instead of the frame carrying the result; a queued job is marked failed
 
 | Method | Path | Tag | Purpose |
 |---|---|---|---|
-| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention window, topics flag, required-purpose actions). |
+| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout, upload ceiling, locale, retention period and notice, topics flag, required-purpose actions). |
 | `GET`  | `/config/ingest-defaults` | `Meta` | Deployment defaults for the ingest UI's enrichment toggles. |
 | `GET`  | `/version` | `Meta` | Running app version. Unauthenticated; the Docker healthcheck's liveness probe. |
 | `GET`  | `/health` | `Meta` | Dependency status (Qdrant reachability). Unauthenticated, always `200`. |
 | `GET`  | `/whoami` | `Meta` | The resolved calling identity, for the SPA header. Principal-gated. |
 | `GET`  | `/metrics` | — | Prometheus counters/histograms for the obs-plane scrape. Added by `Instrumentator` (`api.py:427`), not an `@app` route, and excluded from the OpenAPI schema. |
 | `GET`  | `/collections/list` | `Collections` | List all Qdrant collections. |
-| `GET`  | `/collections/retention` | `Collections` | When each collection is due for deletion for inactivity. Read-only: never postpones a deadline. |
+| `GET`  | `/collections/retention` | `Collections` | The caller's documents, chats and reports due for deletion within the notice period. Read-only. |
 | `POST` | `/collections/select` | `Collections` | Activate a collection, pre-warms the NER cache. |
 | `DELETE` | `/collections/{name}` | `Collections` | Delete a collection. |
 | `POST` | `/query` | `Query` | Stateless or session-aware query, non-streaming. |
@@ -141,17 +141,17 @@ instead of the frame carrying the result; a queued job is marked failed
 ### `GET /config`
 
 Deploy-time frontend configuration for the SPA, read once on load and served
-without a principal. Returns nine fields (`FrontendConfigOut`):
+without a principal. Returns ten fields (`FrontendConfigOut`):
 `graph_top_k`, `graph_max_top_k`, `collection_timeout`, `max_upload_bytes`,
-`report_batch_max_items`, `language`, `collection_retention`,
-`topics_enabled` and `require_purpose`. They come from `NER_GRAPH_TOP_K`,
-`NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
+`report_batch_max_items`, `language`, `document_retention_days`,
+`retention_notice_days`, `topics_enabled` and `require_purpose`. They come from
+`NER_GRAPH_TOP_K`, `NER_GRAPH_MAX_TOP_K`, `FRONTEND_COLLECTION_TIMEOUT`,
 `DOCINT_CLIENT_MAX_BODY_SIZE`, `REPORT_BATCH_MAX_ITEMS`, `RESPONSE_LANGUAGE`,
-`COLLECTION_RETENTION`, `TOPICS_ENABLED` and `AUDIT_REQUIRE_PURPOSE`
-respectively (see
+`DOCUMENT_RETENTION_DAYS`, `RETENTION_NOTICE_DAYS`, `TOPICS_ENABLED` and
+`AUDIT_REQUIRE_PURPOSE` respectively (see
 [configuration.md](configuration.md#frontend--frontendconfig)).
-`collection_retention` is `"off"` or the idle window (`"6m"` … `"24m"`); a
-client asks `GET /collections/retention` only when it is not `"off"`. While
+`document_retention_days` is the period in days, `null` while retention is
+off; a client asks `GET /collections/retention` only when it is a number. While
 `topics_enabled` is false the SPA shows none of its topics screens, and every
 [topics route](#topics) answers `404`. `require_purpose` lists, sorted, the
 audit actions the running backend refuses without a stated purpose (e.g.
@@ -199,33 +199,39 @@ Returns the list of Qdrant collections as `list[str]`.
 
 ### `GET /collections/retention`
 
-When each collection is due for deletion under `COLLECTION_RETENTION`
-([retention.md](retention.md)). Principal-gated. Reading it never moves a
-collection's clock — it bypasses the ownership gate that records activity and
-scopes its rows itself. `all=true` works as on `/collections/list`: an admin
-also gets every other owner's collections, a non-admin's flag is ignored.
+The caller's documents, chat sessions and reports due for deletion within the
+notice period (`RETENTION_NOTICE_DAYS`; [retention.md](retention.md)).
+Principal-gated. Reading it changes no deadline. `all=true` works as on
+`/collections/list`: an admin also gets every other owner's items, recorded as
+`admin` `collections.retention_all`; a non-admin's flag is ignored. Items of
+collections without an owner are never listed.
 
-Response (`CollectionsRetentionOut`), soonest deadline first, collections that
-never expire last:
+Response (`RetentionOut`), soonest deletion first:
 
 ```json
 {
-  "window": "6m",
-  "collections": [
+  "period_days": 365,
+  "notice_days": 30,
+  "items": [
     {
-      "name": "projekt-alpha",
+      "kind": "document",
+      "collection": "projekt-alpha",
       "owner": null,
-      "last_activity_at": "2026-03-02T09:14:00Z",
-      "expires_at": "2026-10-21T06:45:00Z",
+      "id": "3f9a…",
+      "name": "memo.pdf",
+      "expires_at": "2026-11-21T06:45:00Z",
       "warning": true
     }
   ]
 }
 ```
 
-`owner` is `null` for the caller's own collections. `expires_at` is `null`
-while retention is off, and for a collection with no recorded activity, which
-never expires. `warning` is true from 30 days before the deadline onwards.
+`kind` is `document`, `session` or `report`; `id` is the document's file hash,
+the session id or the report id; `name` is the file name, the chat's first
+question (cut to 50 characters) or the report title. `owner` is `null` for the
+caller's own items and names the owner otherwise. `period_days` is `null` and
+`items` empty while retention is off. `warning` is true for every listed item
+(each is due within the notice period).
 
 ### `POST /collections/select`
 
@@ -251,7 +257,8 @@ Qdrant collection and its hidden companions, the source files (with the
 docstore, summary cache and ingest manifest inside them), stored extracts and
 topic runs, the PDF pipeline artifacts no other collection uses, the collection's chat
 sessions, the reports built from it, and last the ownership row. A failure stops the cascade with the collection still listed, and a retry
-finishes it. Retention runs the same cascade ([retention.md](retention.md)).
+finishes it. Retention runs the same cascade when a collection's last document
+is deleted ([retention.md](retention.md)).
 
 Returns `{ "ok": true }`; 404 for a collection the caller does not own; 409
 while the collection is already being deleted — requests that would work on it

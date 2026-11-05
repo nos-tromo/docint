@@ -50,8 +50,11 @@ and its access model. Nothing on this page duplicates that.
   operating mode in the keys every app of the federation uses —
   `{"edge_secret_enforced": …, "default_identity_enabled": …, "require_purpose": […]}`,
   `default_identity_enabled` being true only while the dev fallback is in
-  effect (set, and no edge secret); a command's chain adds `"command"`. Never
-  a secret or a path. A `lifecycle`/`heartbeat` follows every 60 seconds and a
+  effect (set, and no edge secret); the API's chain adds
+  `"document_retention_days"` (`null` while off) and
+  `"retention_notice_days"`, and a command's chain adds `"command"`. Never a
+  secret or a path. The API's startup then records `admin` `retention.config`:
+  the period, the notice and `since`, when the period took effect. A `lifecycle`/`heartbeat` follows every 60 seconds and a
   `lifecycle`/`shutdown` ends a clean chain.
 - **Where the lines go.** `AUDIT_OUTPUT` selects the stream. In the backend
   container compose sets `AUDIT_OUTPUT: container`: every process in the
@@ -76,9 +79,9 @@ and its access model. Nothing on this page duplicates that.
 | `query` | Chat and agent turns, keyword search, one chunk's text, the NER views, the hate-speech list, the documents list, session listings and histories, report listings and reports, the topics views, a summary read, a source preview or a thumbnail. |
 | `disclose` | Every download (`recipient="download:<format>"`: CSV exports, report exports, extract archives, a single source's extract, a session's source files, a stored report PDF) and every file written for someone to take away (`recipient="file:extract"`, `"file:report_pdf"`, and the command-line tools' result files). |
 | `ai_call` | A model call: the answer of a chat or agent turn (`inference:chat`), a snippet translation, a summary read's validation, and the transfers of a batch operation — one event per stage, with counts ([Model calls](#model-calls)). |
-| `combine` | Entity resolution: merging entity surfaces into durable canonicals (`entities.resolve`), whether from the API, after an ingest, or from `resolve`; and the social linker joining a social export's postings with their comments and media inside an ingest run (`ingest.social_link`). |
-| `delete` | A collection, a session, a report, a report item, a stored extract; the retention sweep's purges (as the system); `verify --repair`. |
-| `admin` | The chain's `config.audit` event, and an admin's listing of every owner's collections (`collections.list_all`, `collections.retention_all`). |
+| `combine` | Entity resolution: merging entity surfaces into durable canonicals (`entities.resolve`), whether from the API, after an ingest, after the retention sweep deleted documents (as the system), or from `resolve`; and the social linker joining a social export's postings with their comments and media inside an ingest run (`ingest.social_link`). |
+| `delete` | A collection, a session, a report, a report item, a stored extract; the retention sweep's deletions (as the system); `verify --repair`. |
+| `admin` | The chain's `config.audit` event, the retention period in force (`retention.config`), and an admin's listings across owners (`collections.list_all`, `collections.retention_all`). |
 | `lifecycle` | Written by the library itself: `start`, `heartbeat`, `shutdown`. |
 
 docint writes no `auth` events: authentication is the edge gateway's
@@ -121,16 +124,18 @@ row carries no identifier); `container` is the logical collection.
 | `kind` | Each id is | Recorded by |
 |---|---|---|
 | `chunk` | A Qdrant point id — a chunk in the collection or an image point in its `_images` companion (what `GET /search/chunk` and a chat scope address); the reader-minted `chunk_id` when a row has no point id | answers' sources, search hits, NER and hate-speech findings, histories, topic passages; the full-text index backfill (count only) |
-| `document` | A file hash | documents list, upload, ingest run, source preview, session sources ZIP, topic documents |
+| `document` | A file hash | documents list, upload, ingest run, source preview, session sources ZIP, topic documents, retention deletions |
 | `entity` | `<text>::<type>`, the key the SPA builds (a graph node's cluster key in the graph) | NER stats, entity search, entity graph, entities CSV |
 | `image` | An image's content hash (`image_id`) | thumbnail |
 | `posting` | A social posting's uuid | the social linker's joins inside an ingest run (`ingest.social_link`) |
-| `session` | A session id | session listing, scope and topic changes, session delete |
-| `report` | A report id | report listing, create, update, assign, overview refresh, delete, reorder, stored-PDF download |
+| `session` | A session id | session listing, scope and topic changes, session delete, retention deletions |
+| `report` | A report id | report listing, create, update, assign, overview refresh, delete, reorder, stored-PDF download, retention deletions |
 | `report_item` | The item's dedupe key — `entity:<chunk id>`, `hate:<chunk id>`, `chat:<session>:<turn>`, `summary:<collection>`, `topics:<collection>` — or its item id where only that is known | report reads and exports, item add/note/remove |
 | `topic` | A topic id | topics overview, topic runs (count only) |
-| `extract` | A stored extract's id | extract download and delete |
-| `collection` | A logical collection name | collection delete, retention purge, admin listings (count only) |
+| `extract` | A stored extract's id | extract download and delete, retention deletions |
+| `topic_run` | A topic run's id | retention deletions |
+| `retention_item` | — (count only) | an admin's listing of what falls due across owners |
+| `collection` | A logical collection name | collection delete, a collection whose last document retention deleted, admin listings (count only) |
 | `node` | A node id in the collection's docstore or its Qdrant collection | `verify --repair`: the orphans removed |
 | `text` | — (count only) | a translated snippet |
 | one unit kind, or `mixed` | An extract unit's key: a file hash for a `document` or `media` unit, the posting uuid for a `posting`, the image id for an `image`; several kinds at once make a `mixed` target whose ids carry their kind (`posting:<uuid>`, `document:<hash>`) | extract builds, a single source's extract |
@@ -358,7 +363,7 @@ ends ([Background jobs](#background-jobs)).
 | Route | Recorded as | Target and notes |
 |---|---|---|
 | `GET /collections/list` | `admin` `collections.list_all` — only for an admin's `all=true` | `collection`, count = every other owner's collections; criteria `owners`. The caller's own names are not recorded. |
-| `GET /collections/retention` | `admin` `collections.retention_all` — only for an admin's `all=true` | `collection`, count = rows; criteria `owners`. The caller's own clock is not recorded. |
+| `GET /collections/retention` | `admin` `collections.retention_all` — only for an admin's `all=true` | `retention_item`, count = items listed; criteria `owners`. The caller's own listing is not recorded. |
 | `POST /collections/select` | — | An ownership check returning the name it was given. |
 | `DELETE /collections/{name}` | `delete` `collection.delete` | `collection` [name]; criteria `sessions_deleted`, `reports_deleted`. |
 
@@ -587,11 +592,24 @@ the run goes on. In docint's own log the round trip is the run's
 
 ## Retention sweep
 
-Each collection the sweep deletes ([retention.md](retention.md)) records
-`delete` `retention.purge` as the system, after the cascade:
-`collection` [logical name]; criteria `owner`, `window_months`,
-`last_activity_at`, `sessions_deleted`, `reports_deleted`. A purge that fails
-records `error`; the sweep counts it failed and the next one retries.
+The daily sweep ([retention.md](retention.md)) records every deletion as
+`delete` by the system (`{"user": null, "via": "system"}`), **before** it
+deletes: a record that cannot be written stops that deletion. References only,
+never a file name, question or title.
+
+| Operation | Target | Criteria |
+|---|---|---|
+| `retention.document` | `document`: the file hashes deleted, container the logical collection | `owner`, `period_days` |
+| `retention.document.failed` | as above, outcome `error` — the delete failed after its record; the next sweep retries | — |
+| `retention.collection` | `collection` [logical name] — the last document went, so the collection cascade runs | `owner` |
+| `retention.session` | `session` [id] | `owner`, `period_days` |
+| `retention.report` | `report` [id], container the logical collection | `owner`, `period_days` |
+| `retention.extract` | `extract` [id], container the logical collection | `period_days` |
+| `retention.topic_run` | `topic_run` [id] | `period_days` |
+
+When deleting documents dropped a collection's entity store, the sweep then
+records the rebuild as `combine` `entities.resolve` by the system, as after an
+ingest.
 
 ## Command-line tools
 
@@ -611,7 +629,7 @@ actor `{"user": <AUDIT_CLI_USER>, "via": "cli"}` and the purpose from
 | `query` | per query `query` `chat.query`, `ai_call` `chat.answer` and `disclose` `export.query_result` (its result file); `--summary`: `modify` `summary.build` with its transfers, then `disclose` `export.summary`; `--entities`: `disclose` `export.entities`; `--hate-speech`: `disclose` `export.hate_speech` — every file `file:query` |
 | `query-eval` | per (query, mode) `query` `eval.query` (by question hash, with the mode) and `ai_call` `eval.answer`; the result file `disclose` `export.eval_results`, `file:query-eval` |
 | `verify --repair` | `delete` `verify.repair` — `node`: the orphan nodes removed |
-| `verify` (without `--repair`), `retention-report`, `load-models`, `docint` | — they read counts, node ids and the retention clock only, or serve the API |
+| `verify` (without `--repair`), `retention-report`, `load-models`, `docint` | — they read counts, node ids and retention dates by reference only, or serve the API |
 
 The make targets run the commands inside the running backend with
 `docker compose exec`, so their lines land in the backend's log
@@ -636,7 +654,8 @@ make resolve COLLECTION=mydocs CASE_REF=case-0001 REASON="Merge duplicate entiti
 
 `AUDIT_CLI_USER` is `$SUDO_USER`, else `id -un`, on the host; an empty
 `CASE_REF`/`REASON` states nothing. `make retention-report` keeps its
-one-off container: it reads only the retention clock.
+one-off container: it prints retention dates by reference only (file hash,
+chat and report ids), never a file name, question or title.
 
 ## Configuration
 

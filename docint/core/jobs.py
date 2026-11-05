@@ -862,8 +862,8 @@ class IngestJobManager:
     async def any_active_for(self, physical: str) -> bool:
         """Whether any job of any kind and owner is queued or running on a collection.
 
-        The collection retention sweep's busy check: deleting a collection a
-        job is still writing to would let the job re-create it. Unlike
+        The retention sweep's busy check: deleting documents of a collection a
+        job is still writing to would race the job's writes. Unlike
         :meth:`active_for` it ignores owner and kind — an admin's job in a
         user's namespace counts, and so does a summary or an extract.
 

@@ -13,7 +13,7 @@ you run `uv sync`.
 | `topics` | `docint.cli.topics:main` | Build, extend, align or inspect a collection's topics. |
 | `search-index` | `docint.cli.search_index:main` | Build the full-text `search_text` payload index for one collection. |
 | `search-index-all` | `docint.cli.search_index:main_all` | Backport that index across every collection on the host. |
-| `retention-report` | `docint.cli.retention_report:main` | Show what collection retention deletes, and when. Read-only. |
+| `retention-report` | `docint.cli.retention_report:main` | Show what document retention deletes, and when. Read-only. |
 | `query` | `docint.cli.query:main` | Run batch chat queries and collection-level exports. |
 | `query-eval` | `docint.cli.eval:main` | Corpus retrieval evaluation across retrieval modes. |
 | `verify` | `docint.cli.verify:main` | Check Qdrant ↔ docstore consistency (optionally repair). |
@@ -212,28 +212,29 @@ skipped cheaply, so re-running after a partial failure is safe.
 ## `retention-report` — what retention deletes, and when
 
 ```bash
-make retention-report              # under the configured COLLECTION_RETENTION
-make retention-report WINDOW=6m    # as if 6m were switched on now
+make retention-report              # under the configured DOCUMENT_RETENTION_DAYS
+make retention-report DAYS=180     # as if 180 days were switched on now
 ```
 
-Source: `docint/cli/retention_report.py`. Prints every collection's last
-activity and deletion date, soonest first, with a summary of what is due now,
-what falls due within 30 days and what never expires. Run it before setting
-`COLLECTION_RETENTION` ([retention.md](retention.md)).
+Source: `docint/cli/retention_report.py`. Prints every document, chat and
+report with its deletion date, soonest first, with a summary of what is due
+now and what falls due within the notice period (`RETENTION_NOTICE_DAYS`).
+Run it before changing `DOCUMENT_RETENTION_DAYS` ([retention.md](retention.md)).
 
 | Flag | Description |
 |---|---|
-| `--window {off,6m,12m,18m,24m}` | Evaluate this window instead of the configured one. A window other than the one the backend last started with is evaluated as if switched on now, grace period included — exactly what the next restart would do. |
+| `--days N` | Evaluate this period (`1` to `3650`) instead of the configured one. A period other than the one the backend last started with is evaluated as if switched on now, grace period included — exactly what the next restart would do. It lists documents only: chats, reports and extracts follow the earliest of their sources. |
 
-Without `--window` it shows what the running backend acts on: the configured
-window, anchored on the moment the backend's startup recorded it. It also names
-the Qdrant collections no ownership row covers — collections ingested with the
-`ingest` CLI, which retention never deletes.
+Without `--days` it shows what the running backend acts on: the configured
+period, anchored on the moment the backend's startup recorded it. It also names
+the collections whose documents have no owner — ingested with the `ingest`
+CLI — which expire like any other while no one is notified.
 
-Read-only by design: it moves no collection's clock and records no window, so
-running it can neither postpone a deletion nor start a grace period. Opening
-the sessions store does apply any pending schema migration, as every docint
-process does.
+It is not audited, so it names every item by reference only: the file hash,
+the chat id or the report id, never a file name, a question or a title.
+Read-only by design: it records no period and changes no date, so running it
+can neither postpone a deletion nor start a grace period. Opening the sessions
+store does apply any pending schema migration, as every docint process does.
 
 ## `query` — batch chat, summaries, exports
 
@@ -369,8 +370,8 @@ audit chain of its own ([audit.md](audit.md#command-line-tools)): `resolve`,
 `extract`, `topics` (all four operations), `search-index`,
 `search-index-all`, `ingest`, `query`, `query-eval` and `verify --repair`.
 `verify` without `--repair`, `retention-report`, `load-models` and `docint`
-record nothing of their own: they read counts, node ids and the retention
-clock, or serve the API, which records its own.
+record nothing of their own: they read counts, node ids and retention dates by
+reference, or serve the API, which records its own.
 
 | Variable | Meaning |
 |---|---|

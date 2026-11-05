@@ -20,7 +20,7 @@ it, and what it can do) with topic-by-topic deep dives.
 | [reports.md](reports.md) | Report Builder: curating findings into a case file, frozen image evidence, the five export formats |
 | [extracts.md](extracts.md) | Data extracts: full transcripts, keyframe descriptions and document text as downloadable files |
 | [topics.md](topics.md) | Topics (scalable collection clustering): runs, the assignment rule, payload keys, the store and its lock, the fit-service contract, jobs, limitations |
-| [retention.md](retention.md) | Collection retention: deleting collections nobody has worked with for 6–24 months, and what counts as activity |
+| [retention.md](retention.md) | Document retention: every document deleted a fixed period after its ingest, what is built from it no later, the daily sweep and the notices |
 | [audit.md](audit.md) | Data-protection audit log: what every route, job and command records, the event shape, the stated purpose, the fail-closed rule and the `AUDIT_*` settings |
 | [deployment.md](deployment.md) | Docker services, shared volumes, networks, vLLM co-deployment, proxies |
 | [migrations.md](migrations.md) | Changes existing collections do not pick up on their own, and the one action that fixes each |
@@ -31,7 +31,7 @@ it, and what it can do) with topic-by-topic deep dives.
 - **Operators** deploying Docint behind their own inference stack — start
   with [getting-started.md](getting-started.md), then
   [configuration.md](configuration.md) and [deployment.md](deployment.md);
-  [retention.md](retention.md) before switching on automatic deletion, and
+  [retention.md](retention.md) for the automatic deletion that is on by default, and
   [audit.md](audit.md) for what the data-protection audit log records.
 - **Backend developers** extending the RAG engine, agents, or ingestion
   pipeline — start with [architecture.md](architecture.md), then the

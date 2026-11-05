@@ -197,7 +197,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     file), not at import time — the lifespan only ever runs long after the
     module has finished loading.
 
-    With collection retention on, the retention sweeper runs for the app's
+    With document retention on, the retention sweeper runs for the app's
     lifetime (``application.state.retention_task``, ``None`` while off) and
     is cancelled before the job registry stops, so shutdown waits for a
     delete in progress instead of abandoning it halfway.

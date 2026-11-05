@@ -9,11 +9,13 @@ from docint.core.state.base import Base
 
 
 class RetentionState(Base):
-    """The collection retention window last applied, and since when.
+    """The document retention period last applied, and since when.
 
-    A single row, written at startup. ``window_set_at`` anchors the grace
-    period: whenever the window is switched on, off or changed, no collection
-    expires sooner than the notice period after it (``docs/retention.md``).
+    A single row, written at startup. ``window`` holds ``<days>d`` or ``off``
+    (a ``6m``-style value from the retired idle-window rule reads as no
+    period); ``window_set_at`` anchors the grace period: whenever the period
+    is switched on, off or changed, nothing is deleted sooner than the notice
+    period after it (``docs/retention.md``).
 
     Args:
         Base (DeclarativeBase): The declarative base class for SQLAlchemy models.

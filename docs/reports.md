@@ -237,9 +237,10 @@ curl -OJ "http://localhost:8000/reports/1/pdf?collection=mydocs"       # the ren
 ## When the collection is deleted
 
 A report is deleted together with the collection it was built from — by
-`DELETE /collections/{name}` and by collection retention
-([retention.md](retention.md)) alike — so nothing derived from a deleted
-collection stays behind in docint. Export the report first if it has to
+`DELETE /collections/{name}`, and by document retention when the collection's
+last document goes — so nothing derived from a deleted collection stays behind
+in docint. Retention also deletes a report on its own date: with the earliest
+document its items draw on ([retention.md](retention.md)). Export the report first if it has to
 survive: an exported file carries its evidence inline and keeps working after
 the collection is gone. Every report is created in a collection. A report
 started without one before this rule is listed in the Report tab under
