@@ -119,8 +119,8 @@ export const en = {
 
   // shared error copy
   'common.owned_by_suffix': ' (owner: {owner})',
-  'common.collections_expiring_one': '{count} collection will be deleted within 30 days',
-  'common.collections_expiring_other': '{count} collections will be deleted within 30 days',
+  'common.collections_expiring_one': '{count} item will be deleted within {days} days',
+  'common.collections_expiring_other': '{count} items will be deleted within {days} days',
   'common.error_request': 'Something went wrong ({status}). Please try again or contact support.',
   'common.error_unknown': 'Something went wrong. Please try again or contact support.',
   'common.error_network': 'Service unreachable. Please check your connection or try again later.',
@@ -643,12 +643,13 @@ export const en = {
   'dashboard.chart_mentions': 'Mentions',
   'dashboard.retention_title': 'Automatic deletion',
   'dashboard.retention_rule':
-    'Collections are deleted after {months} months without activity, together with their chat sessions, reports, source files and extracts. Any work in a collection restarts its clock.',
-  'dashboard.retention_due': 'deleted on {date}',
-  'dashboard.retention_never': 'not scheduled',
-  'dashboard.retention_warning': 'Deleted within 30 days',
+    'Documents are deleted {days} days after they were added. Chats, reports and extracts built from them are deleted with the earliest of their sources.',
+  'dashboard.retention_due': 'Deleted on {date}',
+  'dashboard.retention_kind_document': 'Document',
+  'dashboard.retention_kind_session': 'Chat',
+  'dashboard.retention_kind_report': 'Report',
   'dashboard.retention_more': '+ {count} more',
-  'dashboard.retention_empty': 'No collections yet.',
+  'dashboard.retention_empty': 'Nothing is due for deletion in the next {days} days.',
 
   // inspector route wrapper
   'inspector.title': 'Documents',

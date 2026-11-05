@@ -403,6 +403,20 @@ class TopicStore:
         (self._dir(physical) / "active.json").unlink(missing_ok=True)
         return True
 
+    def run_ids(self, physical: str) -> list[str]:
+        """List a collection's stored runs.
+
+        Args:
+            physical (str): Collection name.
+
+        Returns:
+            list[str]: Run ids, sorted.
+        """
+        directory = self._dir(physical)
+        if not directory.is_dir():
+            return []
+        return sorted(entry.name for entry in directory.iterdir() if RUN_ID_PATTERN.fullmatch(entry.name))
+
     def delete_run(self, physical: str, run_id: str) -> None:
         """Remove one run; a missing one is ignored.
 

@@ -122,8 +122,8 @@ export const de: Strings = {
 
   // shared error copy
   'common.owned_by_suffix': ' (Eigentümer/-in: {owner})',
-  'common.collections_expiring_one': '{count} Sammlung wird innerhalb von 30 Tagen gelöscht',
-  'common.collections_expiring_other': '{count} Sammlungen werden innerhalb von 30 Tagen gelöscht',
+  'common.collections_expiring_one': '{count} Eintrag wird innerhalb von {days} Tagen gelöscht',
+  'common.collections_expiring_other': '{count} Einträge werden innerhalb von {days} Tagen gelöscht',
   'common.error_request':
     'Etwas ist schiefgelaufen ({status}) – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_unknown':
@@ -667,12 +667,13 @@ export const de: Strings = {
   'dashboard.chart_mentions': 'Erwähnungen',
   'dashboard.retention_title': 'Automatische Löschung',
   'dashboard.retention_rule':
-    'Sammlungen werden nach {months} Monaten ohne Aktivität gelöscht, zusammen mit ihren Chats, Berichten, Quelldateien und Extrakten. Jede Arbeit in einer Sammlung startet die Frist neu.',
-  'dashboard.retention_due': 'Löschung am {date}',
-  'dashboard.retention_never': 'nicht geplant',
-  'dashboard.retention_warning': 'Wird innerhalb von 30 Tagen gelöscht',
+    'Dokumente werden {days} Tage nach dem Hinzufügen gelöscht. Chats, Reports und Extrakte, die darauf aufbauen, werden mit ihrer frühesten Quelle gelöscht.',
+  'dashboard.retention_due': 'Wird am {date} gelöscht',
+  'dashboard.retention_kind_document': 'Dokument',
+  'dashboard.retention_kind_session': 'Chat',
+  'dashboard.retention_kind_report': 'Report',
   'dashboard.retention_more': '+ {count} weitere',
-  'dashboard.retention_empty': 'Noch keine Sammlungen.',
+  'dashboard.retention_empty': 'In den nächsten {days} Tagen wird nichts gelöscht.',
 
   // inspector route wrapper
   'inspector.title': 'Dokumente',

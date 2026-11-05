@@ -717,9 +717,10 @@ Loaded by `load_frontend_env()` (`env_cfg.py:352`).
 | `REPORT_BATCH_MAX_ITEMS` | `2000` | Most artifacts one `POST /reports/{id}/items/batch` may carry (clamped to ≥ 1). Read **once at import**: it becomes the request model's `max_length`, so a change needs a backend restart, and `GET /config` always advertises the value actually enforced. The Analysis screens' "Add all" refuses a larger section against this number rather than adding part of it. Raising it far past the default also means checking `DOCINT_API_MAX_BODY_SIZE` (see [deployment.md](deployment.md)) — the count is what the SPA refuses against, the bytes are what nginx stops. |
 
 All five values above are served to the SPA by `GET /config`, alongside
-`RESPONSE_LANGUAGE`, `COLLECTION_RETENTION`, `TOPICS_ENABLED` and the actions
-`AUDIT_REQUIRE_PURPOSE` requires (`require_purpose`, as the running audit chain
-enforces them) — nine fields in all (`FrontendConfigOut`).
+`RESPONSE_LANGUAGE`, `DOCUMENT_RETENTION_DAYS`, `RETENTION_NOTICE_DAYS`,
+`TOPICS_ENABLED` and the actions `AUDIT_REQUIRE_PURPOSE` requires
+(`require_purpose`, as the running audit chain enforces them) — ten fields in
+all (`FrontendConfigOut`).
 
 ## Logging — `LoggingConfig`
 
@@ -846,15 +847,18 @@ these do **not** inherit `OPENAI_API_BASE`, `OPENAI_API_KEY` or
 What docint sends, the limits it obeys and how an endpoint fault is reported
 are in [topics.md](topics.md#the-fit-service).
 
-## Collection retention — `RetentionConfig`
+## Document retention — `DocumentRetentionConfig`
 
-Loaded by `load_retention_env()` (`docint/utils/env_cfg.py`). Deletes
-collections nobody has worked with for the chosen window; the rules, what
-counts as activity and what is deleted are in [retention.md](retention.md).
+Loaded by `load_document_retention_env()` (`docint/utils/env_cfg.py`). Every
+document is deleted a fixed period after its ingest, and what is built from it
+no later; the rule, the sweep and what is deleted are in
+[retention.md](retention.md).
 
 | Variable | Default | Description |
 |---|---|---|
-| `COLLECTION_RETENTION` | `off` | `off`, `6m`, `12m`, `18m` or `24m` — calendar months without activity after which a collection is deleted. Case and surrounding spaces are ignored. Any other value keeps retention **off** and logs a warning; it never falls back to a period. Read at startup, which logs `Collection retention \| window=…`; while on, a sweep deletes due collections once a day. |
+| `DOCUMENT_RETENTION_DAYS` | `365` | Days after its ingest completed a document is deleted: whole days from `1` to `3650`, or `off` (development only — nothing is deleted, and startup logs a warning). Any other value stops the backend at startup. Read at startup, which logs `Document retention \| period=…` and records the period in the audit chain; a changed period restarts the grace. |
+| `RETENTION_NOTICE_DAYS` | `30` | Days before its deletion an item is listed for its owner (Dashboard, sidebar, `GET /collections/retention`): `1` to `365`. Also the grace period: nothing is deleted sooner than this after the period took effect. Any other value stops the backend at startup. |
+| `COLLECTION_RETENTION` | — | No longer read (the idle-window rule it set was replaced). If set, startup logs one warning naming `DOCUMENT_RETENTION_DAYS`. |
 
 ## Response language — `LanguageConfig`
 

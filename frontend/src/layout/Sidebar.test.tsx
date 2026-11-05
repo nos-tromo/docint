@@ -751,20 +751,20 @@ describe('Sidebar ingest job badge', () => {
 })
 
 describe('Sidebar retention notice', () => {
-  function retentionRow(name: string, expires_at: string, warning: boolean) {
-    return { name, owner: null, last_activity_at: '2026-03-02T09:14:00Z', expires_at, warning }
+  function retentionItem(collection: string, name: string, expires_at: string) {
+    return { kind: 'document', collection, owner: null, id: name, name, expires_at, warning: true }
   }
 
-  function retentionBackend(window: string, rows = [
-    retentionRow('alt', '2026-10-21T06:45:00Z', true),
-    retentionRow('verwaist', '2026-10-25T06:45:00Z', true),
-    retentionRow('laufend', '2027-03-19T08:00:00Z', false)
+  function retentionBackend(days: number | null, items = [
+    retentionItem('alt', 'a.pdf', '2026-11-21T06:45:00Z'),
+    retentionItem('alt', 'b.pdf', '2026-11-22T06:45:00Z'),
+    retentionItem('verwaist', 'c.pdf', '2026-11-25T06:45:00Z')
   ]) {
     return mockFetch({
-      '/collections/retention': { window, collections: rows },
+      '/collections/retention': { period_days: days, notice_days: 14, items },
       '/collections/list': ['alt', 'laufend', 'verwaist'],
       '/sessions/list': { sessions: [] },
-      '/config': { language: 'en', collection_retention: window }
+      '/config': { language: 'en', document_retention_days: days, retention_notice_days: 14 }
     })
   }
 
@@ -772,25 +772,25 @@ describe('Sidebar retention notice', () => {
     return fetchMock.mock.calls.some((c) => String(c[0]).includes('/collections/retention'))
   }
 
-  it('warns about collections about to be deleted and links to the Dashboard that names them', async () => {
-    vi.stubGlobal('fetch', retentionBackend('6m'))
+  it('warns about items about to be deleted and links to the Dashboard that names them', async () => {
+    vi.stubGlobal('fetch', retentionBackend(365))
     renderSidebarAt('/chat')
 
-    const link = await screen.findByRole('link', { name: '2 collections will be deleted within 30 days' })
+    const link = await screen.findByRole('link', { name: '3 items will be deleted within 14 days' })
     await userEvent.click(link)
     expect(screen.getByTestId('location-probe')).toHaveTextContent(/^\/$/)
   })
 
-  it('does not count the active collection, since using it restarts its clock', async () => {
+  it('counts due items in the selected collection too', async () => {
     useUiStore.setState({ selectedCollection: 'alt', selectedOwner: null })
-    vi.stubGlobal('fetch', retentionBackend('6m'))
+    vi.stubGlobal('fetch', retentionBackend(365, [retentionItem('alt', 'a.pdf', '2026-11-21T06:45:00Z')]))
     renderSidebar()
 
-    expect(await screen.findByRole('link', { name: '1 collection will be deleted within 30 days' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: '1 item will be deleted within 14 days' })).toBeInTheDocument()
   })
 
-  it('says nothing when no collection is due within 30 days', async () => {
-    const fetchMock = retentionBackend('6m', [retentionRow('laufend', '2027-03-19T08:00:00Z', false)])
+  it('says nothing when nothing is due within the notice', async () => {
+    const fetchMock = retentionBackend(365, [])
     vi.stubGlobal('fetch', fetchMock)
     renderSidebar()
 
@@ -800,7 +800,7 @@ describe('Sidebar retention notice', () => {
   })
 
   it('asks for no deadlines while retention is off', async () => {
-    const fetchMock = retentionBackend('off')
+    const fetchMock = retentionBackend(null)
     vi.stubGlobal('fetch', fetchMock)
     renderSidebar()
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import closing
 from pathlib import Path
 from typing import TypeVar
@@ -249,6 +249,36 @@ class IngestManifest:
 
         self._execute("mark_completed", _do)
 
+    def forget(self, collection: str, file_hashes: Iterable[str]) -> int:
+        """Remove *file_hashes*' rows of *collection* (the documents were deleted).
+
+        Args:
+            collection: Logical Qdrant collection name.
+            file_hashes: The documents' hashes.
+
+        Returns:
+            int: Rows removed.
+        """
+        hashes = sorted({value for value in file_hashes if value})
+        if not collection or not hashes:
+            return 0
+        removed = 0
+
+        def _do() -> None:
+            nonlocal removed
+            for start in range(0, len(hashes), 500):
+                chunk = hashes[start : start + 500]
+                marks = ", ".join("?" * len(chunk))
+                cursor = self._conn.execute(
+                    f"DELETE FROM ingest_manifest WHERE collection = ? AND file_hash IN ({marks})",
+                    (collection, *chunk),
+                )
+                removed += cursor.rowcount
+            self._conn.commit()
+
+        self._execute("forget", _do)
+        return removed
+
     def mark_failed(
         self,
         collection: str,
@@ -466,6 +496,15 @@ class NullIngestManifest:
     def mark_started(self, collection: str, file_hash: str) -> None:
         """No-op."""
         _ = (collection, file_hash)
+
+    def forget(self, collection: str, file_hashes: Iterable[str]) -> int:
+        """No-op.
+
+        Returns:
+            int: ``0``.
+        """
+        _ = (collection, file_hashes)
+        return 0
 
     def mark_completed(self, collection: str, file_hash: str) -> None:
         """No-op."""

@@ -47,6 +47,9 @@ class Report(Base):
         String, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    # When the report is deleted: the earliest deadline of the documents its
+    # items and overview draw on (docs/retention.md). Only ever lowered.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=lambda: datetime.now(UTC),

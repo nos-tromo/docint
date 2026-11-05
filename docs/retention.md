@@ -1,172 +1,204 @@
-# Collection retention
+# Document retention
 
-Docint keeps every collection until someone deletes it. Collection retention is
-the opt-in alternative: set `COLLECTION_RETENTION` and a collection nobody has
-worked with for that long falls due for deletion.
+Docint is an analysis platform, not a permanent store. Every document is
+deleted a fixed period after it was added, and everything built from it goes
+no later than it does. The rule is on by default.
 
-| Value | Meaning |
-|---|---|
-| `off` (default) | Nothing is ever due. |
-| `6m`, `12m`, `18m`, `24m` | Due after that many calendar months without activity. |
+| Variable | Default | Meaning |
+|---|---|---|
+| `DOCUMENT_RETENTION_DAYS` | `365` | Days after its ingest completed a document is deleted, `1` to `3650`. `off` deletes nothing (development only; logged as a warning). |
+| `RETENTION_NOTICE_DAYS` | `30` | Days before its deletion an item is listed for its owner, `1` to `365`; also the grace period after the rule takes effect. |
 
-Any other value keeps retention **off** and logs a warning — a typo never
-deletes on a schedule nobody chose. Every startup logs one line saying which
-window is in force:
+Any other value stops the backend at startup: a typo never deletes on a
+schedule nobody chose, and never silently switches retention off.
+`COLLECTION_RETENTION`, the idle-window rule this replaces, is no longer read;
+a startup that still finds it set logs one warning. Every startup logs one line
+saying which period is in force:
 
 ```text
-Collection retention | window=6m set_at=2026-09-21T06:45:00+00:00
+Document retention | period=365d notice=30d since=2026-11-05T06:45:00+00:00
 ```
+
+and records the same in the audit chain (`admin` `retention.config`, with
+`period_days`, `notice_days` and `since`; see [audit.md](audit.md)).
 
 ## The rule
 
 ```text
-due = max(last activity + window, window set + 30 days)
+due = max(ingested + period, period took effect + notice)
 ```
 
-- **Calendar months.** A collection last used on 31 August is due at the end of
-  February under `6m`, not on 3 March.
-- **Notice.** Nothing falls due sooner than 30 days after the window was set.
-  Switching retention on, switching it off, or changing the window all restart
-  that grace period; restarting with the same window does not. The SPA flags a
-  collection from 30 days before it is due, so the grace period guarantees every
-  user sees a full notice period.
-- **No recorded activity never expires.** A collection with an empty clock is
-  never due.
+- **The clock starts when the document is stored**, at the end of its ingest,
+  and nothing moves it: reading, chatting with or exporting a document does
+  not. There is no extension — no button, flag or admin override keeps an item
+  past its date.
+- **Per document, per collection.** Re-ingesting the same file into the same
+  collection keeps its clock; the same file in another collection has its own.
+  Once a document is deleted, a new ingest is a new document with a new clock.
+- **Grace.** Nothing is deleted sooner than the notice period after the period
+  took effect on the host: the first start of this release, or any change of
+  `DOCUMENT_RETENTION_DAYS`. So every owner sees a full notice, also for data
+  that is already older than the period when retention starts.
 
-The rule lives in one place, `docint/core/retention.py`, so the API listing and
-the operator report can never disagree about a date.
+The rule lives in one place, `docint/core/retention.py`, so the API listing,
+the operator report and the sweep can never disagree about a date.
 
-## What counts as activity
+## What counts as one document
 
-The clock is `collection_owners.last_activity_at` in the sessions store. It
-moves on:
+One uploaded file, keyed by its content hash: every chunk of a PDF, a video
+with its transcript segments and keyframes, a social-media export with all its
+postings and their images. Images that two documents contain are kept for the
+other one, and so is anything named by a hash another indexed document also
+carries — a clip that is both a file of its own and a dossier's attachment is
+two documents, each with its own clock.
 
-- every request that works on a collection — each such route passes the
-  ownership gate (`_require_owned_collection`), which records the activity:
-  chat, search, analysis, the inspector, previews, summaries, topics, extracts
-  and exports;
-- ingesting into a collection — upload, finalize and `POST /ingest`;
-- opening, extending or exporting a report built from the collection.
+## Where the clock lives
 
-An admin working in another user's namespace (`?owner=`) counts as activity on
-that user's collection. Viewing a collection's data in the app counts as well —
-the Dashboard, for one, reads the selected collection's document count on load.
+- **In Qdrant.** Every point of a document carries its ingest time in its
+  payload (`docint_ingested_at`, seconds since the epoch; hidden from the
+  embedding and the prompts), so a restored collection still knows its
+  deadlines.
+- **In the sessions store.** The `document_retention` table indexes each
+  document (collection, owner, file hash, file name, ingested, due) for the
+  notices and the sweep. Each sweep first repairs it from Qdrant: a document
+  Qdrant holds and the index lacks gets a row, timed by its payload stamp, else
+  the ingest manifest's completion time, else the moment the period took
+  effect — never the time of the repair. A restore from a backup therefore
+  never earns a fresh clock.
+- **Documents from before this release** have no payload stamp; they take the
+  manifest's completion time where the manifest has one, else the moment the
+  period took effect.
 
-Looking does not count. Listing collections or chat sessions, reading deadlines
-(`GET /collections/retention`) and the maintenance commands — `search-index`,
-`search-index-all`, `resolve`, `extract`, `topics` and `retention-report` —
-never move a clock, so a one-off backport can never keep every collection
-alive.
+## What is built from documents
 
-The clock is written at most once an hour per collection, and whether or not
-retention is on — switching it on later finds real history. A failed write never
-fails the request that caused it; the next request a minute later retries.
+Anything derived from documents is deleted no later than the earliest document
+it draws on. Where docint cannot tell which documents an item draws on, the
+collection's oldest document counts.
+
+| Item | Inherits from |
+|---|---|
+| Chat session | the documents its answers cite; an answer without citations, an agent-answered turn (its tools may list the whole collection's topics or keywords), a scoped session or one with a topic focus counts as collection-wide |
+| Report | each item's sources (a chat answer's citations, a finding's chunk); summaries, topics and the collection overview count as collection-wide |
+| Stored extract | collection-wide, and its own `EXTRACT_RETENTION_DAYS` if that comes first |
+| Topic run | collection-wide |
+| Summary and overview caches, full-text and entity data, docstore nodes, source file, pipeline artifacts | part of the document; deleted with it |
+
+A derived item's date is set when it is made and only ever moves earlier as it
+gains sources. An item with nothing to inherit from — built in a collection
+without indexed documents, or a chat or report from an older release tied to
+no collection — goes one period after it was dated.
+
+**When the period changes**, document dates are recomputed under the new one.
+A shorter period moves every chat's and report's date forward by the
+difference (never inside the new grace); extracts and topic runs go with the
+collection's earliest document at the latest. A longer period keeps the
+earlier dates — nothing outlives its sources. Switching to `off` clears the
+chat and report dates; switching on again stamps them afresh.
 
 ## The sweep
 
-While retention is on, the backend sweeps once a day, starting five minutes
-after startup. For each collection past its due date it:
+The backend sweeps once a day, starting five minutes after startup. Each sweep:
 
-1. **skips it if any job is still working on it** — an ingest, a summary, an
-   extract, a topics job, or upload-time preprocessing. Deleting under a
-   running job would let the job re-create the collection; the next sweep
-   tries again;
-2. **re-reads its clock** and spares it if anyone used it since the sweep
-   started;
-3. **deletes it** with everything connected (below).
+1. repairs the document index from Qdrant (above);
+2. stamps a date on chats and reports from before this release;
+3. for each collection with documents due, **skips it if any job is still
+   working on it** — an ingest, a summary, an extract, a topics job, or
+   upload-time preprocessing — and otherwise deletes those documents (below).
+   A collection left without documents is deleted with the collection cascade
+   ([api-reference.md](api-reference.md#delete-collectionsname));
+4. deletes due chat sessions, reports (with their stored PDFs), extracts and
+   topic runs.
 
-A collection that fails to delete is left intact and retried the next day; the
-others still go. Each sweep ends with one line to grep for:
+Every deletion is recorded in the audit trail first, as `delete` by the system,
+with references and never content ([audit.md](audit.md#retention-sweep)). A
+deletion whose record cannot be written does not happen. A document deletion
+that fails afterwards adds an `error` event; whatever fails is retried by the
+next sweep, while the others still go. At most 5,000 due documents of one
+collection are deleted per sweep, soonest first; the rest follow the next day,
+and every collection with due documents is visited each sweep. Each sweep ends
+with one line to grep for:
 
 ```text
-Retention sweep complete | window=6m scanned=12 expired=2 deleted=2 skipped_busy=0 skipped_active=0 failed=0
+Retention sweep complete | period=365d documents=12 sessions=3 reports=1 extracts=0 topic_runs=1 collections=1 repaired=0 skipped_busy=0 failed=0
 ```
 
-and every deletion is logged by name with its last activity. Logs carry
-collection names and counts, never owners or content.
-
 The sweep runs inside the backend, not as a separate command, so the process
-that deletes a collection is the one whose caches hold it. Without a recorded
-window (the startup could not write it) the sweep does not start.
+that deletes is the one whose caches hold the data. While retention is off, or
+when the startup could not record the period, the sweep does not start.
 
-## What is deleted
+## What deleting a document removes
 
-The same cascade as deleting a collection by hand (`DELETE /collections/{name}`),
-in this order:
+Its points are found by its own `file_hash`, and by any `media_file_hash` or
+`source_doc_id` it carries that no other indexed document carries too. In
+order, each step a no-op on what is already gone:
 
-1. the Qdrant collection and its hidden companions (`_images`, `_entities`);
-2. the source files, and with them the collection's docstore, summary cache,
-   ingest manifest and cached transcripts;
-3. stored extracts;
-4. stored topic runs, under `TOPICS_DIR` — see
-   [topics.md](topics.md#the-store-and-its-lock);
-5. its PDFs' pipeline artifacts (page text, chunks, tables, figures under
-   `PIPELINE_ARTIFACTS_DIR`) that nothing else uses — see below;
-6. the collection's chat sessions;
-7. the reports built from it — manual deletion removes them too, see
-   [reports.md](reports.md#when-the-collection-is-deleted);
-8. last, the ownership row.
+1. its points in the `_dockv` companion;
+2. its `_images` points — an image another document also contains loses only
+   this document's occurrence — and the image files they name (a social
+   export's posting images live only there);
+3. its docstore nodes;
+4. what the summary caches hold of it: its map units, every social map unit
+   when it carries postings, and the cached collection summary itself;
+5. its source files, only inside the collection's source directory;
+6. its ingest manifest rows, the transcript cached under its media hash
+   included;
+7. its PDF pipeline artifacts, unless another collection still uses them (below);
+8. its points in the collection — last, so a retry after a failed step still
+   finds which files to remove;
+9. the collection's `_entities` companion — canonical entities record no
+   per-document provenance, so the store is rebuilt from what is left: while
+   `RES_AUTO_RESOLVE` is on, resolution runs again right after (`combine`
+   `entities.resolve`, by the system); until it completes, or with it off until
+   the next resolve, entity views show the collection as unresolved;
+10. its row in the document index — unless the collection is left empty: then
+    the row stays until the collection cascade drops it, so a failed cascade is
+    retried by the next sweep.
 
-A failure stops the cascade with the collection still listed, and the next
-attempt finishes it: every step is a no-op on what is already gone. While a
-collection is being deleted, requests that would work on it get `409`.
+While a collection is being worked on by the sweep, requests that would work on
+it get `409`.
 
 **PDF artifacts are shared.** They are named by the file's content hash, so two
 collections holding the same PDF share one folder. A folder is removed only when
 no other collection's ingest manifest records the hash, no other collection's
 source files produced it, and no preprocessing worker is reading that PDF right
-now. The collection's own folders are found by its manifest *and* by the source
-path each folder records, which is how an upload that was preprocessed but never
-ingested is found. Removing too much costs only a re-read of that PDF. With
+now. Removing too much costs only a re-read of that PDF. With
 `INGEST_MANIFEST_ENABLED=false` nothing says what other collections use, so no
-artifact is removed. Like removing the hidden companions, the stored extracts
-and the topic runs, this step is best-effort: a failure is logged and does not
-stop the delete.
+artifact is removed.
+
+## Seeing what is deleted, and when
+
+- **Dashboard** — the *Automatic deletion* card lists the owner's documents,
+  chats and reports due within the notice period, grouped by collection, each
+  with its date; the sidebar says how many items are due and links to it. See
+  [ui-guide.md](ui-guide.md#dashboard-srcroutesdashboardtsx).
+- `GET /collections/retention` — the same for the caller; admins pass
+  `all=true` for everyone's (recorded as `admin`), other owners' items by
+  reference only, without their file names, questions or titles. See
+  [api-reference.md](api-reference.md#get-collectionsretention).
+- `GET /config` — `document_retention_days` and `retention_notice_days`.
+- `make retention-report` — the operator's view of everything with a date,
+  by reference only; `DAYS=N` shows what another period would do. Documents
+  Qdrant holds that the index does not list yet (right after an upgrade or a
+  restore, before the first sweep) are dated as the sweep's repair would date
+  them, without writing anything. See
+  [cli-reference.md](cli-reference.md#retention-report--what-retention-deletes-and-when).
+
+**Collections without an owner** — ingested with the `ingest` CLI, or from
+before ownership on a host without `DOCINT_DEFAULT_IDENTITY` — expire like any
+other, but no one is notified; the operator report names them.
 
 ## Upgrading
 
-Collections that existed before this release have no activity history, so the
-upgrade starts every clock at the moment the sessions store is migrated — not at
-the collection's creation date. A guess that is too old would delete data. The
-consequence: with `COLLECTION_RETENTION=6m`, no existing collection falls due
-before six months after the upgrade.
-
-## Before switching it on
-
-See what a window would do, without changing anything:
-
-```bash
-make retention-report WINDOW=6m
-```
-
-The report lists every collection's last activity and due date, applying the
-grace period exactly as switching the window on now would. It moves no clock and
-records no window. See [cli-reference.md](cli-reference.md#retention-report--what-retention-deletes-and-when).
-
-## Seeing deadlines
-
-- **Dashboard** — an *Automatic deletion* card lists every collection with its
-  deletion date and flags those due within 30 days; the sidebar says how many
-  other collections are due within 30 days and links to it. See
-  [ui-guide.md](ui-guide.md#dashboard-srcroutesdashboardtsx).
-- `GET /collections/retention` — each of the caller's collections with its last
-  activity, due date and a `warning` flag; admins pass `all=true` for everyone's.
-  See [api-reference.md](api-reference.md#get-collectionsretention).
-- `GET /config` — `collection_retention` names the window in force.
-- `make retention-report` — the operator's view, without `WINDOW` exactly what
-  the running backend acts on.
+The first start of this release records the period and starts the grace
+period: nothing is deleted for the notice period, however old a document is.
+Retention is on from then on unless `DOCUMENT_RETENTION_DAYS=off` is set. During
+the grace, `make retention-report` shows the operator every date and the
+Dashboard shows each owner what falls due.
 
 ## Not covered
 
-- **Collections without an ownership row** have no clock and are never due.
-  They are the ones ingested with the `ingest` CLI, and pre-ownership
-  collections on a host that runs without `DOCINT_DEFAULT_IDENTITY`.
-  `make retention-report` names them.
-- **Reports with no collection** are tied to none and are kept. So are reports
-  whose collection was deleted before reports joined the cascade — until a new
-  collection of the same name is deleted, since reports are matched by owner and
-  collection name.
+- **Backups.** A restored collection keeps its deadlines (above); the Qdrant
+  snapshots themselves are pruned by `data-plane`.
 - **PDF pipeline artifacts** of collections deleted before artifacts joined the
   cascade stay under `PIPELINE_ARTIFACTS_DIR`, as do all artifacts while the
   ingest manifest is off.
-- **A deletion record.** What was deleted is in the backend log only.

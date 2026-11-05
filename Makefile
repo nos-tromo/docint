@@ -55,7 +55,7 @@ help:
 	@echo "                   CASE_REF=<ref> REASON=<text> state the purpose, e.g."
 	@echo "                   make extract COLLECTION=mydocs CASE_REF=case-0001;"
 	@echo "                   AUDIT_REQUIRE_PURPOSE= in .env requires none)"
-	@echo "  make retention-report  show what COLLECTION_RETENTION deletes, and when (WINDOW=6m optional; read-only)"
+	@echo "  make retention-report  show what document retention deletes, and when (DAYS=N optional; read-only)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
 	@echo "  make test       run pytest + vitest (test-backend / test-frontend for one)"
@@ -134,16 +134,16 @@ search-index:
 search-index-all:
 	$(COMPOSE) exec -T $(AUDIT_EXEC_ENV) backend search-index-all
 
-# Show every collection's last activity and when retention deletes it — run it
-# before setting COLLECTION_RETENTION. Read-only: deletes nothing and records
-# no window (only the backend's startup does). Pass WINDOW=6m|12m|18m|24m to
-# evaluate a window as if it were switched on now. Runs in a one-off backend
-# container so it reads the same sessions store and Qdrant the API does. Not
-# audited, so it needs no running backend: it reads only the retention clock
-# (owner, collection name, last activity), no collection content.
+# Show every document, chat and report with the date retention deletes it — run
+# it before changing DOCUMENT_RETENTION_DAYS. Read-only: deletes nothing and
+# records no period (only the backend's startup does). Pass DAYS=N to evaluate
+# a period as if it were switched on now. Runs in a one-off backend container
+# so it reads the same sessions store the API does. Not audited, so it needs no
+# running backend: it prints references only (owner, collection, file hash,
+# chat and report ids, dates), never a file name, question or title.
 retention-report:
-	@if [ -n "$(WINDOW)" ]; then \
-		$(COMPOSE) run --rm -T backend retention-report --window "$(WINDOW)"; \
+	@if [ -n "$(DAYS)" ]; then \
+		$(COMPOSE) run --rm -T backend retention-report --days "$(DAYS)"; \
 	else \
 		$(COMPOSE) run --rm -T backend retention-report; \
 	fi

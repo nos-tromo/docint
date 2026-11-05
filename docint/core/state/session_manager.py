@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,6 +40,8 @@ from docint.agents.turn.history import (
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
+from docint.core.retention import ExpiringItem, inherit
+from docint.core.retention_sources import source_expiry
 from docint.core.retrieval.visual import DEFAULT_RETRIEVAL_TARGET, RetrievalTarget
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
@@ -203,6 +205,20 @@ def _answer_mode_of(turn: Turn) -> str:
         str: ``assessment`` or ``lookup``.
     """
     return turn.answer_mode or ("assessment" if turn.agent_trail else "lookup")
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """Read a stored timestamp as aware UTC (SQLite keeps them naive).
+
+    Args:
+        value (datetime | None): As stored.
+
+    Returns:
+        datetime | None: Aware UTC, or ``None``.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class AgentTurnFallback(Exception):
@@ -1797,6 +1813,7 @@ class SessionManager:
                 s.add(t)
             s.flush()
 
+            cited: set[str] = set()
             for src_node in getattr(resp, "source_nodes", []) or []:
                 node = getattr(src_node, "node", None)
                 meta_node = getattr(node, "metadata", {}) or {}
@@ -1810,6 +1827,8 @@ class SessionManager:
                 )
                 filetype = meta_node.get("mimetype") or meta_node.get("filetype") or meta_node.get("content_type") or ""
                 file_hash = source_file_hash(meta_node) or None
+                if file_hash:
+                    cited.add(str(file_hash))
                 source_kind = meta_node.get("source", "")
                 page = meta_node.get("page_label") or meta_node.get("page") or None
                 table_meta = meta_node.get("table") or {}
@@ -1839,8 +1858,41 @@ class SessionManager:
                     )
                 )
 
+            self._lower_session_expiry(conv, cited, agent=bool(agent_trail))
             s.commit()
             return next_idx
+
+    def _lower_session_expiry(self, conv: Conversation, cited: set[str], *, agent: bool = False) -> None:
+        """Lower a session's deadline to the earliest of the documents this turn drew on.
+
+        A turn that names no source, an agent-answered turn (its tools may
+        list topics or keywords of the whole collection), or a session with a
+        scope or a topic focus may have drawn on anything in the collection,
+        so the collection's oldest live document counts. Never raises the
+        deadline. Best-effort: a failure leaves the deadline as it was and is
+        logged.
+
+        Args:
+            conv (Conversation): The session, inside the open transaction.
+            cited (set[str]): The file hashes this turn's citations name.
+            agent (bool): Whether an agent answered the turn.
+        """
+        try:
+            collection_wide = agent or not cited or bool(conv.scope_chunk_ids) or bool(conv.topic_focus)
+            physical = conv.collection_name or self.rag.qdrant_collection
+            if not isinstance(physical, str):
+                return
+            inherited = source_expiry(self.rag, physical, set() if collection_wide else cited, now=datetime.now(UTC))
+            if not isinstance(inherited, datetime):
+                return
+            current = conv.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, inherited)
+            if lowered != current:
+                conv.expires_at = lowered
+        except Exception as exc:
+            logger.warning("Session deadline not updated: {}", exc)
 
     def update_turn_validation(
         self,
@@ -2224,6 +2276,135 @@ class SessionManager:
         if citation_index is not None:
             src["citation_index"] = citation_index
         return src
+
+    def due_sessions(self, now: datetime) -> list[tuple[str, str | None, str | None]]:
+        """List sessions whose inherited deadline has been reached.
+
+        Args:
+            now (datetime): The current time.
+
+        Returns:
+            list[tuple[str, str | None, str | None]]: ``(id, owner, physical collection)``.
+        """
+        with self._session_scope() as s:
+            rows = (
+                s.query(Conversation.id, Conversation.owner, Conversation.collection_name)
+                .filter(Conversation.expires_at.is_not(None), Conversation.expires_at <= now.replace(tzinfo=None))
+                .all()
+            )
+            return [(str(row[0]), row[1], row[2]) for row in rows]
+
+    def sessions_without_deadline(self) -> list[tuple[str, str | None, set[str], bool]]:
+        """List sessions no deadline was stamped on yet (they predate retention).
+
+        Returns:
+            list[tuple[str, str | None, set[str], bool]]: ``(id, physical collection,
+                cited file hashes, collection-wide)`` per session.
+        """
+        with self._session_scope() as s:
+            found = []
+            for convo in s.query(Conversation).filter(Conversation.expires_at.is_(None)).all():
+                cited = {str(c.file_hash) for t in convo.turns for c in t.citations if c.file_hash}
+                agent = any(t.agent_trail for t in convo.turns)
+                wide = agent or not cited or bool(convo.scope_chunk_ids) or bool(convo.topic_focus)
+                found.append((str(convo.id), convo.collection_name, cited, wide))
+            return found
+
+    def set_session_expiry(self, session_id: str, expires_at: datetime) -> None:
+        """Stamp a session's deadline (lowering only).
+
+        Args:
+            session_id (str): The session.
+            expires_at (datetime): The deadline.
+        """
+        with self._session_scope() as s:
+            convo = s.get(Conversation, session_id)
+            if convo is None:
+                return
+            current = convo.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, expires_at)
+            if lowered != current:
+                convo.expires_at = lowered
+                s.commit()
+
+    def expiring_sessions(self, until: datetime | None) -> list[ExpiringItem]:
+        """Return every owner's sessions with a deadline by ``until``.
+
+        A session is named like the session list names it: its first
+        question, cut to 50 characters.
+
+        Args:
+            until (datetime | None): The horizon; ``None`` for every deadline.
+
+        Returns:
+            list[ExpiringItem]: With the physical collection; the caller resolves its logical name.
+        """
+        with self._session_scope() as s:
+            query = s.query(Conversation).filter(Conversation.expires_at.is_not(None))
+            if until is not None:
+                query = query.filter(Conversation.expires_at <= until.astimezone(UTC).replace(tzinfo=None))
+            found = []
+            for convo in query.all():
+                title = "New Chat"
+                if convo.turns:
+                    text = convo.turns[0].user_text
+                    title = text[:50] + "..." if len(text) > 50 else text
+                found.append(
+                    ExpiringItem(
+                        "session",
+                        convo.collection_name,
+                        None,
+                        convo.owner,
+                        str(convo.id),
+                        title,
+                        _aware(convo.created_at),
+                        _aware(convo.expires_at),
+                    )
+                )
+            return found
+
+    def shift_session_expiries(self, sooner: timedelta, *, floor: datetime) -> int:
+        """Move every session's deadline ``sooner`` forward, never before ``floor`` and never later.
+
+        Args:
+            sooner (timedelta): How much shorter the period became.
+            floor (datetime): The end of the new notice period.
+
+        Returns:
+            int: Sessions whose deadline moved.
+        """
+        moved = 0
+        with self._session_scope() as s:
+            for convo in s.query(Conversation).filter(Conversation.expires_at.is_not(None)).all():
+                current = _aware(convo.expires_at)
+                if current is None:
+                    continue
+                lowered = min(current, max(current - sooner, floor))
+                if lowered != current:
+                    convo.expires_at = lowered
+                    moved += 1
+            s.commit()
+        return moved
+
+    def clear_session_expiries(self) -> int:
+        """Forget every session's deadline, for the sweep to stamp again under a new period.
+
+        Deadlines only ever go down, so a changed period could leave a session
+        outliving its sources; the sweep re-derives each from its sources.
+
+        Returns:
+            int: Sessions cleared.
+        """
+        with self._session_scope() as s:
+            cleared = (
+                s.query(Conversation)
+                .filter(Conversation.expires_at.is_not(None))
+                .update({Conversation.expires_at: None}, synchronize_session=False)
+            )
+            s.commit()
+        return int(cleared)
 
     def delete_session(self, session_id: str, owner: str | None) -> bool:
         """Delete a session the caller owns.

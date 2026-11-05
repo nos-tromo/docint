@@ -1,7 +1,7 @@
 """Tests for ``collection_owners.last_activity_at`` and its migration.
 
-The column is the retention clock (``docs/retention.md``), so the migration
-decides when every pre-existing collection's clock starts.
+The column was the clock of the retired idle-window retention; it is kept so
+older stores still open (``docs/retention.md``).
 """
 
 from __future__ import annotations

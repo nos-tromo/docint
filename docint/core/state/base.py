@@ -228,14 +228,36 @@ def _ensure_report_columns(engine: Engine) -> None:
         raise _migration_failure("reports columns", engine, exc) from exc
 
 
+def _ensure_derived_expiry_columns(engine: Engine) -> None:
+    """Add ``expires_at`` to ``conversations`` and ``reports``.
+
+    Existing rows stay ``NULL`` here; the backend stamps them at startup from
+    the documents they draw on (``docs/retention.md``).
+
+    Args:
+        engine (Engine): The session-store engine.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
+    """
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        with engine.begin() as conn:
+            for table in ("conversations", "reports"):
+                if table in tables and "expires_at" not in {col["name"] for col in inspector.get_columns(table)}:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN expires_at DATETIME"))
+    except Exception as exc:
+        raise _migration_failure("derived expiry columns", engine, exc) from exc
+
+
 def _ensure_collection_owner_activity_column(engine: Engine) -> None:
     """Add ``last_activity_at`` to ``collection_owners`` and stamp unstamped rows.
 
-    The column is the retention clock (``docs/retention.md``). Rows without a
-    stamp get the migration time, not ``created_at``: no activity history
-    exists to reconstruct, and a guess that is too old deletes data. This runs
-    on every startup, so a row an older release inserted without the column
-    joins retention from then on.
+    The column was the clock of the idle-window collection retention that
+    document retention replaced (``docs/retention.md``); it is kept so older
+    stores still open, and nothing reads it for a deadline any more. Rows
+    without a stamp get the migration time.
 
     The stamp is bound through SQLAlchemy's ``DateTime`` so it is stored in the
     same form the ORM writes; a plain ``datetime`` parameter would be stored
@@ -283,4 +305,5 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     # pre-existing table need a manual backfill:
     _ensure_report_columns(engine)
     _ensure_collection_owner_activity_column(engine)
+    _ensure_derived_expiry_columns(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)

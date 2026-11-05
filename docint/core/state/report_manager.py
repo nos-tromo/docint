@@ -12,12 +12,15 @@ import json
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from loguru import logger
 from sqlalchemy import ColumnElement, or_
 from sqlalchemy.orm import Session
 
+from docint.core.retention import ExpiringItem, inherit
+from docint.core.retention_sources import report_item_expiry
 from docint.core.state.base import _make_session_maker
 from docint.core.state.report import Report
 from docint.core.state.report_item import ReportItem
@@ -38,6 +41,20 @@ def _without_collection() -> ColumnElement[bool]:
 def _belongs(report: Report, owner: str | None, collection: str | None) -> bool:
     """Whether ``report`` is ``owner``'s and, when a ``collection`` is named, in that collection."""
     return report.owner == owner and (collection is None or report.collection_name == collection)
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    """Read a stored timestamp as aware UTC (SQLite keeps them naive).
+
+    Args:
+        value (datetime | None): As stored.
+
+    Returns:
+        datetime | None: Aware UTC, or ``None``.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(slots=True)
@@ -440,7 +457,120 @@ class ReportManager:
             report.collection_overview_snapshot = cast(
                 Any, json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
             )
+            if snapshot is not None:
+                self._lower_report_expiry(report, "collection_overview", snapshot)
             return self._commit_returning(s, report)
+
+    def due_reports(self, now: datetime) -> list[tuple[int, str | None, str | None]]:
+        """List reports whose inherited deadline has been reached.
+
+        Args:
+            now (datetime): The current time.
+
+        Returns:
+            list[tuple[int, str | None, str | None]]: ``(id, owner, logical collection)``.
+        """
+        with self._session_scope() as s:
+            rows = (
+                s.query(Report.id, Report.owner, Report.collection_name)
+                .filter(Report.expires_at.is_not(None), Report.expires_at <= now.replace(tzinfo=None))
+                .all()
+            )
+            return [(int(row[0]), row[1], row[2]) for row in rows]
+
+    def reports_without_deadline(self) -> list[tuple[int, str | None, str | None]]:
+        """List reports no deadline was stamped on yet (they predate retention).
+
+        Returns:
+            list[tuple[int, str | None, str | None]]: ``(id, owner, logical collection)``.
+        """
+        with self._session_scope() as s:
+            rows = s.query(Report.id, Report.owner, Report.collection_name).filter(Report.expires_at.is_(None)).all()
+            return [(int(row[0]), row[1], row[2]) for row in rows]
+
+    def set_report_expiry(self, report_id: int, expires_at: datetime) -> None:
+        """Stamp a report's deadline (lowering only).
+
+        Args:
+            report_id (int): The report.
+            expires_at (datetime): The deadline.
+        """
+        with self._write_scope() as s:
+            report = s.get(Report, report_id)
+            if report is None:
+                return
+            current = report.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, expires_at)
+            if lowered != current:
+                report.expires_at = lowered
+                s.commit()
+
+    def expiring_reports(self, until: datetime | None) -> list[ExpiringItem]:
+        """Return every owner's reports with a deadline by ``until``.
+
+        Args:
+            until (datetime | None): The horizon; ``None`` for every deadline.
+
+        Returns:
+            list[ExpiringItem]: With the logical collection the report was built from.
+        """
+        with self._session_scope() as s:
+            query = s.query(Report).filter(Report.expires_at.is_not(None))
+            if until is not None:
+                query = query.filter(Report.expires_at <= until.astimezone(UTC).replace(tzinfo=None))
+            return [
+                ExpiringItem(
+                    "report",
+                    None,
+                    report.collection_name,
+                    report.owner,
+                    str(report.id),
+                    report.title,
+                    _aware_utc(report.created_at),
+                    _aware_utc(report.expires_at),
+                )
+                for report in query.all()
+            ]
+
+    def shift_report_expiries(self, sooner: timedelta, *, floor: datetime) -> int:
+        """Move every report's deadline ``sooner`` forward, never before ``floor`` and never later.
+
+        Args:
+            sooner (timedelta): How much shorter the period became.
+            floor (datetime): The end of the new notice period.
+
+        Returns:
+            int: Reports whose deadline moved.
+        """
+        moved = 0
+        with self._write_scope() as s:
+            for report in s.query(Report).filter(Report.expires_at.is_not(None)).all():
+                current = _aware_utc(report.expires_at)
+                if current is None:
+                    continue
+                lowered = min(current, max(current - sooner, floor))
+                if lowered != current:
+                    report.expires_at = lowered
+                    moved += 1
+            s.commit()
+        return moved
+
+    def clear_report_expiries(self) -> int:
+        """Forget every report's deadline, for the sweep to stamp again under a new period.
+
+        Returns:
+            int: Reports cleared.
+        """
+        with self._write_scope() as s:
+            cleared = (
+                s.query(Report)
+                .filter(Report.expires_at.is_not(None))
+                .update({Report.expires_at: None}, synchronize_session=False)
+            )
+            s.commit()
+        return int(cleared)
 
     def delete_report(self, report_id: int, owner: str | None, *, collection: str | None = None) -> bool:
         """Delete a report (and its items) the caller owns.
@@ -539,6 +669,7 @@ class ReportManager:
                 note=note,
                 position=position,
             )
+            self._lower_report_expiry(report, artifact_type, snapshot)
             report.updated_at = cast(Any, datetime.now(UTC))
             return self._commit_returning(s, item)
 
@@ -614,6 +745,7 @@ class ReportManager:
                     note=entry.get("note"),
                     position=position,
                 )
+                self._lower_report_expiry(report, str(entry["artifact_type"]), entry.get("snapshot") or {})
                 position += 1
                 added += 1
             updated = self._backfill_translations(s, report_id, backfill) if backfill else 0
@@ -663,6 +795,34 @@ class ReportManager:
                 item.snapshot = cast(Any, json.dumps(snapshot, ensure_ascii=False))
                 updated += 1
         return updated
+
+    def _lower_report_expiry(self, report: Report, artifact_type: str, snapshot: dict[str, Any]) -> None:
+        """Lower a report's deadline to the earliest of the documents an item draws on.
+
+        Best-effort: a failure leaves the deadline as it was and is logged.
+
+        Args:
+            report (Report): The report, inside the open transaction.
+            artifact_type (str): The item's kind (``collection_overview`` for
+                the overview snapshot, which is collection-wide).
+            snapshot (dict[str, Any]): The item's frozen content.
+        """
+        try:
+            logical = report.collection_name
+            if not logical:
+                return
+            physical = self.rag.ensure_collection_owner_manager().resolve(report.owner, logical) or logical
+            inherited = report_item_expiry(self.rag, str(physical), artifact_type, snapshot, now=datetime.now(UTC))
+            if not isinstance(inherited, datetime):
+                return
+            current = report.expires_at
+            if current is not None and current.tzinfo is None:
+                current = current.replace(tzinfo=UTC)
+            lowered = inherit(current, inherited)
+            if lowered != current:
+                report.expires_at = lowered
+        except Exception as exc:
+            logger.warning("Report deadline not updated: {}", exc)
 
     @staticmethod
     def _stage_item(

@@ -12,6 +12,7 @@ import operator
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import sys
 import threading
@@ -19,8 +20,8 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
+    load_document_retention_env,
     EmbeddingConfig,
     GraphRAGConfig,
     EmbedClientConfig,
@@ -186,6 +188,8 @@ from docint.core.ner import (
     search_entities,
 )
 from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.retention import RetentionPeriodState
+from docint.core.retention_sources import collection_expiry_iso
 from docint.core.retrieval.evidence import AgentSearchQuery, EveryChildQuery
 from docint.core.retrieval.visual import (
     BLOB_PAYLOAD_KEYS,
@@ -237,6 +241,8 @@ from docint.core.search.index import (
     write_search_text,
 )
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
+from docint.core.state.document_retention import DocumentRetention
+from docint.core.state.document_retention_manager import DocumentRetentionManager, PayloadDocument
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager, start_agent_turn
 from docint.core.storage.artifact_gc import (
@@ -308,6 +314,49 @@ SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 # single final synthesized payload.
 SUMMARY_MAP_CACHE_NAMESPACE = "docint_summary_map_cache_v1"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+#: The payload key every point carries its document's ingest time under
+#: (seconds since the epoch), so a restored collection keeps its deadlines
+#: (``docs/retention.md``). Hidden from the embedding and the prompt.
+RETENTION_STAMP_KEY = "docint_ingested_at"
+#: The occurrence fields an ``_images`` point's top-level identity is taken from.
+_IMAGE_IDENTITY_KEYS = (
+    "source_type",
+    "source_collection",
+    "source_doc_id",
+    "source_path",
+    "page_number",
+    "bbox",
+    "posting_uuid",
+    "posting_id",
+    "media_id",
+)
+
+
+@dataclass(frozen=True)
+class DocumentDeletion:
+    """What deleting documents removed.
+
+    Attributes:
+        points (int): Main-collection points.
+        image_points (int): ``_images`` points deleted.
+        image_occurrences (int): Occurrences dropped from images other documents keep.
+        nodes (int): Docstore nodes.
+        source_files (int): Source files.
+        artifacts (int): PDF artifact folders.
+        entities_dropped (bool): Whether the ``_entities`` companion was dropped for a rebuild.
+        collection_empty (bool): Whether the main collection holds no point any more.
+    """
+
+    points: int = 0
+    image_points: int = 0
+    image_occurrences: int = 0
+    nodes: int = 0
+    source_files: int = 0
+    artifacts: int = 0
+    entities_dropped: bool = False
+    collection_empty: bool = False
+
+
 #: Source keys that name the physical collection; the topic reads drop them.
 _PHYSICAL_SOURCE_KEYS: tuple[str, ...] = ("preview_url", "document_url", "image_collection")
 
@@ -3536,6 +3585,8 @@ class RAG:
     reports: ReportManager | None = field(default=None, init=False)
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
     _collection_backfill_done: bool = field(default=False, init=False, repr=False)
+    document_retention: DocumentRetentionManager | None = field(default=None, init=False)
+    _ingest_doc_meta: dict[str, tuple[str, set[str]]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
@@ -5640,6 +5691,7 @@ class RAG:
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
 
+        self._note_retention_metadata(nodes)
         batches = chunk_nodes(nodes, self.docstore_batch_size)
         for batch_no, batch in enumerate(batches, start=1):
             logger.debug(
@@ -6278,6 +6330,20 @@ class RAG:
                 embed_model=self.embed_model,
                 storage_context=storage_ctx,
             )
+
+        # Best-effort: keyword indexes on the hashes a per-document delete
+        # filters by, and a float index on the retention stamp.
+        for field_name, schema in (
+            ("file_hash", qdrant_models.PayloadSchemaType.KEYWORD),
+            ("media_file_hash", qdrant_models.PayloadSchemaType.KEYWORD),
+            (RETENTION_STAMP_KEY, qdrant_models.PayloadSchemaType.FLOAT),
+        ):
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=self.qdrant_collection, field_name=field_name, field_schema=schema
+                )
+            except Exception as idx_exc:
+                logger.debug("{} index on {} skipped: {}", field_name, self.qdrant_collection, idx_exc)
 
         # Best-effort: index posting_uuid on the main collection so that
         # _fetch_posting_entity_nodes scrolls use an index rather than a full scan.
@@ -7610,6 +7676,10 @@ class RAG:
         if artifacts is not None:
             self._remove_orphaned_artifacts(target, *artifacts)
 
+        try:
+            self.ensure_document_retention_manager().delete_collection(target)
+        except Exception as e:
+            logger.warning("Failed to drop the retention index of collection '{}': {}", target, e)
         if (self.qdrant_src_dir / target).exists():
             raise CollectionCleanupError(f"Source directory of collection '{target}' could not be removed.")
 
@@ -8017,6 +8087,7 @@ class RAG:
         Returns:
             IngestStats: What the run did.
         """
+        self._ingest_doc_meta.clear()
         # Make the target Qdrant collection visible to the user before any
         # batch work begins, so it remains selectable even if every embedding
         # batch later fails. A probe failure here surfaces the embedding
@@ -8135,6 +8206,7 @@ class RAG:
                     if file_hash:
                         manifest.mark_completed(self.qdrant_collection, file_hash)
                         manifest_in_flight.discard(file_hash)
+                        self._index_completed_document(file_hash)
 
             # PDFs are owned by the core pipeline reader and should not be
             # re-processed by the legacy ingestion path.
@@ -8173,6 +8245,7 @@ class RAG:
                         for fh in completed_hashes:
                             manifest.mark_completed(self.qdrant_collection, fh)
                             manifest_in_flight.discard(fh)
+                            self._index_completed_document(fh)
             else:
                 for docs, nodes in pipeline.build(processed_hashes):
                     if docs:
@@ -8596,6 +8669,519 @@ class RAG:
         if self.reports is None:
             self.reports = ReportManager(self)
         return self.reports
+
+    def delete_documents(self, physical: str, documents: Sequence[DocumentRetention]) -> DocumentDeletion:
+        """Delete documents with everything that is only theirs (``docs/retention.md``).
+
+        In order, each step a no-op on what is already gone: the main
+        collection's points (by ``file_hash``, ``media_file_hash`` or
+        ``source_doc_id``) and the ``_dockv`` companion's; ``_images`` points
+        (an image another document also contains loses this document's
+        occurrence instead); docstore nodes; the summary map cache entries
+        (then a summary revision bump); source files inside the collection's
+        source directory; manifest rows; PDF artifacts nothing else uses;
+        the ``_entities`` companion (canonical entities carry no per-document
+        provenance, so they are rebuilt); the caches; the index rows (kept when
+        the collection is left empty, for the collection cascade). The main
+        points go late, so a retry after a failed step still finds the files.
+        A hash another indexed document also carries never selects that
+        document's points.
+
+        Args:
+            physical (str): The Qdrant collection.
+            documents (Sequence[DocumentRetention]): The documents' index rows.
+
+        Returns:
+            DocumentDeletion: What was removed.
+        """
+        docs = list(documents)
+        client = self.qdrant_client
+        if not docs:
+            return DocumentDeletion(collection_empty=self._collection_is_empty(physical))
+        keys = {doc.file_hash for doc in docs}
+        hashes = set(keys).union(*(set(doc.point_hashes or []) for doc in docs))
+        names = {doc.filename for doc in docs if doc.filename}
+        manager = self.ensure_document_retention_manager()
+        # A hash another document also carries (a clip that is both a file of
+        # its own and a dossier's attachment) names that document too: only
+        # the hashes no surviving document lists select anything beyond this
+        # document's own points.
+        surviving: set[str] = set()
+        for row in manager.rows_for(physical):
+            if row.file_hash not in keys:
+                surviving.add(row.file_hash)
+                surviving.update(row.point_hashes or [])
+        exclusive = hashes - surviving
+        main_filter = qdrant_models.Filter(
+            should=[
+                qdrant_models.FieldCondition(key="file_hash", match=qdrant_models.MatchAny(any=sorted(keys))),
+                *(
+                    qdrant_models.FieldCondition(key=key, match=qdrant_models.MatchAny(any=sorted(exclusive)))
+                    for key in ("media_file_hash", "source_doc_id")
+                    if exclusive
+                ),
+            ]
+        )
+        paths: set[str] = set()
+        postings: set[str] = set()
+        points = 0
+        if client.collection_exists(physical):
+            offset: Any = None
+            while True:
+                found, offset = client.scroll(
+                    collection_name=physical,
+                    scroll_filter=main_filter,
+                    offset=offset,
+                    limit=256,
+                    with_vectors=False,
+                    with_payload=["file_path", "posting_uuid"],
+                )
+                for point in found:
+                    payload = point.payload or {}
+                    points += 1
+                    if isinstance(payload.get("file_path"), str):
+                        paths.add(str(payload["file_path"]))
+                    if payload.get("posting_uuid"):
+                        postings.add(str(payload["posting_uuid"]))
+                if offset is None:
+                    break
+        # The main points are what a retry finds the files and postings by,
+        # so they go last: a step that fails leaves them for the next sweep.
+        dockv = f"{physical}_dockv"
+        if client.collection_exists(dockv):
+            client.delete(collection_name=dockv, points_selector=qdrant_models.FilterSelector(filter=main_filter))
+        image_points, image_occurrences, image_paths = self._delete_document_images(physical, exclusive, postings)
+        nodes = self._delete_document_nodes(physical, keys, exclusive)
+        self._forget_document_summaries(physical, keys, names, social=bool(postings))
+        source_files = self._delete_document_sources(physical, paths | image_paths)
+        manifest_path = self._ingest_manifest_path(physical)
+        if manifest_path.is_file():
+            # Cached transcripts are keyed by the media hash, not the document's.
+            self._build_ingest_manifest(physical).forget(physical, keys | exclusive)
+        artifacts = self._delete_document_artifacts(physical, keys)
+        if points:
+            client.delete(collection_name=physical, points_selector=qdrant_models.FilterSelector(filter=main_filter))
+        entities = f"{physical}_entities"
+        entities_dropped = False
+        if client.collection_exists(entities):
+            client.delete_collection(entities)
+            entities_dropped = True
+        with self._retrieval_cache_lock:
+            self._index_cache.pop(physical, None)
+            self._query_engine_cache.pop(physical, None)
+        self.forget_keyword_readiness(physical)
+        self._invalidate_ner_cache(physical)
+        collection_empty = self._collection_is_empty(physical)
+        if not collection_empty:
+            # When the collection is left empty its rows stay until the
+            # collection cascade drops them, so a failed cascade is retried.
+            for key in keys:
+                manager.delete(physical, key)
+        return DocumentDeletion(
+            points=points,
+            image_points=image_points,
+            image_occurrences=image_occurrences,
+            nodes=nodes,
+            source_files=source_files,
+            artifacts=artifacts,
+            entities_dropped=entities_dropped,
+            collection_empty=collection_empty,
+        )
+
+    def _collection_is_empty(self, physical: str) -> bool:
+        """Whether a collection holds no point (or no longer exists).
+
+        Args:
+            physical (str): The Qdrant collection.
+
+        Returns:
+            bool: ``True`` when nothing is left.
+        """
+        if not self.qdrant_client.collection_exists(physical):
+            return True
+        return int(self.qdrant_client.count(collection_name=physical, exact=True).count) == 0
+
+    def _delete_document_images(self, physical: str, hashes: set[str], postings: set[str]) -> tuple[int, int, set[str]]:
+        """Delete the ``_images`` points of documents, or their occurrences on shared images.
+
+        Args:
+            physical (str): The Qdrant collection.
+            hashes (set[str]): The hashes that name only these documents.
+            postings (set[str]): The posting uuids the documents' points carry.
+
+        Returns:
+            tuple[int, int, set[str]]: Points deleted, occurrences dropped from
+                kept points, and the file paths the deleted points and dropped
+                occurrences name (a posting image lives only here).
+        """
+        images = f"{physical}_images"
+        client = self.qdrant_client
+        # An empty ``should`` would match every image: nothing to name, nothing to touch.
+        if not (hashes or postings) or not client.collection_exists(images):
+            return 0, 0, set()
+        any_hash = sorted(hashes)
+        conditions = [
+            qdrant_models.FieldCondition(key=key, match=qdrant_models.MatchAny(any=any_hash))
+            for key in ("source_doc_id", "media_file_hash", "image_id")
+            if any_hash
+        ]
+        if postings:
+            conditions.append(
+                qdrant_models.FieldCondition(key="posting_uuid", match=qdrant_models.MatchAny(any=sorted(postings)))
+            )
+        image_filter = qdrant_models.Filter(should=conditions)
+
+        def names_document(entry: Mapping[str, Any]) -> bool:
+            return (
+                str(entry.get("source_doc_id") or "") in hashes
+                or str(entry.get("media_file_hash") or "") in hashes
+                or str(entry.get("posting_uuid") or "") in postings
+            )
+
+        def paths_of(entry: Mapping[str, Any]) -> set[str]:
+            return {str(entry[key]) for key in ("file_path", "source_path") if isinstance(entry.get(key), str)}
+
+        deleted: list[Any] = []
+        dropped = 0
+        paths: set[str] = set()
+        offset: Any = None
+        while True:
+            found, offset = client.scroll(
+                collection_name=images,
+                scroll_filter=image_filter,
+                offset=offset,
+                limit=256,
+                with_vectors=False,
+                with_payload=True,
+            )
+            for point in found:
+                payload = dict(point.payload or {})
+                occurrences = payload.get("occurrences")
+                listed: list[Any] = occurrences if isinstance(occurrences, list) else []
+                remaining = [entry for entry in listed if isinstance(entry, dict) and not names_document(entry)]
+                if not remaining:
+                    deleted.append(point.id)
+                    paths |= paths_of(payload)
+                    for entry in listed:
+                        if isinstance(entry, dict):
+                            paths |= paths_of(entry)
+                    continue
+                dropped += len(listed) - len(remaining)
+                kept = set().union(*(paths_of(entry) for entry in remaining))
+                for entry in listed:
+                    if isinstance(entry, dict) and names_document(entry):
+                        paths |= paths_of(entry) - kept
+                payload["occurrences"] = remaining
+                if names_document(payload) or str(payload.get("image_id") or "") in hashes:
+                    for key in _IMAGE_IDENTITY_KEYS:
+                        payload.pop(key, None)
+                    payload.update({key: remaining[0][key] for key in _IMAGE_IDENTITY_KEYS if key in remaining[0]})
+                client.overwrite_payload(collection_name=images, payload=payload, points=[point.id])
+            if offset is None:
+                break
+        if deleted:
+            client.delete(collection_name=images, points_selector=qdrant_models.PointIdsList(points=deleted))
+        return len(deleted), dropped, paths
+
+    def _delete_document_nodes(self, physical: str, keys: set[str], hashes: set[str]) -> int:
+        """Delete the documents' docstore nodes, coarse parents included.
+
+        Args:
+            physical (str): The Qdrant collection.
+            keys (set[str]): The documents' file hashes; a node with a file hash goes by it.
+            hashes (set[str]): The hashes that name only these documents, for a node without one.
+
+        Returns:
+            int: Nodes deleted.
+        """
+        if not (self.qdrant_src_dir / physical / f"{physical}_kv.db").is_file():
+            return 0
+        store = KVDocumentStore(kvstore=self._build_kv_store(physical), batch_size=self.docstore_batch_size)
+        doomed = [
+            node_id
+            for node_id, node in store.docs.items()
+            if (
+                str((node.metadata or {}).get("file_hash") or "") in keys
+                if (node.metadata or {}).get("file_hash")
+                else source_file_hash(dict(node.metadata or {})) in hashes
+            )
+        ]
+        for node_id in doomed:
+            store.delete_document(node_id, raise_error=False)
+        return len(doomed)
+
+    def _forget_document_summaries(self, physical: str, keys: set[str], names: set[str], *, social: bool) -> None:
+        """Delete what the summary caches hold of the documents, and invalidate the collection summary.
+
+        The cached collection summary is deleted, not just outdated: it quotes
+        the documents. Social map units are keyed by bucket, not by document,
+        so a document with postings takes every one of them (they are rebuilt).
+
+        Args:
+            physical (str): The Qdrant collection.
+            keys (set[str]): The documents' file hashes.
+            names (set[str]): Their file names.
+            social (bool): Whether the documents carry postings.
+        """
+        if (self.qdrant_src_dir / physical / f"{physical}_kv.db").is_file():
+            kv = self._build_kv_store(physical)
+            doomed = [*(f"doc:{key}" for key in keys), *(f"doc:name:{name}" for name in names)]
+            if social:
+                doomed += [
+                    key for key in kv.get_all(collection=SUMMARY_MAP_CACHE_NAMESPACE) if key.startswith("social:")
+                ]
+            for unit_key in doomed:
+                kv.delete(unit_key, collection=SUMMARY_MAP_CACHE_NAMESPACE)
+            kv.delete(SUMMARY_CACHE_PAYLOAD_KEY, collection=SUMMARY_CACHE_NAMESPACE)
+        self._bump_summary_revision(physical, allow_create=False)
+
+    def _delete_document_sources(self, physical: str, paths: set[str]) -> int:
+        """Remove the documents' source files that lie inside the collection's source directory.
+
+        Args:
+            physical (str): The Qdrant collection.
+            paths (set[str]): The ``file_path`` values their points carry.
+
+        Returns:
+            int: Files removed.
+        """
+        root = Path(os.path.realpath(self.qdrant_src_dir / physical))
+        removed = 0
+        for value in sorted(paths):
+            path = Path(value)
+            if not path.is_absolute() or not Path(os.path.realpath(path.parent)).is_relative_to(root):
+                logger.warning("Retention kept a source outside its collection's directory.")
+                continue
+            try:
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                    removed += 1
+            except OSError as exc:
+                logger.warning("Could not delete a source file ({}).", type(exc).__name__)
+        return removed
+
+    def _delete_document_artifacts(self, physical: str, keys: set[str]) -> int:
+        """Remove the documents' PDF artifacts that no other collection or file still uses.
+
+        Args:
+            physical (str): The Qdrant collection.
+            keys (set[str]): The documents' file hashes (a PDF's artifacts are named by it).
+
+        Returns:
+            int: Artifact folders removed.
+        """
+        if not self.ingest_manifest_enabled:
+            return 0
+        try:
+            root = self.path_config.artifacts
+            candidates = {key for key in keys if (root / key).is_dir()}
+            if not candidates:
+                return 0
+            recorded = recorded_sources(root)
+            src_root = self.qdrant_src_dir
+            own = src_root / physical
+            others = [d for d in src_root.iterdir() if d.is_dir() and d.name != physical] if src_root.is_dir() else []
+            manifest_hashes = read_manifest_hashes(self._ingest_manifest_path(physical))
+            for directory in others:
+                manifest_hashes |= read_manifest_hashes(self._ingest_manifest_path(directory.name))
+            keep = still_referenced(
+                recorded=recorded,
+                other_source_dirs=others,
+                other_manifest_hashes=manifest_hashes,
+                inflight=inflight_pdf_hashes(),
+            )
+            keep |= {
+                name for name, source in recorded.items() if Path(source).is_relative_to(own) and Path(source).exists()
+            }
+            return remove_artifacts(root, candidates - keep)
+        except Exception as exc:
+            logger.warning("Could not remove a document's PDF artifacts: {}", exc)
+            return 0
+
+    def ensure_document_retention_manager(self) -> DocumentRetentionManager:
+        """Ensure the DocumentRetentionManager is initialized and return it.
+
+        Returns:
+            DocumentRetentionManager: The manager of the document retention index.
+        """
+        if self.document_retention is None:
+            self.document_retention = DocumentRetentionManager(self)
+        return self.document_retention
+
+    def _note_retention_metadata(self, nodes: Sequence[BaseNode], *, now: datetime | None = None) -> None:
+        """Stamp each node with its ingest time and gather each document's name and hashes.
+
+        The stamp is hidden from the embedding and the prompt, and an earlier
+        stamp is kept, so a re-persisted node keeps its document's clock.
+
+        Args:
+            nodes (Sequence[BaseNode]): Nodes about to be persisted.
+            now (datetime | None): The ingest time; the current time by default.
+        """
+        stamp = (now or datetime.now(UTC)).timestamp()
+        for node in nodes:
+            metadata = getattr(node, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            metadata.setdefault(RETENTION_STAMP_KEY, stamp)
+            for attribute in ("excluded_embed_metadata_keys", "excluded_llm_metadata_keys"):
+                keys = getattr(node, attribute, None)
+                if isinstance(keys, list) and RETENTION_STAMP_KEY not in keys:
+                    keys.append(RETENTION_STAMP_KEY)
+            file_hash = str(metadata.get("file_hash") or "").strip()
+            if not file_hash:
+                continue
+            name, hashes = self._ingest_doc_meta.get(file_hash, ("", {file_hash}))
+            name = name or str(metadata.get("file_name") or metadata.get("filename") or "")
+            for key in ("media_file_hash", "source_doc_id"):
+                value = str(metadata.get(key) or "").strip()
+                if not value or (key == "source_doc_id" and value == str(metadata.get("posting_uuid") or "").strip()):
+                    continue
+                hashes.add(value)
+            self._ingest_doc_meta[file_hash] = (name, hashes)
+
+    def _index_completed_document(self, file_hash: str, *, now: datetime | None = None) -> None:
+        """Index a document whose ingest into the active collection completed.
+
+        Best-effort: the points already carry the clock, and the next startup
+        repairs a row that could not be written (:meth:`repair_retention_index`).
+
+        Args:
+            file_hash (str): The document's key.
+            now (datetime | None): The completion time; the current time by default.
+        """
+        moment = now or datetime.now(UTC)
+        physical = self.qdrant_collection
+        name, hashes = self._ingest_doc_meta.pop(file_hash, ("", {file_hash}))
+        try:
+            owners = self.ensure_collection_owner_manager()
+            activity = owners.get_activity(physical)
+            owner, logical = (activity.owner, activity.logical) if activity is not None else (None, physical)
+            cfg = load_document_retention_env()
+            period = owners.retention_period() or RetentionPeriodState(days=cfg.days, set_at=moment)
+            self.ensure_document_retention_manager().record_ingest(
+                physical,
+                logical,
+                owner,
+                file_hash,
+                name,
+                sorted(hashes),
+                now=moment,
+                period=period,
+                notice_days=cfg.notice_days,
+            )
+        except Exception as exc:
+            logger.warning("Retention index not written for a document ({}); repaired at the next startup.", exc)
+
+    def payload_documents(self, physical: str) -> list[PayloadDocument]:
+        """Describe each document of a collection from its points' payloads.
+
+        Args:
+            physical (str): The Qdrant collection.
+
+        Returns:
+            list[PayloadDocument]: One per ``file_hash``, with the other hashes
+                its points carry, its name and its stamped ingest time.
+        """
+        found: dict[str, tuple[str, set[str], float | None]] = {}
+        offset: Any = None
+        keys = [
+            "file_hash",
+            "media_file_hash",
+            "source_doc_id",
+            "posting_uuid",
+            "file_name",
+            "filename",
+            RETENTION_STAMP_KEY,
+        ]
+        while True:
+            points, offset = self.qdrant_client.scroll(
+                collection_name=physical, offset=offset, limit=256, with_vectors=False, with_payload=keys
+            )
+            for point in points:
+                payload = point.payload or {}
+                file_hash = str(payload.get("file_hash") or "").strip()
+                if not file_hash:
+                    continue
+                name, hashes, stamp = found.get(file_hash, ("", {file_hash}, None))
+                name = name or str(payload.get("file_name") or payload.get("filename") or "")
+                media = str(payload.get("media_file_hash") or "").strip()
+                if media:
+                    hashes.add(media)
+                source = str(payload.get("source_doc_id") or "").strip()
+                if source and source != str(payload.get("posting_uuid") or "").strip():
+                    hashes.add(source)
+                value = payload.get(RETENTION_STAMP_KEY)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    stamp = float(value) if stamp is None else min(stamp, float(value))
+                found[file_hash] = (name, hashes, stamp)
+            if offset is None:
+                break
+        return [
+            PayloadDocument(
+                file_hash,
+                frozenset(hashes),
+                name,
+                None if stamp is None else datetime.fromtimestamp(stamp, tz=UTC),
+            )
+            for file_hash, (name, hashes, stamp) in sorted(found.items())
+        ]
+
+    def _manifest_completion_times(self, physical: str) -> dict[str, datetime]:
+        """Read when the ingest manifest last saw each completed document.
+
+        The manifest's ``updated_at`` is never earlier than the real
+        completion, so a clock taken from it never deletes too early.
+
+        Args:
+            physical (str): The Qdrant collection.
+
+        Returns:
+            dict[str, datetime]: Completion time per file hash; empty without a manifest.
+        """
+        path = self._ingest_manifest_path(physical)
+        if not path.is_file():
+            return {}
+        try:
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
+                rows = conn.execute(
+                    "SELECT file_hash, updated_at FROM ingest_manifest WHERE collection = ? AND status = 'completed'",
+                    (physical,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("Ingest manifest of {} unreadable for retention: {}", physical, exc)
+            return {}
+        return {str(fh): datetime.fromtimestamp(float(ts), tz=UTC) for fh, ts in rows}
+
+    def repair_retention_index(self, period: RetentionPeriodState, *, notice_days: int) -> int:
+        """Index every document Qdrant holds that the retention index lacks (at startup).
+
+        Args:
+            period (RetentionPeriodState): The period in force.
+            notice_days (int): The grace after it took effect.
+
+        Returns:
+            int: Rows added across all collections.
+        """
+        owners = self.ensure_collection_owner_manager()
+        manager = self.ensure_document_retention_manager()
+        added = 0
+        for physical in self.list_collections():
+            try:
+                activity = owners.get_activity(physical)
+                owner, logical = (activity.owner, activity.logical) if activity is not None else (None, physical)
+                added += manager.repair_from_payload(
+                    physical,
+                    logical,
+                    owner,
+                    self.payload_documents(physical),
+                    manifest_times=self._manifest_completion_times(physical),
+                    period=period,
+                    notice_days=notice_days,
+                )
+            except Exception as exc:
+                logger.warning("Retention index of {} not repaired ({}); retried at the next startup.", physical, exc)
+        return added
 
     def ensure_collection_owner_manager(self) -> CollectionOwnerManager:
         """Ensure the CollectionOwnerManager is initialized and return it.
@@ -11283,6 +11869,7 @@ class RAG:
                 stop_words=stop_words,
                 stop_words_sha256=stop_words_digest(stop_words),
                 on_written=self.forget_documents,
+                expiry=lambda physical: collection_expiry_iso(self, physical, now=datetime.now(UTC)),
             )
         )
 

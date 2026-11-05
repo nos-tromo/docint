@@ -156,18 +156,21 @@ def _hermetic_hybrid_env() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _hermetic_retention_env() -> Iterator[None]:
-    """Keep a developer ``.env`` from switching collection retention on.
+    """Keep a developer ``.env`` from changing the document retention period.
 
-    The app's startup reads ``COLLECTION_RETENTION`` on every ``TestClient``,
-    so a value leaked from ``.env`` would change what every lifespan does.
-    Tests that exercise retention set it explicitly. A private
-    ``MonkeyPatch`` for the reason :func:`_hermetic_hybrid_env` gives.
+    The app's startup reads ``DOCUMENT_RETENTION_DAYS`` and
+    ``RETENTION_NOTICE_DAYS`` on every ``TestClient`` (an invalid value stops
+    it), so a value leaked from ``.env`` would change what every lifespan
+    does; every test starts from the defaults. Tests that exercise retention
+    set them explicitly. A private ``MonkeyPatch`` for the reason
+    :func:`_hermetic_hybrid_env` gives.
 
     Yields:
         None.
     """
     mp = pytest.MonkeyPatch()
-    mp.delenv("COLLECTION_RETENTION", raising=False)
+    for name in ("COLLECTION_RETENTION", "DOCUMENT_RETENTION_DAYS", "RETENTION_NOTICE_DAYS"):
+        mp.delenv(name, raising=False)
     yield
     mp.undo()
 

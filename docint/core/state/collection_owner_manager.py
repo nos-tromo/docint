@@ -10,16 +10,16 @@ isolates each user's Qdrant collections. Cross-owner access is "not found"
 from __future__ import annotations
 
 import hashlib
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from docint.core.retention import RetentionPeriodState
 from docint.core.state.base import _make_session_maker
 from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.retention_state import RetentionState
@@ -28,24 +28,16 @@ if TYPE_CHECKING:
     from docint.core.rag import RAG
 
 
-#: Least time between two activity writes for one collection. Retention counts
-#: in months, so an hour of slack costs nothing and spares the sessions DB a
-#: write on every request.
-_TOUCH_INTERVAL = timedelta(hours=1)
-#: Wait after a failed activity write before trying again — never the full
-#: interval, or one lost write near the end of a window costs the collection.
-_TOUCH_RETRY = timedelta(seconds=60)
-
-
 @dataclass(frozen=True, slots=True)
 class CollectionActivity:
-    """One collection's retention clock.
+    """One collection's ownership row.
 
     Attributes:
         owner (str | None): The owning principal.
         logical (str): The user-visible collection name.
         physical (str): The Qdrant collection name.
-        last_activity_at (datetime | None): Aware UTC; ``None`` never expires.
+        last_activity_at (datetime | None): Aware UTC; kept from the retired
+            idle-window retention, read for no deadline.
     """
 
     owner: str | None
@@ -54,17 +46,21 @@ class CollectionActivity:
     last_activity_at: datetime | None
 
 
-@dataclass(frozen=True, slots=True)
-class RetentionWindowState:
-    """The retention window in force and when it was set.
+def _period_days(token: str) -> int | None | bool:
+    """Read a recorded period token.
 
-    Attributes:
-        window (str): ``off`` or one of the ``COLLECTION_RETENTION`` windows.
-        set_at (datetime): Aware UTC; anchors the grace period.
+    Args:
+        token (str): ``<days>d`` or ``off``.
+
+    Returns:
+        int | None | bool: The days, ``None`` for off, ``False`` when the
+            token is no period (an idle-window row).
     """
-
-    window: str
-    set_at: datetime
+    if token == "off":
+        return None
+    if token.endswith("d") and token[:-1].isdigit():
+        return int(token[:-1])
+    return False
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -158,8 +154,6 @@ class CollectionOwnerManager:
     rag: RAG
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_store: str = field(default="", init=False)
-    _touch_due: dict[tuple[str | None, str], datetime] = field(default_factory=dict, init=False, repr=False)
-    _touch_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Adopt the RAG's configured session-store URL (shared with conversations/reports)."""
@@ -305,54 +299,10 @@ class CollectionOwnerManager:
             physical = cast(str, row.physical_name)
             s.delete(row)
             s.commit()
-        with self._touch_lock:
-            self._touch_due.pop((owner, logical), None)
         return physical
 
-    def touch(self, owner: str | None, logical: str, *, now: datetime | None = None) -> bool:
-        """Record activity on ``owner``'s ``logical`` collection — the retention clock.
-
-        At most one write per collection per ``_TOUCH_INTERVAL``. The decision
-        is made in memory and marked before writing, so the burst of parallel
-        requests one page load fires costs a single write. A failed write is
-        never remembered as done: it is retried after ``_TOUCH_RETRY``.
-
-        Args:
-            owner (str | None): The owning principal.
-            logical (str): The user-visible collection name.
-            now (datetime | None): The activity time; defaults to now (UTC).
-
-        Returns:
-            bool: Whether a collection was stamped; ``False`` when throttled or
-                when ``owner`` owns no such collection.
-
-        Raises:
-            Exception: Whatever the store raised. Callers must not let it fail
-                the request that caused the activity.
-        """
-        moment = now or datetime.now(UTC)
-        key = (owner, logical)
-        with self._touch_lock:
-            due = self._touch_due.get(key)
-            if due is not None and moment < due:
-                return False
-            self._touch_due[key] = moment + _TOUCH_INTERVAL
-        try:
-            with self._session_scope() as s:
-                updated = (
-                    s.query(CollectionOwnership)
-                    .filter(CollectionOwnership.owner == owner, CollectionOwnership.logical_name == logical)
-                    .update({CollectionOwnership.last_activity_at: moment}, synchronize_session=False)
-                )
-                s.commit()
-        except Exception:
-            with self._touch_lock:
-                self._touch_due[key] = moment + _TOUCH_RETRY
-            raise
-        return updated > 0
-
     def list_activity(self, owner: str | None) -> list[CollectionActivity]:
-        """Return the retention clock of every collection ``owner`` owns.
+        """Return the ownership row of every collection ``owner`` owns.
 
         Reading the clock never moves it: this is what the expiry listing and
         the operator report use, so looking at a collection cannot keep it alive.
@@ -373,7 +323,7 @@ class CollectionOwnerManager:
             return [self._activity(row) for row in rows]
 
     def get_activity(self, physical: str) -> CollectionActivity | None:
-        """Return one collection's retention clock by its physical name.
+        """Return one collection's ownership row by its physical name.
 
         The retention sweep's recheck: it re-reads the clock right before it
         deletes, so activity after the scan spares the collection.
@@ -405,7 +355,7 @@ class CollectionOwnerManager:
             return _as_utc(cast(datetime, row.created_at)) if row is not None else None
 
     def list_all_activity(self) -> list[CollectionActivity]:
-        """Return every collection's retention clock, sorted by owner then name.
+        """Return every collection's ownership row, sorted by owner then name.
 
         Admin and operator surface only: callers gate on the requesting
         principal before exposing it.
@@ -417,46 +367,50 @@ class CollectionOwnerManager:
             rows = s.query(CollectionOwnership).order_by(CollectionOwnership.owner, CollectionOwnership.logical_name)
             return [self._activity(row) for row in rows.all()]
 
-    def retention_window(self) -> RetentionWindowState | None:
-        """Return the retention window recorded at the last startup, if any.
+    def retention_period(self) -> RetentionPeriodState | None:
+        """Return the document retention period recorded at the last startup, if any.
+
+        The ``retention_state`` row keeps it as ``<days>d`` or ``off``; a row
+        the idle-window rule left (``6m`` …) holds no period.
 
         Returns:
-            RetentionWindowState | None: ``None`` before the first startup.
+            RetentionPeriodState | None: ``None`` before the first startup with a period.
         """
         with self._session_scope() as s:
             row = s.get(RetentionState, 1)
             if row is None:
                 return None
-            return RetentionWindowState(window=str(row.window), set_at=_as_utc(cast(datetime, row.window_set_at)))
+            days = _period_days(str(row.window))
+            if days is False:
+                return None
+            return RetentionPeriodState(days=days, set_at=_as_utc(cast(datetime, row.window_set_at)))
 
-    def record_retention_window(self, window: str, *, now: datetime) -> RetentionWindowState:
-        """Record the window in force at startup; any change restarts the grace period.
-
-        Switching retention on, off, or to another window all count as a change;
-        restarting with the same window does not.
+    def record_retention_period(self, days: int | None, *, now: datetime) -> RetentionPeriodState:
+        """Record the period in force at startup; a new or changed one takes effect now.
 
         Args:
-            window (str): The window resolved from ``COLLECTION_RETENTION``.
+            days (int | None): The period; ``None`` is off.
             now (datetime): The startup time, timezone-aware.
 
         Returns:
-            RetentionWindowState: The window and when it was set.
+            RetentionPeriodState: The period and when it took effect.
         """
+        token = "off" if days is None else f"{days}d"
         with self._session_scope() as s:
             row = s.get(RetentionState, 1)
-            if row is not None and row.window == window:
-                return RetentionWindowState(window=window, set_at=_as_utc(cast(datetime, row.window_set_at)))
+            if row is not None and row.window == token:
+                return RetentionPeriodState(days=days, set_at=_as_utc(cast(datetime, row.window_set_at)))
             if row is None:
                 row = RetentionState(id=1)
                 s.add(row)
-            row.window = cast(Any, window)
+            row.window = cast(Any, token)
             row.window_set_at = cast(Any, now)
             s.commit()
-        return RetentionWindowState(window=window, set_at=_as_utc(now))
+        return RetentionPeriodState(days=days, set_at=_as_utc(now))
 
     @staticmethod
     def _activity(row: CollectionOwnership) -> CollectionActivity:
-        """Shape an ownership row as a retention clock reading."""
+        """Shape an ownership row as a :class:`CollectionActivity`."""
         stamp = cast(datetime | None, row.last_activity_at)
         return CollectionActivity(
             owner=cast(str | None, row.owner),

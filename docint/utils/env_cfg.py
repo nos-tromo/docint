@@ -3151,46 +3151,74 @@ def load_topics_client_env() -> TopicsClientConfig:
     return TopicsClientConfig(api_base=raw_base.rstrip("/"), api_key=raw_key or None, timeout=timeout)
 
 
-#: The idle windows ``COLLECTION_RETENTION`` accepts, in calendar months.
-RETENTION_WINDOWS: dict[str, int] = {"off": 0, "6m": 6, "12m": 12, "18m": 18, "24m": 24}
-
-RetentionWindow = Literal["off", "6m", "12m", "18m", "24m"]
+DEFAULT_DOCUMENT_RETENTION_DAYS = 365
+MAX_DOCUMENT_RETENTION_DAYS = 3650
+DEFAULT_RETENTION_NOTICE_DAYS = 30
+MAX_RETENTION_NOTICE_DAYS = 365
 
 
 @dataclass(frozen=True)
-class RetentionConfig:
-    """Collection retention: how long a collection may sit idle before deletion.
+class DocumentRetentionConfig:
+    """Document retention: how long a document stays after its ingest.
 
     Attributes:
-        window (RetentionWindow): ``"off"`` or one of the idle windows.
-        months (int): The window in calendar months; ``0`` when off.
+        days (int | None): Days from ingest to deletion; ``None`` is off
+            (development only).
+        notice_days (int): How long a new or changed period deletes nothing
+            after it took effect; also the notice lead time.
     """
 
-    window: RetentionWindow
-    months: int
+    days: int | None
+    notice_days: int
 
     @property
     def enabled(self) -> bool:
-        """Whether idle collections are deleted at all."""
-        return self.months > 0
+        """Whether documents are deleted at all."""
+        return self.days is not None
 
 
-def load_retention_env() -> RetentionConfig:
-    """Load the collection retention window from ``COLLECTION_RETENTION``.
+def _retention_days(name: str, default: int, maximum: int, *, allow_off: bool) -> int | None:
+    """Read a period in whole days, fail-closed.
 
-    An unknown value resolves to ``off`` with a warning, never to a default
-    period: a typo must not delete data on a schedule nobody chose.
+    Args:
+        name (str): The environment variable.
+        default (int): The value when unset or blank.
+        maximum (int): The longest period accepted.
+        allow_off (bool): Whether ``off`` is accepted.
 
     Returns:
-        RetentionConfig: The window in force; ``off`` unless configured.
+        int | None: The days, or ``None`` for ``off``.
+
+    Raises:
+        ValueError: If the value is neither whole days from 1 to ``maximum``
+            nor an allowed ``off``: a typo must never pick a period nobody chose.
     """
-    raw = os.getenv("COLLECTION_RETENTION", "")
-    window = raw.strip().lower() or "off"
-    if window not in RETENTION_WINDOWS:
-        logger.warning(
-            "Unknown COLLECTION_RETENTION '{}'; retention stays off. Use one of: {}.",
-            raw,
-            ", ".join(RETENTION_WINDOWS),
-        )
-        window = "off"
-    return RetentionConfig(window=cast(RetentionWindow, window), months=RETENTION_WINDOWS[window])
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw == "off" and allow_off:
+        return None
+    if raw.isascii() and raw.isdigit() and 1 <= int(raw) <= maximum:
+        return int(raw)
+    off = " or off" if allow_off else ""
+    raise ValueError(f"{name} must be whole days from 1 to {maximum}{off}, not {raw!r}")
+
+
+def load_document_retention_env() -> DocumentRetentionConfig:
+    """Load ``DOCUMENT_RETENTION_DAYS`` and ``RETENTION_NOTICE_DAYS``.
+
+    Returns:
+        DocumentRetentionConfig: 365 and 30 days unless configured.
+
+    Raises:
+        ValueError: If either is not a valid period.
+    """
+    days = _retention_days(
+        "DOCUMENT_RETENTION_DAYS", DEFAULT_DOCUMENT_RETENTION_DAYS, MAX_DOCUMENT_RETENTION_DAYS, allow_off=True
+    )
+    notice = _retention_days(
+        "RETENTION_NOTICE_DAYS", DEFAULT_RETENTION_NOTICE_DAYS, MAX_RETENTION_NOTICE_DAYS, allow_off=False
+    )
+    if days is None:
+        logger.warning("DOCUMENT_RETENTION_DAYS=off: no document is ever deleted (development only).")
+    return DocumentRetentionConfig(days=days, notice_days=DEFAULT_RETENTION_NOTICE_DAYS if notice is None else notice)

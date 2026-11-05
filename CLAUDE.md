@@ -82,11 +82,12 @@ make extract COLLECTION=mydocs CASE_REF=case-0001  # non-interactive
 make search-index                    # prompts for the collection name
 make search-index COLLECTION=mydocs  # non-interactive
 make search-index-all                # every collection (one-time backport)
-# Read-only: every collection's last activity and when COLLECTION_RETENTION
-# deletes it (docs/retention.md). Moves no clock, records no window. Not
-# audited, so it keeps a one-off container and needs no running backend.
-make retention-report             # the configured window
-make retention-report WINDOW=6m   # as if 6m were switched on now
+# Read-only: every document, chat and report with the date document
+# retention deletes it (docs/retention.md), by reference only. Records no
+# period. Not audited, so it keeps a one-off container and needs no running
+# backend.
+make retention-report             # the configured DOCUMENT_RETENTION_DAYS
+make retention-report DAYS=180    # as if 180 days were switched on now
 ```
 
 ## Architecture
