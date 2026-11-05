@@ -376,3 +376,18 @@ def test_collection_wide_items_follow_a_shortened_period(fake: _SweepRAG, tmp_pa
     report = _sweep()
     assert report.documents == 1
     assert report.extracts == 1
+
+
+def test_items_with_nothing_to_inherit_from_get_their_own_period(fake: _SweepRAG) -> None:
+    """A chat or report tied to no collection, or to one without documents, still goes a period after stamping."""
+    with fake.sessions._session_scope() as s:
+        s.add(Conversation(id="loose", owner="alice", collection_name=None))
+        s.add(Conversation(id="emptycoll", owner="alice", collection_name="nodocs"))
+        s.commit()
+    rid = int(fake.reports.create_report(title="r", owner="alice", collection_name=None)["id"])
+    _sweep()
+    for session_id in ("loose", "emptycoll"):
+        stamped = _session_expiry(fake, session_id)
+        assert stamped is not None and abs(stamped - (NOW + 365 * DAY)) < timedelta(minutes=5)
+    stamped = _report_expiry(fake, rid)
+    assert stamped is not None and abs(stamped - (NOW + 365 * DAY)) < timedelta(minutes=5)

@@ -413,7 +413,7 @@ async def _retention_sweep(
         )
     except Exception as exc:
         logger.warning("Retention index repair failed ({}); the next sweep retries.", exc)
-    await to_thread.run_sync(partial(_stamp_derived_deadlines, now))
+    await to_thread.run_sync(partial(_stamp_derived_deadlines, now, retention.days))
     # Collection-wide items follow the collection's earliest document, read
     # before any document goes: one stamped under a longer period still goes
     # with it.
@@ -467,27 +467,35 @@ async def _retention_sweep(
     return report
 
 
-def _stamp_derived_deadlines(now: datetime) -> None:
+def _stamp_derived_deadlines(now: datetime, period_days: int | None) -> None:
     """Stamp deadlines on sessions and reports that predate retention (best-effort).
+
+    Each inherits from its sources; one with nothing to inherit from — tied to
+    no collection, or to one without indexed documents — goes a period after
+    it is stamped, never "never".
 
     Args:
         now (datetime): The sweep time.
+        period_days (int | None): The period in force.
     """
+    own = None if period_days is None else now + timedelta(days=period_days)
     try:
         sessions = rag.ensure_session_manager()
         for session_id, physical, cited, wide in sessions.sessions_without_deadline():
-            if not physical:
-                continue
-            deadline = source_expiry(rag, physical, set() if wide else cited, now=now)
+            deadline = (
+                source_expiry(rag, physical, set() if wide else cited, now=now, period_days=period_days)
+                if physical
+                else own
+            )
             if deadline is not None:
                 sessions.set_session_expiry(session_id, deadline)
         reports = rag.ensure_report_manager()
         owners = rag.ensure_collection_owner_manager()
         for report_id, owner, logical in reports.reports_without_deadline():
-            if not logical:
-                continue
-            physical = owners.resolve(owner, logical) or logical
-            deadline = source_expiry(rag, str(physical), [], now=now)
+            deadline = own
+            if logical:
+                physical = owners.resolve(owner, logical) or logical
+                deadline = source_expiry(rag, str(physical), [], now=now, period_days=period_days)
             if deadline is not None:
                 reports.set_report_expiry(report_id, deadline)
     except Exception as exc:
