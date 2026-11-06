@@ -9054,7 +9054,8 @@ class RAG:
         Args:
             physical (str): The Qdrant collection the run ingested into.
         """
-        leftover = [key for key in self._ingest_doc_meta if key[0] == physical]
+        # A snapshot, since another ingest may add entries meanwhile.
+        leftover = [key for key in self._ingest_doc_meta.copy() if key[0] == physical]
         for key in leftover:
             self._ingest_doc_meta.pop(key, None)
         if leftover:
@@ -9214,13 +9215,15 @@ class RAG:
         """
         owners = self.ensure_collection_owner_manager()
         manager = self.ensure_document_retention_manager()
+        # Listed first: a failure leaves the marks and the full scan due.
+        collections = self.list_collections()
         with self._retention_lock:
             full = not self._retention_repaired
             marked = set(self._retention_dirty)
             self._retention_dirty.clear()
             self._retention_repaired = True
         added = 0
-        for physical in self.list_collections():
+        for physical in collections:
             if not full and physical not in marked:
                 continue
             if skip is not None and skip(physical):

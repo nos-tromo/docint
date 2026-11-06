@@ -55,8 +55,9 @@ and its access model. Nothing on this page duplicates that.
   `"retention_notice_days"`, and a command's chain adds `"command"`. Never a
   secret or a path. The API's startup then records `admin` `retention.config`:
   the period, the notice, `since` (when the period took effect), `grace_until`
-  (when its notice ends; `null` while off) and, after a shortening,
-  `in_force_days` (the period that decides until that notice ends; else `null`). A `lifecycle`/`heartbeat` follows every 60 seconds and a
+  (when its notice ends; `null` while off) and `in_force_days`: after a
+  shortening, the period that decides until that notice ends — kept until the
+  next change — else `null`. A `lifecycle`/`heartbeat` follows every 60 seconds and a
   `lifecycle`/`shutdown` ends a clean chain.
 - **Where the lines go.** `AUDIT_OUTPUT` selects the stream. In the backend
   container compose sets `AUDIT_OUTPUT: container`: every process in the

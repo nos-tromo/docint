@@ -106,7 +106,7 @@ no collection — goes one period after it was dated.
 
 **When the period changes**, document dates are recomputed under the new one.
 A shorter period moves every chat's and report's date forward by the
-difference to the period in force (never inside the notice it gives); extracts
+difference to the period recorded before (never inside the notice it gives); extracts
 and topic runs go with the collection's earliest document at the latest. A longer period keeps the
 earlier dates — nothing outlives its sources. Switching to `off` clears the
 chat and report dates; switching on again stamps them afresh.

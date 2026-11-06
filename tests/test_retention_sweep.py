@@ -515,3 +515,36 @@ def test_what_a_document_delete_removed_is_recorded(fake: _SweepRAG, audit_strea
     assert removed["target"]["ids"] == ["old"]
     assert removed["criteria"]["points"] == 1
     assert {"image_points", "image_occurrences", "nodes", "source_files", "artifacts"} <= set(removed["criteria"])
+
+
+def test_a_second_change_during_a_notice_moves_derived_deadlines_by_its_own_step(fake: _SweepRAG) -> None:
+    """365 → 300 → 330 → 200: chats move as their sources do, never by the shortening already applied."""
+    fake.owners.record_retention_period(365, now=NOW - 400 * DAY)
+    with fake.sessions._session_scope() as s:
+        s.add(Conversation(id="far", owner="alice", collection_name="phys", expires_at=NOW + 300 * DAY))
+        s.commit()
+    api_module._record_retention_period(DocumentRetentionConfig(days=365, notice_days=30))
+    api_module._record_retention_period(DocumentRetentionConfig(days=300, notice_days=30))
+    assert _session_expiry(fake, "far") == NOW + 235 * DAY
+    api_module._record_retention_period(DocumentRetentionConfig(days=330, notice_days=30))
+    assert _session_expiry(fake, "far") == NOW + 235 * DAY
+    api_module._record_retention_period(DocumentRetentionConfig(days=200, notice_days=30))
+    assert _session_expiry(fake, "far") == NOW + 105 * DAY
+
+
+def test_a_failed_removal_record_still_lets_the_collection_go(fake: _SweepRAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deletion was recorded before it ran; a failing count afterwards never strands the emptied collection."""
+    physical = fake.owners.register("alice", "docs")
+    _doc(fake, "old", days_ago=370, physical=physical)
+    fake.empty_after = True
+    original = api_module.Operation.child
+
+    def child(self: Any, action: str, operation: str, **kwargs: Any) -> str:
+        if operation == "retention.document.removed":
+            raise OSError("audit sink full")
+        return original(self, action, operation, **kwargs)
+
+    monkeypatch.setattr(api_module.Operation, "child", child)
+    report = _sweep()
+    assert fake.deleted_collections == [physical]
+    assert (report.collections, report.failed) == (1, [])

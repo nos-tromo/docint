@@ -317,9 +317,9 @@ def _carry_derived_deadlines(previous: RetentionPeriodState | None, state: Reten
     A document's deadline under a shortened period is its ingest plus the new
     period, never before the new notice ends, and never later than the rule
     in force before the change allowed; a chat's or report's is its earliest
-    source's. So a period shortened by ``n`` days against the rule in force
-    moves every stored deadline ``n`` days forward, never inside the new
-    notice and never later. A longer period keeps the earlier dates: nothing
+    source's. Stored deadlines already follow the recorded period, so a
+    period shortened by ``n`` days against it moves every stored deadline
+    ``n`` days forward, never inside the new notice and never later. A longer period keeps the earlier dates: nothing
     outlives its sources. Switching off clears them, as nothing is deleted
     then, and the first sweep after switching on stamps them afresh. Running
     before the period is recorded means a failure is retried at the next
@@ -336,9 +336,11 @@ def _carry_derived_deadlines(previous: RetentionPeriodState | None, state: Reten
         sessions.clear_session_expiries()
         reports.clear_report_expiries()
         return
-    if state.in_force_days is None or state.grace_until is None:
+    # The stored deadlines already follow the recorded period, so they move
+    # by this change's own step; a lengthening keeps them.
+    if state.days >= previous.days or state.grace_until is None:
         return
-    sooner = timedelta(days=state.in_force_days - state.days)
+    sooner = timedelta(days=previous.days - state.days)
     floor = state.grace_until
     moved = sessions.shift_session_expiries(sooner, floor=floor) + reports.shift_report_expiries(sooner, floor=floor)
     logger.info(
@@ -591,19 +593,24 @@ def _purge_due_documents(
     except Exception:
         op.child("delete", "retention.document.failed", target=target, outcome="error")
         raise
-    op.child(
-        "delete",
-        "retention.document.removed",
-        target=target,
-        criteria={
-            "points": result.points,
-            "image_points": result.image_points,
-            "image_occurrences": result.image_occurrences,
-            "nodes": result.nodes,
-            "source_files": result.source_files,
-            "artifacts": result.artifacts,
-        },
-    )
+    # The deletion was recorded before it ran; a count that cannot be written
+    # afterwards must not keep an emptied collection from its cascade.
+    try:
+        op.child(
+            "delete",
+            "retention.document.removed",
+            target=target,
+            criteria={
+                "points": result.points,
+                "image_points": result.image_points,
+                "image_occurrences": result.image_occurrences,
+                "nodes": result.nodes,
+                "source_files": result.source_files,
+                "artifacts": result.artifacts,
+            },
+        )
+    except Exception as exc:
+        logger.warning("Retention could not record what it removed from '{}': {}", physical, exc)
     if not result.collection_empty:
         return len(rows), False, logical if result.entities_dropped else None
     collection_op = Operation(

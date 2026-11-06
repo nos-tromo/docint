@@ -13,6 +13,7 @@ from qdrant_client import QdrantClient, models
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from typing_extensions import override
 
 from docint.core.rag import RAG, RETENTION_STAMP_KEY
 from docint.core.retention import RetentionPeriodState
@@ -239,3 +240,37 @@ def test_an_ingest_run_leaves_no_metadata_behind(rag: RAG) -> None:
     rag._drop_ingest_meta("phys")
     assert list(rag._ingest_doc_meta) == [("other", "h2")]
     assert rag._retention_dirty == {"phys"}
+
+
+def test_a_failed_collection_listing_keeps_the_repair_due(rag: RAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qdrant down at the first sweep: the next sweep still reads every collection."""
+    period = RetentionPeriodState(days=365, set_at=NOW - 400 * DAY)
+    read: list[str] = []
+
+    def down(self: RAG, **kwargs: Any) -> list[str]:
+        raise ConnectionError("qdrant unreachable")
+
+    monkeypatch.setattr(RAG, "list_collections", down)
+    with pytest.raises(ConnectionError):
+        rag.repair_retention_index(period, notice_days=30)
+    monkeypatch.setattr(RAG, "list_collections", lambda self, **k: ["phys", "two"])
+    monkeypatch.setattr(RAG, "payload_documents", lambda self, physical: read.append(physical) or [])
+    monkeypatch.setattr(RAG, "_manifest_completion_times", lambda self, physical: {})
+    rag.qdrant_client.collection_exists.return_value = True
+    rag.repair_retention_index(period, notice_days=30)
+    assert read == ["phys", "two"]
+
+
+def test_dropping_metadata_survives_a_concurrent_insert(rag: RAG) -> None:
+    """Another ingest adding a document while a run drops its leftovers never fails that run."""
+
+    class Growing(dict[tuple[str, str], tuple[str, set[str]]]):
+        @override
+        def __iter__(self) -> Any:
+            for key in super().__iter__():
+                self[("other", f"late-{key[1]}")] = ("", set())
+                yield key
+
+    rag._ingest_doc_meta = Growing({("phys", "h1"): ("a.pdf", {"h1"})})
+    rag._drop_ingest_meta("phys")
+    assert ("phys", "h1") not in rag._ingest_doc_meta
