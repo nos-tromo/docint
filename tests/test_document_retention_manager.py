@@ -112,3 +112,12 @@ def test_repair_uses_payload_time_then_manifest_then_set_at_never_now(mgr: Docum
     assert rows["stamped"].ingested_at == NOW - 300 * DAY
     assert rows["manifest"].ingested_at == NOW - 200 * DAY
     assert rows["bare"].ingested_at == PERIOD.set_at
+
+
+def test_repair_merges_new_point_hashes_and_a_missing_name(mgr: DocumentRetentionManager) -> None:
+    """A row the index already has gets the hashes and name Qdrant knows, never a new clock."""
+    mgr.record_ingest("c1", "docs", "alice", "h1", "", ["h1"], now=NOW - 5 * DAY, period=PERIOD, notice_days=30)
+    docs = [PayloadDocument("h1", frozenset({"h1", "clip"}), "a.pdf", NOW - 300 * DAY)]
+    assert mgr.repair_from_payload("c1", "docs", "alice", docs, manifest_times={}, period=PERIOD, notice_days=30) == 0
+    (row,) = mgr.rows_for("c1")
+    assert (sorted(row.point_hashes), row.filename, row.ingested_at) == (["clip", "h1"], "a.pdf", NOW - 5 * DAY)

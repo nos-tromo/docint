@@ -4,7 +4,8 @@ A report PDF is rendered by a background job and fetched once the job is done,
 so it has to outlive the request that asked for it — but not much more, since
 it can always be rendered again. The store keeps one PDF per report beside a
 JSON sidecar, under scratch space by default (``REPORT_PDF_DIR``), and is only
-ever read through the report it belongs to; nothing lists it.
+ever read through the report it belongs to; only the retention sweep lists it,
+by report id, to remove renders whose report is gone.
 
 SQLite hands a deleted report's id to the next report created, so the files
 are named for the report *incarnation* — its id and a digest of its creation
@@ -156,6 +157,23 @@ class ReportPdfStore:
         if not self.path(report_id, report_created_at).is_file():
             return None
         return cast(ReportPdfRecord, stored)
+
+    def ids(self) -> set[int]:
+        """Return the ids of the reports the store holds files of.
+
+        Returns:
+            set[int]: Report ids, read from the file names; empty before the first write.
+        """
+        found: set[int] = set()
+        if not self._root.is_dir():
+            return found
+        for path in self._root.iterdir():
+            if path.suffix not in {".pdf", ".json"}:
+                continue
+            head, _, _ = path.stem.partition("-")
+            if head.isdigit():
+                found.add(int(head))
+        return found
 
     def delete(self, report_id: int, *, report_created_at: str | None = None) -> bool:
         """Remove a report's stored render.

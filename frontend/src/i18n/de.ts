@@ -706,6 +706,8 @@ export const de: Strings = {
   'dashboard.retention_rule':
     'Dokumente werden {days} Tage nach dem Hinzufügen gelöscht. Chats, Reports und Extrakte, die darauf aufbauen, werden mit ihrer frühesten Quelle gelöscht.',
   'dashboard.retention_due': 'Wird am {date} gelöscht',
+  'dashboard.retention_overdue': 'Wird beim nächsten Lauf gelöscht',
+  'dashboard.retention_no_collection': 'Ohne Sammlung',
   'dashboard.retention_kind_document': 'Dokument',
   'dashboard.retention_kind_session': 'Chat',
   'dashboard.retention_kind_report': 'Report',

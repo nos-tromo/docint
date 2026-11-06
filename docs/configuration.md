@@ -857,7 +857,7 @@ no later; the rule, the sweep and what is deleted are in
 | Variable | Default | Description |
 |---|---|---|
 | `DOCUMENT_RETENTION_DAYS` | `365` | Days after its ingest completed a document is deleted: whole days from `1` to `3650`, or `off` (development only — nothing is deleted, and startup logs a warning). Any other value stops the backend at startup. Read at startup, which logs `Document retention \| period=…` and records the period in the audit chain; a changed period restarts the grace. |
-| `RETENTION_NOTICE_DAYS` | `30` | Days before its deletion an item is listed for its owner (Dashboard, sidebar, `GET /collections/retention`): `1` to `365`. Also the grace period: nothing is deleted sooner than this after the period took effect. Any other value stops the backend at startup. |
+| `RETENTION_NOTICE_DAYS` | `30` | Days before its deletion an item is listed for its owner (Dashboard, sidebar, `GET /collections/retention`): `1` to `365`. Also the grace a new or shorter period gives; a changed period never deletes sooner than announced, and changing this value alone moves no date ([retention.md](retention.md#the-rule)). Any other value stops the backend at startup. |
 | `COLLECTION_RETENTION` | — | No longer read (the idle-window rule it set was replaced). If set, startup logs one warning naming `DOCUMENT_RETENTION_DAYS`. |
 
 ## Response language — `LanguageConfig`

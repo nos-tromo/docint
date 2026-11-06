@@ -38,6 +38,8 @@ function groupByCollection(items: RetentionItem[]): Group[] {
  *
  * Lists the owner's documents, chats and reports due within the notice
  * period, grouped by collection. Renders nothing while retention is off.
+ * An item past its date goes at the next run of the deletion, so it says
+ * that instead of a date already gone.
  * Nothing here can keep an item: the wording names the date it goes.
  */
 export function RetentionCard() {
@@ -50,6 +52,7 @@ export function RetentionCard() {
 
   const items = (data.items ?? []).filter((item) => item.warning)
   const shown = items.slice(0, SHOWN)
+  const now = Date.now()
   return (
     <Card role="region" aria-labelledby={headingId}>
       <h2 id={headingId} className="text-lg font-semibold text-primary">
@@ -65,7 +68,7 @@ export function RetentionCard() {
           {groupByCollection(shown).map((group, index) => (
             <section key={group.key} role="group" aria-labelledby={`${headingId}-g${index}`}>
               <h3 id={`${headingId}-g${index}`} className="truncate text-sm font-medium text-primary">
-                {group.collection}
+                {group.collection || t('dashboard.retention_no_collection')}
                 {group.owner ? t('common.owned_by_suffix', { owner: group.owner }) : ''}
               </h3>
               <ul className="mt-1 space-y-1 text-sm">
@@ -76,7 +79,9 @@ export function RetentionCard() {
                       <span className="min-w-0 truncate">{item.name ?? item.id}</span>
                     </span>
                     <span className="shrink-0 tabular-nums text-[var(--status-amber-fg)]">
-                      {t('dashboard.retention_due', { date: formatDate(item.expires_at, lang) })}
+                      {Date.parse(item.expires_at) <= now
+                        ? t('dashboard.retention_overdue')
+                        : t('dashboard.retention_due', { date: formatDate(item.expires_at, lang) })}
                     </span>
                   </li>
                 ))}

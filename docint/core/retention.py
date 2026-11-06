@@ -235,6 +235,7 @@ class SweepReport:
         reports (int): Reports deleted.
         extracts (int): Stored extracts deleted.
         topic_runs (int): Topic runs deleted.
+        report_pdfs (int): Rendered PDFs removed because their report was gone.
         repaired (int): Documents the index repair added.
     """
 
@@ -246,6 +247,7 @@ class SweepReport:
     reports: int = 0
     extracts: int = 0
     topic_runs: int = 0
+    report_pdfs: int = 0
     repaired: int = 0
 
 

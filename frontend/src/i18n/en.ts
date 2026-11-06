@@ -681,6 +681,8 @@ export const en = {
   'dashboard.retention_rule':
     'Documents are deleted {days} days after they were added. Chats, reports and extracts built from them are deleted with the earliest of their sources.',
   'dashboard.retention_due': 'Deleted on {date}',
+  'dashboard.retention_overdue': 'Deleted at the next run',
+  'dashboard.retention_no_collection': 'No collection',
   'dashboard.retention_kind_document': 'Document',
   'dashboard.retention_kind_session': 'Chat',
   'dashboard.retention_kind_report': 'Report',

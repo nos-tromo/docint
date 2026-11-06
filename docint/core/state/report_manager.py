@@ -478,6 +478,15 @@ class ReportManager:
             )
             return [(int(row[0]), row[1], row[2]) for row in rows]
 
+    def report_ids(self) -> set[int]:
+        """Return the id of every report.
+
+        Returns:
+            set[int]: All report ids, any owner.
+        """
+        with self._session_scope() as s:
+            return {int(row[0]) for row in s.query(Report.id).all()}
+
     def reports_without_deadline(self) -> list[tuple[int, str | None, str | None]]:
         """List reports no deadline was stamped on yet (they predate retention).
 
@@ -822,7 +831,10 @@ class ReportManager:
             if lowered != current:
                 report.expires_at = lowered
         except Exception as exc:
-            logger.warning("Report deadline not updated: {}", exc)
+            # A date that may be later than this item's sources is worse than
+            # none: the next sweep derives it again.
+            report.expires_at = None
+            logger.warning("Report deadline not updated; the next sweep derives it again: {}", exc)
 
     @staticmethod
     def _stage_item(

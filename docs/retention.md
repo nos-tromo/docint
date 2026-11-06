@@ -7,7 +7,7 @@ no later than it does. The rule is on by default.
 | Variable | Default | Meaning |
 |---|---|---|
 | `DOCUMENT_RETENTION_DAYS` | `365` | Days after its ingest completed a document is deleted, `1` to `3650`. `off` deletes nothing (development only; logged as a warning). |
-| `RETENTION_NOTICE_DAYS` | `30` | Days before its deletion an item is listed for its owner, `1` to `365`; also the grace period after the rule takes effect. |
+| `RETENTION_NOTICE_DAYS` | `30` | Days before its deletion an item is listed for its owner, `1` to `365`; also the grace a new or shorter period gives. Changing it alone moves no date. |
 
 Any other value stops the backend at startup: a typo never deletes on a
 schedule nobody chose, and never silently switches retention off.
@@ -20,13 +20,17 @@ Document retention | period=365d notice=30d since=2026-11-05T06:45:00+00:00
 ```
 
 and records the same in the audit chain (`admin` `retention.config`, with
-`period_days`, `notice_days` and `since`; see [audit.md](audit.md)).
+`period_days`, `notice_days`, `since`, `grace_until` and, after a shortening,
+`in_force_days`; see [audit.md](audit.md)).
 
 ## The rule
 
 ```text
-due = max(ingested + period, period took effect + notice)
+due = max(ingested + period, grace end)
 ```
+
+The grace end only matters for a document the period would delete before it;
+what it is depends on how the period came about (below).
 
 - **The clock starts when the document is stored**, at the end of its ingest,
   and nothing moves it: reading, chatting with or exporting a document does
@@ -35,10 +39,20 @@ due = max(ingested + period, period took effect + notice)
 - **Per document, per collection.** Re-ingesting the same file into the same
   collection keeps its clock; the same file in another collection has its own.
   Once a document is deleted, a new ingest is a new document with a new clock.
-- **Grace.** Nothing is deleted sooner than the notice period after the period
-  took effect on the host: the first start of this release, or any change of
-  `DOCUMENT_RETENTION_DAYS`. So every owner sees a full notice, also for data
-  that is already older than the period when retention starts.
+- **Grace.** When retention starts — the first start of this release, or
+  switching it on again after `off` — nothing is deleted for the notice period,
+  so every owner sees a full notice, also for data that is already older than
+  the period.
+- **A changed period never deletes sooner than announced.** A longer period
+  applies at once, also to what was due under the shorter one but not yet
+  deleted. A shorter one gives the notice only to what it makes due sooner:
+  until the notice ends, a document goes when the period in force before the
+  change would have deleted it, and with the shorter period afterwards. A
+  change made while an earlier notice still runs never ends that notice
+  sooner, and changing the period back and forth postpones nothing.
+- **The notice alone moves nothing.** A changed `RETENTION_NOTICE_DAYS` applies
+  to the next change of the period and to what is listed, never to a date
+  already set: the end of a running notice is stored with the period.
 
 The rule lives in one place, `docint/core/retention.py`, so the API listing,
 the operator report and the sweep can never disagree about a date.
@@ -60,11 +74,13 @@ two documents, each with its own clock.
   deadlines.
 - **In the sessions store.** The `document_retention` table indexes each
   document (collection, owner, file hash, file name, ingested, due) for the
-  notices and the sweep. Each sweep first repairs it from Qdrant: a document
-  Qdrant holds and the index lacks gets a row, timed by its payload stamp, else
-  the ingest manifest's completion time, else the moment the period took
-  effect — never the time of the repair. A restore from a backup therefore
-  never earns a fresh clock.
+  notices and the sweep. The sweep repairs it from Qdrant: a document Qdrant
+  holds and the index lacks gets a row, timed by its payload stamp, else the
+  ingest manifest's completion time, else the moment the period took effect —
+  never the time of the repair. A restore from a backup therefore never earns
+  a fresh clock. A row the index has gains any hash or file name it lacks,
+  never a new clock; a point that carries no file hash cannot be indexed, and
+  the repair logs how many there are.
 - **Documents from before this release** have no payload stamp; they take the
   manifest's completion time where the manifest has one, else the moment the
   period took effect.
@@ -90,8 +106,8 @@ no collection — goes one period after it was dated.
 
 **When the period changes**, document dates are recomputed under the new one.
 A shorter period moves every chat's and report's date forward by the
-difference (never inside the new grace); extracts and topic runs go with the
-collection's earliest document at the latest. A longer period keeps the
+difference to the period in force (never inside the notice it gives); extracts
+and topic runs go with the collection's earliest document at the latest. A longer period keeps the
 earlier dates — nothing outlives its sources. Switching to `off` clears the
 chat and report dates; switching on again stamps them afresh.
 
@@ -99,7 +115,10 @@ chat and report dates; switching on again stamps them afresh.
 
 The backend sweeps once a day, starting five minutes after startup. Each sweep:
 
-1. repairs the document index from Qdrant (above);
+1. repairs the document index from Qdrant (above): the first sweep after a
+   start reads every collection, later sweeps only the collections an ingest
+   could not index completely; a collection being deleted is left for the
+   next sweep;
 2. stamps a date on chats and reports from before this release;
 3. for each collection with documents due, **skips it if any job is still
    working on it** — an ingest, a summary, an extract, a topics job, or
@@ -107,19 +126,19 @@ The backend sweeps once a day, starting five minutes after startup. Each sweep:
    A collection left without documents is deleted with the collection cascade
    ([api-reference.md](api-reference.md#delete-collectionsname));
 4. deletes due chat sessions, reports (with their stored PDFs), extracts and
-   topic runs.
+   topic runs, and rendered PDFs whose report is gone.
 
 Every deletion is recorded in the audit trail first, as `delete` by the system,
 with references and never content ([audit.md](audit.md#retention-sweep)). A
 deletion whose record cannot be written does not happen. A document deletion
-that fails afterwards adds an `error` event; whatever fails is retried by the
+adds what it removed once it is done, and an `error` event if it fails; whatever fails is retried by the
 next sweep, while the others still go. At most 5,000 due documents of one
 collection are deleted per sweep, soonest first; the rest follow the next day,
 and every collection with due documents is visited each sweep. Each sweep ends
 with one line to grep for:
 
 ```text
-Retention sweep complete | period=365d documents=12 sessions=3 reports=1 extracts=0 topic_runs=1 collections=1 repaired=0 skipped_busy=0 failed=0
+Retention sweep complete | period=365d documents=12 sessions=3 reports=1 extracts=0 topic_runs=1 report_pdfs=0 collections=1 repaired=0 skipped_busy=0 failed=0
 ```
 
 The sweep runs inside the backend, not as a separate command, so the process
@@ -154,8 +173,10 @@ order, each step a no-op on what is already gone:
     the row stays until the collection cascade drops it, so a failed cascade is
     retried by the next sweep.
 
-While a collection is being worked on by the sweep, requests that would work on
-it get `409`.
+While the sweep deletes documents of a collection, requests that would work on
+it get `409` ("Documents of this collection are being deleted."). The busy
+check above runs under the same lock, so no job can start between the check
+and the delete.
 
 **PDF artifacts are shared.** They are named by the file's content hash, so two
 collections holding the same PDF share one folder. A folder is removed only when
@@ -169,7 +190,8 @@ artifact is removed.
 
 - **Dashboard** — the *Automatic deletion* card lists the owner's documents,
   chats and reports due within the notice period, grouped by collection, each
-  with its date; the sidebar says how many items are due and links to it. See
+  with its date (a chat recorded without a collection under *No collection*;
+  an item past its date says it goes at the next run); the sidebar says how many items are due and links to it. See
   [ui-guide.md](ui-guide.md#dashboard-srcroutesdashboardtsx).
 - `GET /collections/retention` — the same for the caller; admins pass
   `all=true` for everyone's (recorded as `admin`), other owners' items by
@@ -189,8 +211,10 @@ other, but no one is notified; the operator report names them.
 
 ## Upgrading
 
-The first start of this release records the period and starts the grace
+The first start with retention records the period and starts the grace
 period: nothing is deleted for the notice period, however old a document is.
+A period recorded by an earlier release is read with its notice end taken as
+when it took effect plus `RETENTION_NOTICE_DAYS`, and stored that way once.
 Retention is on from then on unless `DOCUMENT_RETENTION_DAYS=off` is set. During
 the grace, `make retention-report` shows the operator every date and the
 Dashboard shows each owner what falls due.

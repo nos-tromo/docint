@@ -154,3 +154,21 @@ def test_a_clock_stepped_back_keeps_what_is_due() -> None:
     stepped = next_period_state(lengthened, 365, 30, NOW - timedelta(seconds=5))
     assert stepped.grace_until == NOW
     assert deadline_under(NOW - 400 * DAY, stepped, 30) == NOW
+
+
+def test_the_off_warning_is_logged_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retention off warns once per process, not on every chat turn that reads the setting."""
+    from loguru import logger
+
+    from docint.utils import env_cfg
+
+    monkeypatch.setenv("DOCUMENT_RETENTION_DAYS", "off")
+    monkeypatch.setattr(env_cfg, "_RETENTION_OFF_WARNED", False, raising=False)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING")
+    try:
+        env_cfg.load_document_retention_env()
+        env_cfg.load_document_retention_env()
+    finally:
+        logger.remove(sink)
+    assert sum("DOCUMENT_RETENTION_DAYS=off" in line for line in lines) == 1

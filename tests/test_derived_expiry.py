@@ -258,3 +258,45 @@ def test_an_agent_answered_turn_counts_as_collection_wide(
         s.commit()
     [(session_id, _physical, _cited, wide)] = sessions.sessions_without_deadline()
     assert (session_id, wide) == ("s1", True)
+
+
+def test_a_failed_lowering_is_retried_by_the_sweep(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a turn's sources cannot be read, the session's date is cleared for the sweep to derive again."""
+    import docint.core.state.session_manager as session_module
+
+    _, _, sessions = stores
+    _turn(sessions, "s1", ["new"])
+    assert _expiry(sessions, "s1") is not None
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("index unreadable")
+
+    monkeypatch.setattr(session_module, "source_expiry", broken)
+    _turn(sessions, "s1", ["mid"])
+    assert [row[0] for row in sessions.sessions_without_deadline()] == ["s1"]
+
+
+def test_a_failed_report_lowering_is_retried_by_the_sweep(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When an item's sources cannot be read, the report's date is cleared for the sweep to derive again."""
+    import docint.core.state.report_manager as report_module
+
+    rag, _, sessions = stores
+    reports = _reports(rag, sessions)
+    report_id = int(reports.create_report(title="r", owner="alice", collection_name="docs")["id"])
+    reports.add_item(
+        report_id, "alice", artifact_type="chat_answer", dedupe_key="a:1", snapshot={"sources": [{"file_hash": "new"}]}
+    )
+    assert _report_expiry(reports, report_id) is not None
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("index unreadable")
+
+    monkeypatch.setattr(report_module, "report_item_expiry", broken)
+    reports.add_item(
+        report_id, "alice", artifact_type="chat_answer", dedupe_key="a:2", snapshot={"sources": [{"file_hash": "mid"}]}
+    )
+    assert [row[0] for row in reports.reports_without_deadline()] == [report_id]

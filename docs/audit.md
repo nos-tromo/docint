@@ -54,7 +54,9 @@ and its access model. Nothing on this page duplicates that.
   `"document_retention_days"` (`null` while off) and
   `"retention_notice_days"`, and a command's chain adds `"command"`. Never a
   secret or a path. The API's startup then records `admin` `retention.config`:
-  the period, the notice and `since`, when the period took effect. A `lifecycle`/`heartbeat` follows every 60 seconds and a
+  the period, the notice, `since` (when the period took effect), `grace_until`
+  (when its notice ends; `null` while off) and, after a shortening,
+  `in_force_days` (the period that decides until that notice ends; else `null`). A `lifecycle`/`heartbeat` follows every 60 seconds and a
   `lifecycle`/`shutdown` ends a clean chain.
 - **Where the lines go.** `AUDIT_OUTPUT` selects the stream. In the backend
   container compose sets `AUDIT_OUTPUT: container`: every process in the
@@ -601,6 +603,7 @@ never a file name, question or title.
 | Operation | Target | Criteria |
 |---|---|---|
 | `retention.document` | `document`: the file hashes deleted, container the logical collection | `owner`, `period_days` |
+| `retention.document.removed` | as above — what the delete removed, recorded after it | `points`, `image_points`, `image_occurrences`, `nodes`, `source_files`, `artifacts` |
 | `retention.document.failed` | as above, outcome `error` — the delete failed after its record; the next sweep retries | — |
 | `retention.collection` | `collection` [logical name] — the last document went, so the collection cascade runs | `owner` |
 | `retention.session` | `session` [id] | `owner`, `period_days` |

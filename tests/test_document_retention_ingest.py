@@ -80,7 +80,7 @@ def test_meta_collects_filename_and_point_hashes(rag: RAG) -> None:
         _node("other"),
     ]
     rag._note_retention_metadata(nodes, now=NOW)
-    filename, hashes = rag._ingest_doc_meta["clip"]
+    filename, hashes = rag._ingest_doc_meta[("phys", "clip")]
     assert filename == "clip.pdf"
     assert hashes == {"clip", "clip-media", "figure-doc"}
 
@@ -162,3 +162,80 @@ def test_repair_indexes_what_qdrant_holds_and_never_resets(rag: RAG, monkeypatch
     rows = {row.file_hash: row for row in rag.ensure_document_retention_manager().rows_for("phys")}
     assert rows["known"].ingested_at == NOW - 5 * DAY
     assert rows["restored"].ingested_at == period.set_at
+
+
+def test_metadata_of_two_collections_never_mix(rag: RAG) -> None:
+    """Two ingests at once keep each document's name and hashes to their own collection."""
+    rag._note_retention_metadata([_node("h1", file_name="a.pdf", media_file_hash="clip-a")], now=NOW)
+    with rag.collection_scope("other"):
+        rag._note_retention_metadata([_node("h1", file_name="b.pdf")], now=NOW)
+        rag._index_completed_document("h1", now=NOW)
+    rag._index_completed_document("h1", now=NOW)
+    (mine,) = rag.ensure_document_retention_manager().rows_for("phys")
+    (theirs,) = rag.ensure_document_retention_manager().rows_for("other")
+    assert (mine.filename, sorted(mine.point_hashes)) == ("a.pdf", ["clip-a", "h1"])
+    assert (theirs.filename, theirs.point_hashes) == ("b.pdf", ["h1"])
+
+
+def test_points_without_a_file_hash_are_reported(rag: RAG) -> None:
+    """A point no document claims is never indexed, so the repair says so."""
+    from loguru import logger
+
+    client = QdrantClient(location=":memory:")
+    client.create_collection("phys", vectors_config=models.VectorParams(size=2, distance=models.Distance.COSINE))
+    client.upsert("phys", points=[models.PointStruct(id=1, vector=[1, 0], payload={"text": "zz"})])
+    rag._qdrant_client = client
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="WARNING")
+    try:
+        assert rag.payload_documents("phys") == []
+    finally:
+        logger.remove(sink)
+    assert any("1 point" in line and "file hash" in line for line in lines)
+
+
+def test_repair_never_indexes_a_collection_being_deleted(rag: RAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A collection skipped by the caller, or gone by the end, keeps no rows."""
+    from docint.core.state.document_retention_manager import PayloadDocument
+
+    period = RetentionPeriodState(days=365, set_at=NOW - 400 * DAY)
+    monkeypatch.setattr(RAG, "list_collections", lambda self, **k: ["phys", "busy"])
+    docs = [PayloadDocument("h1", frozenset({"h1"}), "a.pdf", None)]
+    monkeypatch.setattr(RAG, "payload_documents", lambda self, physical: docs)
+    monkeypatch.setattr(RAG, "_manifest_completion_times", lambda self, physical: {})
+    monkeypatch.setattr(RAG, "_collection_is_empty", lambda self, physical: physical == "phys", raising=False)
+    exists = {"phys": False, "busy": True}
+    rag.qdrant_client.collection_exists.side_effect = lambda name: exists.get(name, False)
+    rag.repair_retention_index(period, notice_days=30, skip=lambda physical: physical == "busy")
+    manager = rag.ensure_document_retention_manager()
+    assert manager.rows_for("busy") == [] and manager.rows_for("phys") == []
+
+
+def test_repair_scrolls_every_collection_once_per_process(rag: RAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the first full repair only collections whose index write failed are read again."""
+    period = RetentionPeriodState(days=365, set_at=NOW - 400 * DAY)
+    read: list[str] = []
+    monkeypatch.setattr(RAG, "list_collections", lambda self, **k: ["phys", "two"])
+    monkeypatch.setattr(RAG, "payload_documents", lambda self, physical: read.append(physical) or [])
+    monkeypatch.setattr(RAG, "_manifest_completion_times", lambda self, physical: {})
+    rag.qdrant_client.collection_exists.return_value = True
+    rag.repair_retention_index(period, notice_days=30)
+    rag.repair_retention_index(period, notice_days=30)
+    assert read == ["phys", "two"]
+    monkeypatch.setattr(
+        DocumentRetentionManager, "record_ingest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db"))
+    )
+    rag._note_retention_metadata([_node("h9")], now=NOW)
+    rag._index_completed_document("h9", now=NOW)
+    rag.repair_retention_index(period, notice_days=30)
+    assert read == ["phys", "two", "phys"]
+
+
+def test_an_ingest_run_leaves_no_metadata_behind(rag: RAG) -> None:
+    """What a run gathered for a document it never indexed is dropped, and the repair reads the collection."""
+    rag._note_retention_metadata([_node("h1")], now=NOW)
+    with rag.collection_scope("other"):
+        rag._note_retention_metadata([_node("h2")], now=NOW)
+    rag._drop_ingest_meta("phys")
+    assert list(rag._ingest_doc_meta) == [("other", "h2")]
+    assert rag._retention_dirty == {"phys"}

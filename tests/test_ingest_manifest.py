@@ -285,3 +285,17 @@ def test_read_manifest_hashes_never_creates_what_it_reads(tmp_path: Path) -> Non
 
     assert read_manifest_hashes(missing) == set()
     assert not missing.parent.exists()
+
+
+def test_a_late_start_keeps_a_completed_documents_time(tmp_path: Path) -> None:
+    """Re-uploading a completed file never moves the completion time retention reads."""
+    manifest = IngestManifest(tmp_path / "m.db")
+    try:
+        manifest.mark_started("docs", "hash-1")
+        manifest.mark_completed("docs", "hash-1")
+        before = sqlite3.connect(tmp_path / "m.db").execute("SELECT updated_at FROM ingest_manifest").fetchone()[0]
+        manifest.mark_started("docs", "hash-1")
+        after = sqlite3.connect(tmp_path / "m.db").execute("SELECT updated_at FROM ingest_manifest").fetchone()[0]
+        assert after == before
+    finally:
+        manifest.close()

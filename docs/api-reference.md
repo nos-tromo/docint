@@ -230,7 +230,8 @@ Response (`RetentionOut`), soonest deletion first:
 the session id or the report id; `name` is the file name, the chat's first
 question (cut to 50 characters) or the report title — `null` for another
 owner's item, which an admin's listing names by `id` only. `owner` is `null` for the
-caller's own items and names the owner otherwise. `period_days` is `null` and
+caller's own items and names the owner otherwise. `collection` is empty for a
+chat recorded without a collection. `period_days` is `null` and
 `items` empty while retention is off. `warning` is true for every listed item
 (each is due within the notice period).
 

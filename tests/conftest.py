@@ -68,6 +68,9 @@ def _hermetic_session_store(tmp_path_factory: pytest.TempPathFactory) -> Iterato
     mp = pytest.MonkeyPatch()
     db_path = tmp_path_factory.mktemp("session-store") / "sessions.sqlite3"
     mp.setenv("SESSIONS_DB_PATH", str(db_path))
+    # The sweep removes rendered PDFs whose report is not in the store; the
+    # test store holds none of the developer's, so their renders stay apart.
+    mp.setenv("REPORT_PDF_DIR", str(tmp_path_factory.mktemp("report-pdfs")))
     mp.delenv("SESSION_STORE", raising=False)
     yield
     mp.undo()
@@ -171,6 +174,9 @@ def _hermetic_retention_env() -> Iterator[None]:
     mp = pytest.MonkeyPatch()
     for name in ("COLLECTION_RETENTION", "DOCUMENT_RETENTION_DAYS", "RETENTION_NOTICE_DAYS"):
         mp.delenv(name, raising=False)
+    from docint.utils import env_cfg
+
+    mp.setattr(env_cfg, "_RETENTION_OFF_WARNED", False)
     yield
     mp.undo()
 

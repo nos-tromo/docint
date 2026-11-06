@@ -139,10 +139,10 @@ class DocumentRetentionManager:
         period: RetentionPeriodState,
         notice_days: int,
     ) -> None:
-        """Index a document whose ingest completed; an existing row is left as it is.
+        """Index a document whose ingest completed; an existing row keeps its clock.
 
         Re-ingesting identical content while the document exists never moves
-        its clock.
+        its clock; it only adds hashes the row lacks, and a name if it had none.
 
         Args:
             physical (str): The Qdrant collection.
@@ -159,8 +159,13 @@ class DocumentRetentionManager:
             row = s.get(DocumentRetention, (physical, file_hash))
             if row is not None:
                 merged = sorted({*(row.point_hashes or []), *point_hashes})
-                if merged != sorted(row.point_hashes or []):
+                changed = merged != sorted(row.point_hashes or [])
+                if changed:
                     row.point_hashes = merged
+                if filename and not row.filename:
+                    row.filename = filename
+                    changed = True
+                if changed:
                     s.commit()
                 return
             s.add(
@@ -397,7 +402,7 @@ class DocumentRetentionManager:
         The clock is the points' own ``docint_ingested_at``, else the ingest
         manifest's time for a completed row, else when the period took effect:
         never the time of the repair, so restored data never gets a fresh
-        deadline.
+        deadline. A row the index has gets the hashes and the name it lacks.
 
         Args:
             physical (str): The Qdrant collection.
@@ -414,8 +419,6 @@ class DocumentRetentionManager:
         known = {row.file_hash for row in self.rows_for(physical)}
         added = 0
         for doc in docs:
-            if doc.file_hash in known:
-                continue
             ingested = doc.ingested_at or manifest_times.get(doc.file_hash) or period.set_at
             self.record_ingest(
                 physical,
@@ -428,5 +431,5 @@ class DocumentRetentionManager:
                 period=period,
                 notice_days=notice_days,
             )
-            added += 1
+            added += doc.file_hash not in known
         return added

@@ -412,7 +412,7 @@ async def _retention_sweep(
     report = SweepReport()
     try:
         report.repaired = await to_thread.run_sync(
-            partial(rag.repair_retention_index, state, notice_days=retention.notice_days)
+            partial(rag.repair_retention_index, state, notice_days=retention.notice_days, skip=_is_purging)
         )
     except Exception as exc:
         logger.warning("Retention index repair failed ({}); the next sweep retries.", exc)
@@ -427,24 +427,37 @@ async def _retention_sweep(
         logger.warning("Collection floors not read ({}); extracts and topic runs keep their own deadlines.", exc)
     due = await to_thread.run_sync(partial(rag.ensure_document_retention_manager().due_collections, now))
     for physical in due:
-        running, queued = get_preprocess_pool().inflight(physical)
-        if running + queued > 0 or await jobs.any_active_for(physical):
-            logger.info("Retention postponed collection '{}': a job is still working on it.", physical)
+        resolve_logical: str | None = None
+        try:
+            # The guard comes first, so no job can start between the busy
+            # check and the delete; it is held through the collection cascade.
+            with _purge_guard(physical, detail="Documents of this collection are being deleted."):
+                running, queued = get_preprocess_pool().inflight(physical)
+                if running + queued > 0 or await jobs.any_active_for(physical):
+                    logger.info("Retention postponed collection '{}': a job is still working on it.", physical)
+                    report.skipped_busy.append(physical)
+                    continue
+                deleted, gone, resolve_logical = await to_thread.run_sync(
+                    partial(_purge_due_documents, physical, now, retention)
+                )
+        except HTTPException:
+            logger.info("Retention postponed collection '{}': it is being deleted already.", physical)
             report.skipped_busy.append(physical)
             continue
-        try:
-            deleted, gone = await to_thread.run_sync(partial(_purge_due_documents, physical, now, retention))
         except Exception:
             logger.exception("Retention could not delete documents of '{}'; the next sweep retries.", physical)
             report.failed.append(physical)
             continue
         report.documents += deleted
         report.collections += int(gone)
+        if resolve_logical is not None:
+            await to_thread.run_sync(partial(_resolve_after_retention, physical, resolve_logical))
     for kind, sweep in (
         ("sessions", _purge_due_sessions),
         ("reports", _purge_due_reports),
         ("extracts", partial(_purge_due_extracts, floors=floors)),
         ("topic_runs", partial(_purge_due_topic_runs, floors=floors)),
+        ("report_pdfs", _purge_orphan_report_pdfs),
     ):
         try:
             setattr(report, kind, await to_thread.run_sync(partial(sweep, now, retention)))
@@ -453,13 +466,14 @@ async def _retention_sweep(
             report.failed.append(kind)
     logger.info(
         "Retention sweep complete | period={}d documents={} sessions={} reports={} extracts={} topic_runs={} "
-        "collections={} repaired={} skipped_busy={} failed={}",
+        "report_pdfs={} collections={} repaired={} skipped_busy={} failed={}",
         retention.days,
         report.documents,
         report.sessions,
         report.reports,
         report.extracts,
         report.topic_runs,
+        report.report_pdfs,
         report.collections,
         report.repaired,
         len(report.skipped_busy),
@@ -535,10 +549,13 @@ def _collection_floors(now: datetime) -> dict[str, datetime]:
     return floors
 
 
-def _purge_due_documents(physical: str, now: datetime, retention: DocumentRetentionConfig) -> tuple[int, bool]:
+def _purge_due_documents(
+    physical: str, now: datetime, retention: DocumentRetentionConfig
+) -> tuple[int, bool, str | None]:
     """Delete a collection's due documents, recorded first; delete the collection if nothing is left.
 
-    Runs in a worker thread.
+    Runs in a worker thread, under the purge guard the sweep holds for the
+    collection, so the collection cascade takes no guard of its own.
 
     Args:
         physical (str): The Qdrant collection.
@@ -546,40 +563,49 @@ def _purge_due_documents(physical: str, now: datetime, retention: DocumentRetent
         retention (DocumentRetentionConfig): The period in force.
 
     Returns:
-        tuple[int, bool]: Documents deleted, and whether the collection went too.
+        tuple[int, bool, str | None]: Documents deleted, whether the collection went too, and the
+            logical name to resolve again when the deletion dropped its entity store.
     """
     owners = rag.ensure_collection_owner_manager()
     activity = owners.get_activity(physical)
-    with _purge_guard(physical):
-        rows = [
-            row for row in rag.ensure_document_retention_manager().rows_for(physical) if is_due(row.expires_at, now)
-        ]
-        rows = sorted(rows, key=lambda row: (row.expires_at or now, row.file_hash))[:_RETENTION_SWEEP_LIMIT]
-        if not rows:
-            return 0, False
-        owner = activity.owner if activity is not None else rows[0].owner
-        logical = activity.logical if activity is not None else rows[0].logical
-        # The sweep is the system acting on its own; the owner whose data goes
-        # is named in the criteria, since no request carries them.
-        op = Operation(
-            audit.current(),
-            audit.SYSTEM_CONTEXT,
-            "delete",
-            "retention.document",
-            container=logical,
-            criteria={"owner": owner, "period_days": retention.days},
-        )
-        target = document_target([{"file_hash": row.file_hash} for row in rows], container=logical)
-        op.record(target=target)
-        try:
-            result = rag.delete_documents(physical, rows)
-        except Exception:
-            op.child("delete", "retention.document.failed", target=target, outcome="error")
-            raise
+    rows = [row for row in rag.ensure_document_retention_manager().rows_for(physical) if is_due(row.expires_at, now)]
+    rows = sorted(rows, key=lambda row: (row.expires_at or now, row.file_hash))[:_RETENTION_SWEEP_LIMIT]
+    if not rows:
+        return 0, False, None
+    owner = activity.owner if activity is not None else rows[0].owner
+    logical = activity.logical if activity is not None else rows[0].logical
+    # The sweep is the system acting on its own; the owner whose data goes
+    # is named in the criteria, since no request carries them.
+    op = Operation(
+        audit.current(),
+        audit.SYSTEM_CONTEXT,
+        "delete",
+        "retention.document",
+        container=logical,
+        criteria={"owner": owner, "period_days": retention.days},
+    )
+    target = document_target([{"file_hash": row.file_hash} for row in rows], container=logical)
+    op.record(target=target)
+    try:
+        result = rag.delete_documents(physical, rows)
+    except Exception:
+        op.child("delete", "retention.document.failed", target=target, outcome="error")
+        raise
+    op.child(
+        "delete",
+        "retention.document.removed",
+        target=target,
+        criteria={
+            "points": result.points,
+            "image_points": result.image_points,
+            "image_occurrences": result.image_occurrences,
+            "nodes": result.nodes,
+            "source_files": result.source_files,
+            "artifacts": result.artifacts,
+        },
+    )
     if not result.collection_empty:
-        if result.entities_dropped:
-            _resolve_after_retention(physical, logical)
-        return len(rows), False
+        return len(rows), False, logical if result.entities_dropped else None
     collection_op = Operation(
         audit.current(),
         audit.SYSTEM_CONTEXT,
@@ -590,10 +616,11 @@ def _purge_due_documents(physical: str, now: datetime, retention: DocumentRetent
     )
     collection_op.record(target=Target(kind="collection", ids=[logical], count=1))
     if activity is not None:
-        _purge_collection(activity.owner, activity.logical, physical)
+        _purge_collection_held(activity.owner, activity.logical, physical)
     else:
         rag.delete_collection(physical)
-    return len(rows), True
+    take_staged(physical)
+    return len(rows), True, None
 
 
 def _resolve_after_retention(physical: str, logical: str) -> None:
@@ -672,6 +699,33 @@ def _purge_due_reports(now: datetime, retention: DocumentRetentionConfig) -> int
             _discard_report_pdfs([report_id])
             deleted += 1
     return deleted
+
+
+def _purge_orphan_report_pdfs(now: datetime, retention: DocumentRetentionConfig) -> int:
+    """Remove rendered PDFs whose report no longer exists.
+
+    A report delete removes its PDF best-effort; one it left behind, or one a
+    render job finished after the report went, is removed here. The store is
+    read before the reports, so a report created meanwhile keeps its render.
+
+    Args:
+        now (datetime): The sweep time (unused; the PDF follows its report).
+        retention (DocumentRetentionConfig): The period in force (unused).
+
+    Returns:
+        int: Reports whose renders were removed.
+    """
+    _ = (now, retention)
+    store = _report_pdf_store()
+    stored = store.ids()
+    if not stored:
+        return 0
+    orphans = stored - rag.ensure_report_manager().report_ids()
+    removed = 0
+    for report_id in sorted(orphans):
+        if store.delete(report_id):
+            removed += 1
+    return removed
 
 
 def _parse_deadline(value: object) -> datetime | None:
@@ -937,12 +991,25 @@ def _require_owned_collection(logical_name: str, principal: Principal) -> str:
 
 # Physical collections whose delete cascade is running in this process. The
 # backend runs a single uvicorn worker, so this is every delete there is.
-_purging: set[str] = set()
+_purging: dict[str, str] = {}
 _purging_lock = threading.Lock()
 
 
+def _is_purging(physical: str) -> bool:
+    """Tell whether a collection is being deleted right now.
+
+    Args:
+        physical (str): The Qdrant collection name.
+
+    Returns:
+        bool: True while its purge guard is held.
+    """
+    with _purging_lock:
+        return physical in _purging
+
+
 @contextmanager
-def _purge_guard(physical: str) -> Iterator[None]:
+def _purge_guard(physical: str, *, detail: str = "Collection is being deleted.") -> Iterator[None]:
     """Mark a collection as being deleted for the duration of its cascade.
 
     Work arriving mid-delete — an ingest, a query — would re-create what the
@@ -951,6 +1018,7 @@ def _purge_guard(physical: str) -> Iterator[None]:
 
     Args:
         physical (str): The Qdrant collection name.
+        detail (str): What the 409 tells the work it refuses.
 
     Yields:
         None: While the cascade runs.
@@ -960,13 +1028,13 @@ def _purge_guard(physical: str) -> Iterator[None]:
     """
     with _purging_lock:
         if physical in _purging:
-            raise HTTPException(status_code=409, detail="Collection is being deleted.")
-        _purging.add(physical)
+            raise HTTPException(status_code=409, detail=_purging[physical])
+        _purging[physical] = detail
     try:
         yield
     finally:
         with _purging_lock:
-            _purging.discard(physical)
+            _purging.pop(physical, None)
 
 
 def _refuse_while_purging(physical: str) -> None:
@@ -979,9 +1047,9 @@ def _refuse_while_purging(physical: str) -> None:
         HTTPException: 409 while the collection is being deleted.
     """
     with _purging_lock:
-        purging = physical in _purging
-    if purging:
-        raise HTTPException(status_code=409, detail="Collection is being deleted.")
+        detail = _purging.get(physical)
+    if detail is not None:
+        raise HTTPException(status_code=409, detail=detail)
 
 
 def _register_collection(principal: Principal, name: str) -> str:
@@ -1796,7 +1864,8 @@ class RetentionItemOut(BaseModel):
     """One document, chat or report due for deletion within the notice period.
 
     ``owner`` is ``None`` for the caller's own items and names the owner
-    otherwise (admins with ``all=true`` only). ``name`` is the file name, the
+    otherwise (admins with ``all=true`` only). ``collection`` is empty for a
+    chat recorded without one. ``name`` is the file name, the
     chat's first question, or the report title — for the caller's own items
     only: another owner's are content, so an admin gets them by ``id``.
     """
@@ -2724,7 +2793,8 @@ def collections_retention(
     an admin also gets every other owner's items, a non-admin's flag is
     ignored, and only the admin's listing across owners is audited, as an
     ``admin`` event. Items of collections without an owner are never listed
-    (the operator report shows them). Sorted soonest first.
+    (the operator report shows them); a chat recorded without a collection
+    is listed with an empty one. Sorted soonest first.
 
     Args:
         request (Request): The incoming request, for the audit trail.
@@ -2750,14 +2820,14 @@ def collections_retention(
             logger.exception("Error listing what falls due")
             raise HTTPException(status_code=500, detail="Request failed.") from None
         for item in found:
-            if item.owner is None or item.expires_at is None or not item.logical:
+            if item.owner is None or item.expires_at is None:
                 continue
             if not everyone and item.owner != principal.name:
                 continue
             items.append(
                 RetentionItemOut(
                     kind=item.kind,
-                    collection=item.logical,
+                    collection=item.logical or "",
                     owner=None if item.owner == principal.name else item.owner,
                     id=item.id,
                     name=item.name if item.owner == principal.name else None,
@@ -2884,16 +2954,31 @@ def _purge_collection(owner: str | None, logical: str, physical: str) -> dict[st
         HTTPException: 409 when the collection is already being deleted.
     """
     with _purge_guard(physical):
-        rag.delete_collection(physical)
-        sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
-        report_ids = rag.ensure_report_manager().delete_reports_for_collection(owner, logical)
-        _discard_report_pdfs(report_ids)
-        rag.ensure_collection_owner_manager().delete(owner, logical)
+        sessions, report_ids = _purge_collection_held(owner, logical, physical)
     # The staged meter counted upload-time model calls for a run that will
     # never happen now.
     take_staged(physical)
     logger.info("Deleted collection '{}' with {} chat session(s) and {} report(s).", logical, sessions, len(report_ids))
     return {"sessions_deleted": int(sessions or 0), "reports_deleted": len(report_ids)}
+
+
+def _purge_collection_held(owner: str | None, logical: str, physical: str) -> tuple[int, list[int]]:
+    """Run the collection cascade; the caller holds the collection's purge guard.
+
+    Args:
+        owner (str | None): The collection's owner.
+        logical (str): The user-visible collection name.
+        physical (str): The Qdrant collection name.
+
+    Returns:
+        tuple[int, list[int]]: Chat sessions deleted, and the ids of the reports deleted.
+    """
+    rag.delete_collection(physical)
+    sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
+    report_ids = rag.ensure_report_manager().delete_reports_for_collection(owner, logical)
+    _discard_report_pdfs(report_ids)
+    rag.ensure_collection_owner_manager().delete(owner, logical)
+    return int(sessions or 0), list(report_ids)
 
 
 @app.put("/sessions/{session_id}/scope", response_model=ScopeOut, tags=["Sessions"])
