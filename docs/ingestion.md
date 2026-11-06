@@ -244,8 +244,9 @@ Every other extension is dispatched to the reader that knows how to parse it
 ## Social media exports
 
 Docint ingests a crawler's **dossier export** (`me-dossier/1`). Per account, it
-holds the postings the account published, the comments each one received, and
-the media attached to them. Postings and comments become text nodes. Images go
+holds the postings the account published, the comments each one received, the
+other profiles' posts the account reacted to, and the media attached to them.
+Postings, comments and reacted-to posts become text nodes. Images go
 through CLIP, and video/audio are transcribed by Nextext and keyframe-extracted;
 every artifact is stamped with the posting it belongs to. Table exports
 (`postings.csv` + `media.csv`) are no longer linked: such a CSV now ingests as an
@@ -271,7 +272,8 @@ profile folder uploaded on its own works too.
 - **A posting becomes one text node.** It carries the same
   `reference_metadata` a social table row carried, so citations, Analysis
   pills, reports, search and filters read it unchanged:
-  - `network` and `type: posting`;
+  - `network` (the record's own, else the dossier's top-level `network`,
+    which is where a real export names it) and `type: posting`;
   - `uuid`, the export's posting id;
   - `url`;
   - `timestamp`, which is `publishedAt` as exported (ISO-8601);
@@ -281,6 +283,13 @@ profile folder uploaded on its own works too.
 - **A received comment (`postings[].comments[]`) becomes one node** with
   `type: comment`, the comment's own author and ids, `anchor_text` (the post it
   was left on) and `parent_text` (the comment it answers, if any).
+- **A post the account reacted to becomes one node** with `type: reaction`.
+  Such a post (another profile's, which the account liked) is no entry of
+  `postings[]`: the export carries it only inline, as the
+  `ownReactions[].context` of a reaction with `rootKind: posting`. Its `uuid`
+  is the post's id (the reaction's `rootId`), and author, time, URL and text
+  are the post's own, so nothing reads as the account's. A reaction to the
+  account's own post adds no node.
 - **Rows are table-shaped**: `source: "table"` and `table.style` set to
   `postings` or `comments`. That shape is what one-node-per-row parsing,
   social detection and extracts key on.
@@ -290,7 +299,8 @@ profile folder uploaded on its own works too.
 
 **How a media item finds its posting.** The dossier names the link from both
 sides: a posting's `mediaIds` and a media item's `attachedTo.postings`. Either
-one is enough. Only postings in the same dossier count.
+one is enough. Only postings the same dossier carries count: its own, and the
+posts it reacted to, whose media name them with `inFile: false`.
 
 The one link the format still leaves out is a **Telegram photo's**. Telegram
 names a photo only by its own message id (`<channel id><message number>`), and
@@ -332,14 +342,14 @@ folder is ambiguous and skipped rather than guessed at.
   ingested.
 - **A `dossier.json` that is not valid JSON, or declares another schema,** is
   claimed and skipped with a warning. The rest of the export still ingests.
-- **`messages[]` and `ownComments[]`** have no sample in the format yet; a
-  warning says how many were not ingested.
+- **`messages[]`, `ownComments[]` and reactions to anything but a posting**
+  have no sample in the format yet; a warning says how many were not ingested.
 - **Account profile data, `locations` and `contacts`** are not ingested.
 
 The counts land in one ingest log line:
 
 ```
-Social linker: 3 dossiers (0 unreadable), 120 postings and 14 comments; 115 media linked (109 explicitly, 6 by album inference), 9 skipped (7 missing from the export, 0 with no local file, 0 with an ambiguous filename, 2 with no posting).
+Social linker: 3 dossiers (0 unreadable), 120 postings, 35 reacted-to postings and 14 comments; 115 media linked (109 explicitly, 6 by album inference), 9 skipped (7 missing from the export, 0 with no local file, 0 with an ambiguous filename, 2 with no posting).
 ```
 
 **Linker.** During ingestion, `posting_uuid` is written into every artifact

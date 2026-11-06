@@ -1,19 +1,21 @@
 """Link a ``me-dossier/1`` social export: posting and comment rows, media joined to their posts.
 
 A crawler export holds one ``dossier.json`` per profile folder. It carries the
-account's postings, the comments each one received, and its media, and the two
-sides name each other explicitly: ``postings[].mediaIds`` and
-``media[].attachedTo.postings``. The linker turns every posting and comment into
-one row-shaped Document and routes each linked media file into the modality
-pipelines (CLIP / Nextext), stamped with its posting's identity. The one link
-the export still leaves out is a Telegram photo's, joined by the album rule
-(:func:`build_posting_album_index`).
+account's postings, the comments each one received, the other profiles' posts
+it reacted to (inline, as each reaction's ``context``) and the media of both,
+and the two sides name each other explicitly: ``mediaIds`` and
+``media[].attachedTo.postings``. The linker turns every posting, comment and
+reacted-to post into one row-shaped Document and routes each linked media file
+into the modality pipelines (CLIP / Nextext), stamped with its posting's
+identity. The one link the export still leaves out is a Telegram photo's,
+joined by the album rule (:func:`build_posting_album_index`).
 """
 
 from __future__ import annotations
 
 import bisect
 import json
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -218,6 +220,7 @@ def _reference(
     record: dict[str, Any],
     kind: str,
     *,
+    network: str | None = None,
     anchor_text: str | None = None,
     parent_text: str | None = None,
 ) -> dict[str, Any]:
@@ -228,8 +231,10 @@ def _reference(
     social table row. Every id is the network's own (``platformId``).
 
     Args:
-        record (dict[str, Any]): A posting or comment record.
-        kind (str): ``posting`` or ``comment``.
+        record (dict[str, Any]): A posting, comment or reacted-to post record.
+        kind (str): ``posting``, ``comment`` or ``reaction``.
+        network (str | None): The dossier's network, for a record that names
+            none of its own — a real export names it once, at the top level.
         anchor_text (str | None): A comment's posting text.
         parent_text (str | None): The text of the comment a reply answers.
 
@@ -238,7 +243,7 @@ def _reference(
     """
     author = record.get("author") or {}
     return {
-        "network": record.get("network"),
+        "network": record.get("network") or network,
         "type": kind,
         "uuid": record.get("id"),
         "url": record.get("url"),
@@ -253,7 +258,7 @@ def _reference(
     }
 
 
-def _posting_fields(posting: dict[str, Any]) -> dict[str, str]:
+def _posting_fields(posting: dict[str, Any], network: str | None = None) -> dict[str, str]:
     """Return a posting's reference fields, prefixed for the artifacts cut from its media.
 
     Built from the same block the posting's own row carries, so a photo and the
@@ -261,11 +266,12 @@ def _posting_fields(posting: dict[str, Any]) -> dict[str, str]:
 
     Args:
         posting (dict[str, Any]): The posting record.
+        network (str | None): The dossier's network (see :func:`_reference`).
 
     Returns:
         dict[str, str]: ``{posting_network: …, posting_author: …, …}``.
     """
-    reference = _reference(posting, "posting")
+    reference = _reference(posting, "posting", network=network)
     fields: dict[str, str] = {}
     for key, prefixed in _POSTING_REFERENCE_KEYS.items():
         value = reference.get(key)
@@ -275,14 +281,40 @@ def _posting_fields(posting: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
+def _reacted_postings(dossier: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the other profiles' posts the account reacted to, shaped as postings.
+
+    Such a post is no entry of ``postings[]``: the export carries it only
+    inline, as the reaction's ``context``, and its media name it in
+    ``attachedTo`` with ``inFile: false``. Its id is the reaction's ``rootId``
+    — the post's, never the reaction's own. A post ``postings[]`` already holds
+    (the account reacting to its own post) is left to that entry.
+
+    Args:
+        dossier (dict[str, Any]): The parsed dossier.
+
+    Returns:
+        list[dict[str, Any]]: One posting-shaped record per reacted-to post, in file order.
+    """
+    own = {str(posting.get("id")) for posting in dossier.get("postings") or []}
+    reacted: dict[str, dict[str, Any]] = {}
+    for reaction in dossier.get("ownReactions") or []:
+        root = str(reaction.get("rootId") or "")
+        if reaction.get("rootKind") == "posting" and root and root not in own:
+            reacted.setdefault(root, {**(reaction.get("context") or {}), "id": root})
+    return list(reacted.values())
+
+
 def _dossier_documents(dossier: dict[str, Any], path: Path, data_dir: Path) -> list[Document]:
-    """Return one row-shaped Document per posting and per comment it received.
+    """Return one row-shaped Document per posting, per comment it received and per reacted-to post.
 
     The shape is a table row's — ``source: "table"`` plus ``table.style`` /
     ``row_index`` / ``n_rows`` — because node routing, social detection, the
     collection profile and extract posting units all key on it. Rows are
-    numbered in file order, each posting followed by its comments; an empty
-    text makes no row but keeps its number, as an empty table row did.
+    numbered in file order, each posting followed by its comments, then the
+    posts the account reacted to — ``postings``-style rows typed ``reaction``,
+    so none reads as the account's own. An empty text makes no row but keeps
+    its number, as an empty table row did.
 
     Args:
         dossier (dict[str, Any]): The parsed dossier.
@@ -290,18 +322,21 @@ def _dossier_documents(dossier: dict[str, Any], path: Path, data_dir: Path) -> l
         data_dir (Path): The batch root.
 
     Returns:
-        list[Document]: The posting and comment rows, in file order.
+        list[Document]: The posting, comment and reacted-to post rows, in file order.
     """
+    network = dossier.get("network")
     rows: list[tuple[str, dict[str, Any]]] = []
     for posting in dossier.get("postings") or []:
-        rows.append(("postings", _reference(posting, "posting")))
+        rows.append(("postings", _reference(posting, "posting", network=network)))
         comments = posting.get("comments") or []
         texts = {comment.get("id"): comment.get("text") for comment in comments}
         for comment in comments:
             parent_text = texts.get(comment.get("parentCommentId"))
-            rows.append(
-                ("comments", _reference(comment, "comment", anchor_text=posting.get("text"), parent_text=parent_text))
+            reference = _reference(
+                comment, "comment", network=network, anchor_text=posting.get("text"), parent_text=parent_text
             )
+            rows.append(("comments", reference))
+    rows += [("postings", _reference(post, "reaction", network=network)) for post in _reacted_postings(dossier)]
     # Every profile's file is called dossier.json and the documents listing keys
     # by name, so a row names its file by its path within the batch.
     name = path.relative_to(data_dir).as_posix()
@@ -335,7 +370,8 @@ def _dossier_links(
     """Join every media item to the postings that own it, resolved to its file.
 
     A link is explicit when either side names the other — ``posting.mediaIds``
-    or ``media.attachedTo.postings``; only postings in this dossier count. A
+    or ``media.attachedTo.postings``; only postings this dossier carries count,
+    its own and the posts it reacted to (:func:`_reacted_postings`). A
     media item neither side names is attached by the album rule when
     ``album_tolerance_s`` is set, else it is left unlinked — and unclaimed, so
     the standalone passes still ingest it. Only the basename of ``media.file``
@@ -352,12 +388,13 @@ def _dossier_links(
     Returns:
         list[MediaLink]: One per (media file, owning posting) pair.
     """
-    postings = {str(posting["id"]): posting for posting in dossier.get("postings") or [] if posting.get("id")}
+    own = [posting for posting in dossier.get("postings") or [] if posting.get("id")]
+    postings = {str(posting["id"]): posting for posting in [*own, *_reacted_postings(dossier)]}
     owners: dict[str, dict[str, None]] = {}  # media id -> ordered set of posting ids
     for uuid, posting in postings.items():
         for media_id in posting.get("mediaIds") or []:
             owners.setdefault(str(media_id), {})[uuid] = None
-    albums = build_posting_album_index(list(postings.values())) if album_tolerance_s is not None else {}
+    albums = build_posting_album_index(own) if album_tolerance_s is not None else {}
     files = build_file_index(folder)
     links: list[MediaLink] = []
     for item in dossier.get("media") or []:
@@ -395,7 +432,7 @@ def _dossier_links(
                     posting_id=str(posting.get("platformId") or ""),
                     media_id=str(item.get("platformId") or media_id),
                     path=matches[0],
-                    posting_ref=_posting_fields(posting),
+                    posting_ref=_posting_fields(posting, dossier.get("network")),
                 )
             )
     return links
@@ -466,6 +503,7 @@ class SocialLinker:
                 "dossiers",
                 "unreadable",
                 "postings",
+                "reacted",
                 "comments",
                 "explicit",
                 "album",
@@ -475,6 +513,7 @@ class SocialLinker:
                 "unlinked",
                 "messages",
                 "own_comments",
+                "other_reactions",
             ),
             0,
         )
@@ -495,23 +534,28 @@ class SocialLinker:
                 counts["unreadable"] += 1
                 logger.warning("Social linker skipped '{}': {}", path.relative_to(data_dir).as_posix(), exc)
                 continue
-            postings = sum(1 for doc in documents if doc.metadata["table"]["style"] == "postings")
+            kinds = Counter(doc.metadata["reference_metadata"]["type"] for doc in documents)
             counts["dossiers"] += 1
-            counts["postings"] += postings
-            counts["comments"] += len(documents) - postings
+            counts["postings"] += kinds["posting"]
+            counts["reacted"] += kinds["reaction"]
+            counts["comments"] += kinds["comment"]
             counts["messages"] += len(dossier.get("messages") or [])
             counts["own_comments"] += len(dossier.get("ownComments") or [])
+            counts["other_reactions"] += sum(
+                1 for reaction in dossier.get("ownReactions") or [] if reaction.get("rootKind") != "posting"
+            )
             result.documents.extend(documents)
         if not counts["dossiers"] and not counts["unreadable"]:
             return result
         skipped = counts["missing"] + counts["no_file"] + counts["ambiguous"] + counts["unlinked"]
         logger.info(
-            "Social linker: {} dossiers ({} unreadable), {} postings and {} comments; {} media linked "
-            "({} explicitly, {} by album inference), {} skipped ({} missing from the export, "
+            "Social linker: {} dossiers ({} unreadable), {} postings, {} reacted-to postings and {} comments; "
+            "{} media linked ({} explicitly, {} by album inference), {} skipped ({} missing from the export, "
             "{} with no local file, {} with an ambiguous filename, {} with no posting).",
             counts["dossiers"],
             counts["unreadable"],
             counts["postings"],
+            counts["reacted"],
             counts["comments"],
             counts["explicit"] + counts["album"],
             counts["explicit"],
@@ -522,12 +566,13 @@ class SocialLinker:
             counts["ambiguous"],
             counts["unlinked"],
         )
-        if counts["messages"] or counts["own_comments"]:
+        if counts["messages"] or counts["own_comments"] or counts["other_reactions"]:
             logger.warning(
-                "Social linker: {} messages and {} own comments are not ingested; the export format "
-                "has no sample of them yet.",
+                "Social linker: {} messages, {} own comments and {} reactions to something other than a posting "
+                "are not ingested; the export format has no sample of them yet.",
                 counts["messages"],
                 counts["own_comments"],
+                counts["other_reactions"],
             )
         try:
             routed = self._route(links)
