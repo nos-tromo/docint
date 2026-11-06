@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from docint.core.retention import ExpiringItem, RetentionPeriodState, document_expires_at
+from docint.core.retention import ExpiringItem, RetentionPeriodState, deadline_under
 from docint.core.state.base import _make_session_maker
 from docint.core.state.document_retention import DocumentRetention
 
@@ -66,9 +66,7 @@ def _deadline(ingested_at: datetime, period: RetentionPeriodState, notice_days: 
     Returns:
         datetime | None: The deadline; ``None`` while retention is off.
     """
-    if period.days is None:
-        return None
-    return document_expires_at(ingested_at, period.days, set_at=period.set_at, notice_days=notice_days)
+    return deadline_under(ingested_at, period, notice_days)
 
 
 @dataclass(slots=True)

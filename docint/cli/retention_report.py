@@ -19,7 +19,7 @@ from pathlib import Path
 from loguru import logger
 
 from docint.core.rag import RAG
-from docint.core.retention import ExpiringItem, RetentionPeriodState, document_expires_at, is_due, is_warning_within
+from docint.core.retention import ExpiringItem, RetentionPeriodState, deadline_under, is_due, is_warning_within
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.document_retention import DocumentRetention
 from docint.core.state.document_retention_manager import DocumentRetentionManager
@@ -106,7 +106,7 @@ def hypothetical_items(
             row.file_hash,
             row.filename or row.file_hash,
             row.ingested_at,
-            document_expires_at(row.ingested_at, period.days, set_at=period.set_at, notice_days=notice_days),
+            deadline_under(row.ingested_at, period, notice_days),
         )
         for row in rows
     ]

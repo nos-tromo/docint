@@ -112,12 +112,15 @@ def test_due_and_warning() -> None:
 
 
 def test_period_change_rewrites_set_at_same_period_keeps_it(mgr: CollectionOwnerManager) -> None:
-    """Recording the same period keeps when it took effect; another period takes effect now."""
+    """The same period keeps when it took effect; another takes effect now, keeping the rule in force."""
     first = mgr.record_retention_period(365, now=NOW)
-    assert first == RetentionPeriodState(days=365, set_at=NOW)
+    assert first == RetentionPeriodState(days=365, set_at=NOW, grace_until=NOW + 30 * DAY)
     assert mgr.record_retention_period(365, now=NOW + DAY) == first
-    assert mgr.record_retention_period(180, now=NOW + 2 * DAY) == RetentionPeriodState(days=180, set_at=NOW + 2 * DAY)
-    assert mgr.retention_period() == RetentionPeriodState(days=180, set_at=NOW + 2 * DAY)
+    shorter = RetentionPeriodState(
+        days=180, set_at=NOW + 2 * DAY, grace_until=NOW + 32 * DAY, in_force_days=365, in_force_grace=NOW + 30 * DAY
+    )
+    assert mgr.record_retention_period(180, now=NOW + 2 * DAY) == shorter
+    assert mgr.retention_period() == shorter
     assert mgr.record_retention_period(None, now=NOW + 3 * DAY) == RetentionPeriodState(days=None, set_at=NOW + 3 * DAY)
 
 
@@ -127,4 +130,6 @@ def test_legacy_window_row_counts_as_a_change(mgr: CollectionOwnerManager) -> No
         s.add(RetentionState(id=1, window="6m", window_set_at=NOW - 400 * DAY))
         s.commit()
     assert mgr.retention_period() is None
-    assert mgr.record_retention_period(365, now=NOW) == RetentionPeriodState(days=365, set_at=NOW)
+    assert mgr.record_retention_period(365, now=NOW) == RetentionPeriodState(
+        days=365, set_at=NOW, grace_until=NOW + 30 * DAY
+    )

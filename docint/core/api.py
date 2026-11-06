@@ -93,6 +93,7 @@ from docint.core.retention import (
     inherit,
     is_due,
     is_warning_within,
+    next_period_state,
     run_retention_loop,
 )
 from docint.core.retention_sources import extract_expiry, source_expiry
@@ -281,8 +282,10 @@ def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPer
     now = datetime.now(UTC)
     try:
         owners = rag.ensure_collection_owner_manager()
-        _carry_derived_deadlines(owners.retention_period(), retention, now)
-        state = owners.record_retention_period(retention.days, now=now)
+        previous = owners.retention_period()
+        planned = next_period_state(previous, retention.days, retention.notice_days, now)
+        _carry_derived_deadlines(previous, planned)
+        state = owners.record_retention_period(retention.days, notice_days=retention.notice_days, now=now)
         rag.ensure_document_retention_manager().recompute(state, notice_days=retention.notice_days)
     except Exception as exc:
         logger.error("Could not record the document retention period: {}", exc)
@@ -295,6 +298,8 @@ def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPer
             "period_days": retention.days,
             "notice_days": retention.notice_days,
             "since": state.set_at.isoformat(),
+            "grace_until": None if state.days is None else state.grace_end(retention.notice_days).isoformat(),
+            "in_force_days": state.in_force_days,
         },
     )
     logger.info(
@@ -306,37 +311,35 @@ def _record_retention_period(retention: DocumentRetentionConfig) -> RetentionPer
     return state
 
 
-def _carry_derived_deadlines(
-    previous: RetentionPeriodState | None, retention: DocumentRetentionConfig, now: datetime
-) -> None:
+def _carry_derived_deadlines(previous: RetentionPeriodState | None, state: RetentionPeriodState) -> None:
     """Carry chat and report deadlines over to a changed period, before it is recorded.
 
-    A document's deadline is its ingest plus the period, or the grace end when
-    that is later, and a chat's or report's is its earliest source's. So a
-    period shortened by ``n`` days moves every stored deadline ``n`` days
-    forward, though never inside the new notice period, which is exact in
-    both cases. A longer period keeps the earlier dates: nothing outlives its
-    sources. Switching off clears them, as nothing is deleted then, and the
-    first sweep after switching on stamps them afresh. Running before the
-    period is recorded means a failure is retried at the next startup, where
-    at worst it moves dates forward twice.
+    A document's deadline under a shortened period is its ingest plus the new
+    period, never before the new notice ends, and never later than the rule
+    in force before the change allowed; a chat's or report's is its earliest
+    source's. So a period shortened by ``n`` days against the rule in force
+    moves every stored deadline ``n`` days forward, never inside the new
+    notice and never later. A longer period keeps the earlier dates: nothing
+    outlives its sources. Switching off clears them, as nothing is deleted
+    then, and the first sweep after switching on stamps them afresh. Running
+    before the period is recorded means a failure is retried at the next
+    startup, where at worst it moves dates forward twice.
 
     Args:
         previous (RetentionPeriodState | None): The period recorded so far.
-        retention (DocumentRetentionConfig): The period now configured.
-        now (datetime): The startup time; the new grace starts here.
+        state (RetentionPeriodState): The period about to be recorded (:func:`next_period_state`).
     """
-    if previous is None or previous.days is None or previous.days == retention.days:
+    if previous is None or previous.days is None or previous.days == state.days:
         return
     sessions, reports = rag.ensure_session_manager(), rag.ensure_report_manager()
-    if retention.days is None:
+    if state.days is None:
         sessions.clear_session_expiries()
         reports.clear_report_expiries()
         return
-    if retention.days > previous.days:
+    if state.in_force_days is None or state.grace_until is None:
         return
-    sooner = timedelta(days=previous.days - retention.days)
-    floor = now + timedelta(days=retention.notice_days)
+    sooner = timedelta(days=state.in_force_days - state.days)
+    floor = state.grace_until
     moved = sessions.shift_session_expiries(sooner, floor=floor) + reports.shift_report_expiries(sooner, floor=floor)
     logger.info(
         "Document retention shortened by {} days; {} chat and report deadlines moved forward.", sooner.days, moved
