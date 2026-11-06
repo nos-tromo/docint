@@ -116,12 +116,27 @@ def _build(client: Any, root: Path, name: str = COLL) -> TopicRun:
     Returns:
         The active run.
     """
-    store = TopicStore(root)
-    service = TopicsService(
+    _job(client, root, "build", name)
+    run = TopicStore(root).active(name, owner_created_at=CREATED)
+    assert run is not None
+    return run
+
+
+def _job(client: Any, root: Path, action: Any, name: str = COLL, **options: Any) -> None:
+    """Run one topics job with the scripted fit and no labeller.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        action: The action.
+        name: Collection name.
+        **options: The job's settings.
+    """
+    TopicsService(
         TopicsDeps(
             client=client,
             fit=FakeFit(BLOBS),
-            store=store,
+            store=TopicStore(root),
             labeller=None,
             config=_cfg(),
             embed_model=EMBED,
@@ -129,18 +144,15 @@ def _build(client: Any, root: Path, name: str = COLL) -> TopicRun:
             stop_words_sha256="0" * 64,
             sleep=lambda _s: None,
         )
-    )
-    service.run(
-        "build",
+    ).run(
+        action,
         name,
         logical="docs",
         owner_created_at=lambda: CREATED,
         progress=lambda _stage, _done, _total: None,
         warn=lambda _code, _message: None,
+        **options,
     )
-    run = store.active(name, owner_created_at=CREATED)
-    assert run is not None
-    return run
 
 
 def _source(point: Any) -> dict[str, Any]:
@@ -223,8 +235,11 @@ def test_overview_counts_coverage_and_sorts_topics_by_size(client: QdrantClient,
     assert [t["id"] for t in out["topics"]] == [1, 2, 0]
     assert [t["size"] for t in out["topics"]] == [40, 30, 20]
     assert out["topics"][0]["share"] == round(40 / total, 4)
+    assert out["leaf_count"] == len(SIZES)
+    assert [t["members"] for t in out["topics"]] == [[1], [2], [0]]
     assert set(out["topics"][0]) == {
         "id",
+        "members",
         "label",
         "description",
         "keywords",
@@ -360,6 +375,146 @@ def test_chunks_page_with_a_cursor_and_a_bad_cursor_raises(client: QdrantClient,
         views.chunks(client, run, COLL, 2, cursor="not a cursor", limit=25, source_of=_source)
     with pytest.raises(InvalidCursorError):
         views.chunks(client, run, COLL, 2, cursor=encode_cursor([1]), limit=25, source_of=_source)
+
+
+def _grouped(run: TopicRun, *groups: list[int]) -> TopicRun:
+    """Present a run through a reduction, as a stored one would.
+
+    Args:
+        run: The run.
+        *groups: Each group's leaf ids.
+
+    Returns:
+        The run with those groups in its record.
+    """
+    return TopicRun(run.run_id, {**run.record, "groups": [list(group) for group in groups]}, run.table)
+
+
+def test_a_group_is_listed_once_with_its_leaves_counts_summed(client: QdrantClient, run: TopicRun) -> None:
+    """A group of topics 0 and 2 is one topic of 50 chunks, listed under 0 with its members.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    out = views.overview(client, _grouped(run, [0, 2]), COLL, embed_model=EMBED, ensure_indexes=_no_ensure)
+
+    assert out is not None
+    assert [(t["id"], t["size"], t["members"]) for t in out["topics"]] == [
+        (0, SIZES[0] + SIZES[2], [0, 2]),
+        (1, SIZES[1], [1]),
+    ]
+    assert out["leaf_count"] == len(SIZES)
+    assert out["coverage"]["assigned"] == sum(SIZES)
+    total = out["coverage"]["total"]
+    assert out["topics"][0]["share"] == round((SIZES[0] + SIZES[2]) / total, 4)
+
+
+def test_a_topic_merged_into_a_group_has_no_views_of_its_own(client: QdrantClient, run: TopicRun) -> None:
+    """Topic 2 inside the group under 0 has no evidence, documents or chunks; the group has.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    grouped, dense = _grouped(run, [0, 2]), dense_vector(client, COLL)
+    assert views.evidence(client, grouped, COLL, 2, dense=dense, limit=3, source_of=_source) is None
+    assert views.documents(client, grouped, COLL, 2, limit=5, names=dict) is None
+    assert views.chunks(client, grouped, COLL, 2, cursor=None, limit=5, source_of=_source) is None
+
+
+def test_a_groups_views_read_all_of_its_leaves(client: QdrantClient, run: TopicRun) -> None:
+    """A group's documents and chunks cover both leaves, and its evidence ranks by the group centre.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    grouped = _grouped(run, [0, 2])
+    docs = views.documents(client, grouped, COLL, 0, limit=10, names=dict)
+    assert docs is not None
+    assert {d["file_hash"]: d["count"] for d in docs["documents"]} == {
+        "hash-a": HASH_A,
+        "hash-b": SIZES[0] - HASH_A,
+        "hash-2": SIZES[2],
+    }
+    page = views.chunks(client, grouped, COLL, 0, cursor=None, limit=200, source_of=_source)
+    assert page is not None
+    assert len(page["items"]) == SIZES[0] + SIZES[2]
+    assert {("blob0" in item["text"]) or ("blob2" in item["text"]) for item in page["items"]} == {True}
+
+    dense = dense_vector(client, COLL)
+    out = views.evidence(client, grouped, COLL, 0, dense=dense, limit=SIZES[0] + SIZES[2], source_of=_source)
+    assert out is not None
+    assert len(out) == SIZES[0] + SIZES[2]
+    centre = grouped.view.table.centre(0)
+    assert centre is not None
+    scores = [source["score"] for source in out]
+    assert scores == sorted(scores, reverse=True)
+    # Topic 2 has the larger fit, so the weighted centre lies nearer its blob.
+    assert "blob2" in out[0]["text"]
+
+
+def test_tuning_shows_every_topic_unreduced_with_the_tree_and_the_written_labels(
+    client: QdrantClient, run: TopicRun
+) -> None:
+    """Tuning lists the leaves with their sizes, the merge tree, the stored groups and the written group labels.
+
+    Args:
+        client: Qdrant client.
+        run: The active run.
+    """
+    assert views.tuning(client, None, COLL, ensure_indexes=_no_ensure) is None
+    labels = {"0,2": {"label": "Zero and two", "description": "Both."}, "bad": {"label": ""}, "0,1": "x"}
+    reduced = TopicRun(run.run_id, {**run.record, "groups": [[0, 2]], "group_labels": labels}, run.table)
+
+    out = views.tuning(client, reduced, COLL, ensure_indexes=_no_ensure)
+
+    assert out is not None
+    assert out["run_id"] == run.run_id
+    assert out["min_topic_size"] == run.record["params"]["min_topic_size"]
+    assert [(leaf["id"], leaf["size"]) for leaf in out["leaves"]] == [(0, SIZES[0]), (1, SIZES[1]), (2, SIZES[2])]
+    assert all(leaf["fit_size"] > 0 and isinstance(leaf["label"], str) for leaf in out["leaves"])
+    assert len(out["merges"]) == len(SIZES) - 1
+    assert all(len(step) == 3 for step in out["merges"])
+    assert out["groups"] == [[0, 2]]
+    assert out["group_labels"] == {"0,2": "Zero and two"}
+    json.dumps(out)
+
+
+def test_tuning_reports_the_last_relax_and_when_the_pool_has_moved_on(client: QdrantClient, tmp_path: Path) -> None:
+    """Before a relax there is no histogram; after one it is current until the pool it measured changes.
+
+    Args:
+        client: Qdrant client.
+        tmp_path: Per-test directory.
+    """
+    root = tmp_path / "topics"
+    run = _build(client, root)
+
+    def relax_state() -> dict[str, Any]:
+        """Read the tuning view's relax block for the stored run.
+
+        Returns:
+            The block.
+        """
+        stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+        out = views.tuning(client, stored, COLL, ensure_indexes=_no_ensure)
+        assert out is not None
+        return out["relax"]
+
+    assert relax_state() == {"threshold": None, "histogram": None, "applied": 0, "stale": True}
+
+    _job(client, root, "relax", run_id=run.run_id, threshold=None)
+    measured = relax_state()
+    assert measured["stale"] is False and measured["applied"] == 0 and measured["threshold"] is None
+    assert measured["histogram"] is not None and sum(measured["histogram"]) == OUTLIERS
+
+    far = np.zeros(DIM)
+    far[DIM - 1] = 1.0
+    add_points(client, COLL, [(pid, far, {"search_text": _text(pid, "far")}) for pid in uuid_ids(2000)[1990:]])
+    _job(client, root, "align")
+    assert relax_state()["stale"] is True
 
 
 def _rag(client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, created: str) -> RAG:

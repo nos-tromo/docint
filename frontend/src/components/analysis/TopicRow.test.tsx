@@ -155,6 +155,20 @@ describe('TopicRow', () => {
     expect(onToggle).toHaveBeenCalledTimes(1)
   })
 
+  it('says how many topics a merged one was made from', () => {
+    stubApi()
+    renderRow({ expanded: false, topic: { ...TOPIC, members: [TOPIC.id, 9, 12] } })
+
+    expect(screen.getByText('from 3 topics')).toBeInTheDocument()
+  })
+
+  it('says nothing of members for a topic on its own', () => {
+    stubApi()
+    renderRow({ expanded: false, topic: { ...TOPIC, members: [TOPIC.id] } })
+
+    expect(screen.queryByText(/from \d+ topics/)).not.toBeInTheDocument()
+  })
+
   it('shows a one-day span as a single date', () => {
     stubApi()
     renderRow({ expanded: false })

@@ -143,6 +143,7 @@ export function TopicRow({ topic, runId, expanded, onToggle, onAsk }: TopicRowPr
   const keywords = topic.keywords.slice(0, ROW_KEYWORDS).map(([word]) => word)
   const seen = seenRange(topic, lang, t)
   const passages = chunks.data?.pages.flatMap((page) => page.items) ?? []
+  const merged = (topic.members?.length ?? 1) > 1
 
   return (
     <li data-testid="topic-row">
@@ -162,9 +163,10 @@ export function TopicRow({ topic, runId, expanded, onToggle, onAsk }: TopicRowPr
               })}
             </span>
           </div>
-          {(topic.origin === 'discover' || keywords.length > 0 || seen) && (
+          {(topic.origin === 'discover' || merged || keywords.length > 0 || seen) && (
             <div className="flex flex-wrap items-center gap-1">
               {topic.origin === 'discover' && <Badge variant="accent">{t('topics.origin_new')}</Badge>}
+              {merged && <Badge variant="accent">{t('topics.merged_from', { count: topic.members?.length ?? 1 })}</Badge>}
               {keywords.map((word) => (
                 <Badge key={word} variant="neutral" className="max-w-full wrap-anywhere">
                   {word}

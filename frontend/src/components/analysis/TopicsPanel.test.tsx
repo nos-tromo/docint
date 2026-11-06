@@ -259,7 +259,7 @@ describe('TopicsPanel', () => {
     expect(screen.getByText(sizeShare)).toBeInTheDocument()
   })
 
-  it('orders the header actions rebuild, find new, align, download', async () => {
+  it('orders the header actions rebuild, find new, align, download, fine-tuning', async () => {
     stubApi()
     renderPanel()
     await screen.findByText(/3 topics/)
@@ -269,7 +269,8 @@ describe('TopicsPanel', () => {
       'Restart analysis',
       'Find new topics',
       'Align pending chunks',
-      'Download CSV'
+      'Download CSV',
+      'Show fine-tuning'
     ])
   })
 
@@ -284,7 +285,8 @@ describe('TopicsPanel', () => {
       'Find new topics',
       'Align pending chunks',
       'Add to report',
-      'Download CSV'
+      'Download CSV',
+      'Show fine-tuning'
     ])
   })
 
@@ -441,6 +443,18 @@ describe('TopicsPanel', () => {
     expect(await screen.findByText('Working on the topics…')).toBeInTheDocument()
     expect(screen.queryByText(/Backend prose/)).not.toBeInTheDocument()
     expect(screen.queryByText('Starting the topics run…')).not.toBeInTheDocument()
+  })
+
+  it('says a tuning job asked about a replaced run applied nothing', async () => {
+    stubApi()
+    deliver('job-1', 'topics_started', { collection: COLLECTION, action: 'reduce' }, 0)
+    deliver('job-1', 'warning', { code: 'run_changed', message: 'x' }, 1000)
+    deliver('job-1', 'topics_completed', { collection: COLLECTION, empty: true })
+    renderPanel()
+
+    expect(
+      await screen.findByText('The topics changed meanwhile, so nothing was applied. Try again.')
+    ).toBeInTheDocument()
   })
 
   it('words the stages and warnings in German', async () => {

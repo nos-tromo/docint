@@ -349,3 +349,19 @@ def test_rule_fields_names_every_field_the_rules_name() -> None:
 
     assert rule_fields(rules) == {"page", "author", "posting_author"}
     assert rule_fields(None) == set()
+
+
+def test_an_in_rule_over_topic_values_matches_any_of_them_on_every_path() -> None:
+    """A merged topic's focus is one ``in`` rule over its leaves' values: MatchAny natively, IN otherwise."""
+    rules = [{"field": "docint_topic", "operator": "in", "values": ["r:0", "r:2"]}]
+
+    compiled = build_qdrant_filter(rules)
+    assert compiled is not None
+    must: list[Any] = list(compiled.must or [])
+    assert len(must) == 1
+    assert isinstance(must[0], models.FieldCondition)
+    assert must[0].key == "docint_topic"
+    assert must[0].match == models.MatchAny(any=["r:0", "r:2"])
+    assert _compiles_for_qdrant(rules)
+    assert matches_metadata_filters({"docint_topic": "r:2"}, rules)
+    assert not matches_metadata_filters({"docint_topic": "r:1"}, rules)

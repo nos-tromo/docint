@@ -217,6 +217,7 @@ function topicName(topic: TopicSummary, cut: boolean): string {
  *
  * Values of another run, and the run's unassigned chunks, name no topic of the
  * active run, so they are left out rather than shown under a topic they are not in.
+ * The values of a merged topic's members count as one topic.
  */
 function TopicBadges({
   topics,
@@ -225,12 +226,12 @@ function TopicBadges({
   topics: NonNullable<DocumentRecord['topics']>
   known: Map<string, TopicSummary>
 }) {
-  const placed = topics
-    .flatMap(({ topic, count }) => {
-      const summary = known.get(topic)
-      return summary ? [{ summary, count }] : []
-    })
-    .sort((a, b) => b.count - a.count)
+  const counts = new Map<TopicSummary, number>()
+  for (const { topic, count } of topics) {
+    const summary = known.get(topic)
+    if (summary) counts.set(summary, (counts.get(summary) ?? 0) + count)
+  }
+  const placed = [...counts].map(([summary, count]) => ({ summary, count })).sort((a, b) => b.count - a.count)
   if (placed.length === 0) return <span className="text-muted-foreground">—</span>
   const shown = placed.slice(0, TOPIC_BADGES)
   const rest = placed.slice(TOPIC_BADGES)

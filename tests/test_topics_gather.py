@@ -17,6 +17,7 @@ from topics_fakes import DENSE_NAME, DIM, RecordingClient, add_points, make_coll
 from docint.core.topics import gather
 from docint.core.topics.gather import (
     FILE_HASH_FIELD,
+    RELAXED_FIELD,
     RUN_FIELD,
     TOPIC_FIELD,
     DenseVector,
@@ -32,7 +33,9 @@ from docint.core.topics.gather import (
     parse_topic_value,
     pending_filter,
     point_text,
+    relaxed_filter,
     retrieve_candidates,
+    revert_relaxed,
     run_filter,
     scan_ids,
     topic_counts,
@@ -174,16 +177,21 @@ class _SchemaClient:
         self.calls.append(("create", field_name))
 
 
-def test_ensure_topic_indexes_creates_three_keyword_indexes() -> None:
+def test_ensure_topic_indexes_creates_four_keyword_indexes() -> None:
     """Each unindexed key gets one KEYWORD index and nothing is deleted."""
     stub = _SchemaClient({})
     ensure_topic_indexes(stub, COLL)
-    assert stub.calls == [("create", TOPIC_FIELD), ("create", RUN_FIELD), ("create", FILE_HASH_FIELD)]
+    assert stub.calls == [
+        ("create", TOPIC_FIELD),
+        ("create", RUN_FIELD),
+        ("create", RELAXED_FIELD),
+        ("create", FILE_HASH_FIELD),
+    ]
 
 
 def test_ensure_topic_indexes_replaces_a_wrong_kind_index() -> None:
     """A text index is dropped before the keyword one; a keyword one is left alone."""
-    stub = _SchemaClient({TOPIC_FIELD: "keyword", RUN_FIELD: "text"})
+    stub = _SchemaClient({TOPIC_FIELD: "keyword", RUN_FIELD: "text", RELAXED_FIELD: "keyword"})
     ensure_topic_indexes(stub, COLL)
     assert stub.calls == [("delete", RUN_FIELD), ("create", RUN_FIELD), ("create", FILE_HASH_FIELD)]
 
@@ -436,8 +444,8 @@ def test_document_counts_facet_file_hash_within_a_topic(client: QdrantClient) ->
     ids = _seed(client)
     write_assignments(client, COLL, "r1", {0: ids[:5], 1: ids[5:]})
     # Indices 0..4 carry hashes h0,h1,h0,h1,h0.
-    assert document_counts(client, COLL, "r1", 0, limit=10) == [("h0", 3), ("h1", 2)]
-    assert document_counts(client, COLL, "r1", 1, limit=10) == [("h1", 1)]
+    assert document_counts(client, COLL, "r1", (0,), limit=10) == [("h0", 3), ("h1", 2)]
+    assert document_counts(client, COLL, "r1", (1,), limit=10) == [("h1", 1)]
 
 
 def test_central_points_rank_by_closeness_within_the_topic_and_the_extra_filter(client: QdrantClient) -> None:
@@ -450,11 +458,13 @@ def test_central_points_rank_by_closeness_within_the_topic_and_the_extra_filter(
     write_assignments(client, COLL, "r1", {0: ids[:4]})
     dense = dense_vector(client, COLL)
     centre = np.asarray(_vec(2), dtype=np.float32)
-    got = central_points(client, COLL, centre=centre, dense=dense, run_id="r1", topic_id=0, limit=3)
+    got = central_points(client, COLL, centre=centre, dense=dense, run_id="r1", topic_ids=(0,), limit=3)
     assert str(got[0].id) == ids[2]
     assert {str(p.id) for p in got} <= set(ids[:4])
     only_h1 = models.Filter(must=[models.FieldCondition(key=FILE_HASH_FIELD, match=models.MatchValue(value="h1"))])
-    narrowed = central_points(client, COLL, centre=centre, dense=dense, run_id="r1", topic_id=0, limit=3, extra=only_h1)
+    narrowed = central_points(
+        client, COLL, centre=centre, dense=dense, run_id="r1", topic_ids=(0,), limit=3, extra=only_h1
+    )
     assert {str(p.id) for p in narrowed} == {ids[1], ids[3]}
 
 
@@ -469,7 +479,7 @@ def test_member_page_pages_with_the_scroll_offset(client: QdrantClient) -> None:
     seen: list[str] = []
     offset: Any = None
     while True:
-        points, offset = member_page(client, COLL, run_id="r1", topic_id=0, offset=offset, limit=2)
+        points, offset = member_page(client, COLL, run_id="r1", topic_ids=(0,), offset=offset, limit=2)
         seen.extend(str(p.id) for p in points)
         if offset is None:
             break
@@ -493,3 +503,49 @@ def test_ids_and_text_helpers() -> None:
     merged = and_filters(topic_filter("r", 1), None, pending_filter("r"))
     assert isinstance(merged.must, list) and len(merged.must) == 2
     assert isinstance(merged.must_not, list) and len(merged.must_not) == 1
+
+
+def test_a_topic_filter_over_several_leaves_selects_their_union(client: QdrantClient) -> None:
+    """One id matches by value; several match any of their values, as one group reads.
+
+    Args:
+        client: Qdrant client.
+    """
+    ids = _seed(client)
+    write_assignments(client, COLL, "r1", {0: ids[:2], 1: ids[2:5], 2: ids[5:6]})
+    single = topic_filter("r1", 1)
+    assert isinstance(single.must, list) and isinstance(single.must[0], models.FieldCondition)
+    assert isinstance(single.must[0].match, models.MatchValue)
+    assert topic_filter("r1", [1]).must == single.must
+    union = topic_filter("r1", (0, 2))
+    assert isinstance(union.must, list) and isinstance(union.must[0], models.FieldCondition)
+    assert union.must[0].match == models.MatchAny(any=["r1:0", "r1:2"])
+    assert count(client, COLL, union) == 3
+
+
+def test_every_write_sets_the_relaxed_marker_and_undoing_it_touches_only_its_run(client: QdrantClient) -> None:
+    """A rule write clears the marker, a relaxed one sets the run's id, and a revert empties only that run's.
+
+    Args:
+        client: Qdrant client.
+    """
+    ids = _seed(client)
+    assert write_assignments(client, COLL, "r1", {0: ids[:2]}, relaxed={1: ids[2:4]}) == 4
+    points = {str(p.id): p.payload or {} for p in client.retrieve(COLL, ids)}
+    assert points[ids[0]][RELAXED_FIELD] == "" and points[ids[0]][TOPIC_FIELD] == "r1:0"
+    assert points[ids[2]][RELAXED_FIELD] == "r1" and points[ids[2]][TOPIC_FIELD] == "r1:1"
+    assert count(client, COLL, relaxed_filter("r1")) == 2
+    # Another run placed this one later and left; its own marker does not make it r1's.
+    write_assignments(client, COLL, "r2", {}, relaxed={3: ids[4:5]})
+    # A rule write over a relaxed point clears its marker.
+    write_assignments(client, COLL, "r1", {1: ids[3:4]})
+    assert count(client, COLL, relaxed_filter("r1")) == 1
+
+    revert_relaxed(client, COLL, "r1")
+
+    after = {str(p.id): p.payload or {} for p in client.retrieve(COLL, ids)}
+    assert (after[ids[2]][TOPIC_FIELD], after[ids[2]][RELAXED_FIELD]) == ("r1:-1", "")
+    assert after[ids[3]][TOPIC_FIELD] == "r1:1"
+    assert after[ids[0]][TOPIC_FIELD] == "r1:0"
+    assert (after[ids[4]][TOPIC_FIELD], after[ids[4]][RELAXED_FIELD]) == ("r2:3", "r2")
+    assert count(client, COLL, relaxed_filter("r1")) == 0

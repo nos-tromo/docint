@@ -141,6 +141,19 @@ def test_align_normalises_its_input() -> None:
     assert table.align(v).tolist() == table.align(v * 40).tolist() == [1]
 
 
+def test_nearest_names_the_best_row_and_its_cosine_whatever_the_floors() -> None:
+    """Nearest ignores floors: a vector below every floor still gets its best row and cosine.
+
+    Returns:
+        None.
+    """
+    table = _table([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], [0.99, 0.99, 0.99], ids=[2, 5, 8])
+    rows, cosines = table.nearest(np.array([[0.6, 0.8], [3.0, 0.0]]))
+    assert rows.tolist() == [1, 0]
+    assert np.allclose(cosines, [0.8, 1.0])
+    assert table.align(np.array([[0.6, 0.8]])).tolist() == [-1]
+
+
 def test_novel_keeps_candidates_below_the_similarity_bar() -> None:
     """0.69 is novel, 0.70 is not, at a bar of 0.7.
 

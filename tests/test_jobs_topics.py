@@ -143,6 +143,27 @@ async def test_a_second_topics_job_is_refused_but_an_ingest_beside_it_is_not() -
     await manager.stop()
 
 
+@pytest.mark.anyio
+async def test_a_topics_jobs_settings_stay_on_its_state_and_off_its_frames() -> None:
+    """A job's settings are kept for its runner and never echoed on a frame or the snapshot."""
+    manager = IngestJobManager(runner=_runner)
+    state, created = await manager.create_if_idle(
+        owner="alice",
+        logical_name="docs",
+        physical="p1",
+        kind="topics",
+        action="build",
+        topics_options={"min_topic_size": 7},
+    )
+    assert created
+    await _drain(state)
+
+    assert state.topics_options == {"min_topic_size": 7}
+    assert "min_topic_size" not in json.dumps(state.history())
+    assert "topics_options" not in state.snapshot()
+    await manager.stop()
+
+
 def test_topics_concurrency_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """``DOCINT_TOPICS_CONCURRENCY`` sizes the slot unless the caller passes one.
 

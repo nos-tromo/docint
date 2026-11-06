@@ -5,8 +5,10 @@ import {
   getTopicDocuments,
   getTopicEvidence,
   getTopics,
+  getTopicsTuning,
   startTopics,
-  type TopicsAction
+  type TopicsAction,
+  type TopicsRequest
 } from '@/api/topics'
 import { getSessionTopic } from '@/api/sessions'
 import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
@@ -95,7 +97,7 @@ export function useChatTopicFocus(): ChatTopicFocus {
 
 /** The rule the topic focus adds to a turn or a search, and whether it is decided yet. */
 export interface TopicFocusRuleState {
-  /** Null unless the focus names a topic of the active collection's active run (see {@link topicFocusRule}). */
+  /** Null unless the focus names a topic the active collection's active run shows (see {@link topicFocusRule}). */
   rule: MetadataFilter | null
   /** True while the open chat's topic, or its run, is still being read. */
   pending: boolean
@@ -114,7 +116,7 @@ export function useTopicFocusRule(): TopicFocusRuleState {
   const config = useConfig()
   const overview = useTopicsOverview(inScope)
   return {
-    rule: topicFocusRule(focus, scope, overview.data?.run_id ?? null),
+    rule: topicFocusRule(focus, scope, overview.data),
     // While the flag is unknown the run may still be read; once it is known, only a read in flight is.
     pending:
       focusPending ||
@@ -168,10 +170,29 @@ export function useTopicChunks(runId: string, topicId: number, enabled: boolean)
 export function useStartTopics() {
   const { collection } = useActiveCollection()
   return useMutation({
-    mutationFn: (action: TopicsAction) => {
+    mutationFn: ({ action, ...options }: TopicsRequest) => {
       if (!collection) return Promise.reject(new Error('No collection is selected'))
-      return startTopics(collection, action)
+      return startTopics(collection, action, options)
     }
+  })
+}
+
+/**
+ * What fine-tuning the active collection's topic run starts from: its topics
+ * before any reduction, the tree merges follow and the last relax. Read only
+ * while the fine-tuning controls are open — each read is an audited query —
+ * and again once a topics job ends, under the overview's prefix.
+ *
+ * @param enabled - False leaves it unread.
+ */
+export function useTopicsTuning(enabled: boolean) {
+  const scope = useActiveCollection()
+  const { collection } = scope
+  const { data: config } = useConfig()
+  return useQuery({
+    queryKey: ['topics', scope, 'tuning'],
+    queryFn: () => getTopicsTuning(collection ?? ''),
+    enabled: enabled && !!collection && config?.topics_enabled === true
   })
 }
 
@@ -211,8 +232,10 @@ const NO_JOB: TopicsJobState = {
   live: false
 }
 
+const TOPICS_ACTIONS: readonly unknown[] = ['build', 'discover', 'align', 'reduce', 'relax'] satisfies TopicsAction[]
+
 function isTopicsAction(value: unknown): value is TopicsAction {
-  return value === 'build' || value === 'discover' || value === 'align'
+  return TOPICS_ACTIONS.includes(value)
 }
 
 /**

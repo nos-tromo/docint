@@ -307,6 +307,22 @@ describe('DocumentTable topics', () => {
     expect(within(rowOf('old_minutes.pdf')).getAllByRole('cell')[5]).toHaveTextContent(/^—$/)
   })
 
+  it('counts a merged topic once, adding up the chunks of all its members', () => {
+    // Topics 2 and 5 read as one, under 2, so both values find the same topic.
+    const orbits = { ...topicSummary(2, 'Orbits and sails'), members: [2, 5] }
+    const merged = new Map(TOPICS)
+    merged.set(`${RUN}:2`, orbits)
+    merged.set(`${RUN}:5`, orbits)
+    render(<DocumentTable docs={TOPIC_DOCS} collection="mydocs" topics={merged} />, { wrapper })
+
+    const badges = within(rowOf('field_notes.pdf'))
+      .queryAllByTestId('topic-badge')
+      .map((badge) => badge.textContent)
+    // 6 + 1 chunks; tied with topic 4, it keeps the place its first value had.
+    expect(badges).toEqual(['T2 Orbits and sails 7', 'T4 Coastal navigation by ni… 7', 'T6 Kitchen gardens 4'])
+    expect(within(rowOf('field_notes.pdf')).getByText('+1')).toBeInTheDocument()
+  })
+
   it('hides the topics column without a run', () => {
     render(<DocumentTable docs={TOPIC_DOCS} collection="mydocs" />, { wrapper })
 

@@ -1601,6 +1601,35 @@ def test_discover_never_fits_topics_finer_than_the_build(client: QdrantClient, r
     assert params.min_topic_size == 4
 
 
+def test_a_build_asked_for_a_topic_size_fits_with_it_over_the_configured_and_automatic_one(
+    client: QdrantClient, root: Path
+) -> None:
+    """A size given with the job beats TOPICS_MIN_TOPIC_SIZE and the automatic size, and is recorded.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client, per=60)
+    fit = FakeFit(BLOBS)
+    svc = _service(client, root, fit, cfg=_cfg(min_topic_size=3))
+    svc.run(
+        "build",
+        COLL,
+        logical="coll",
+        owner_created_at=lambda: CREATED,
+        progress=Frames().progress,
+        warn=Frames().warn,
+        min_topic_size=7,
+    )
+    assert fit.requests[0][2].min_topic_size == 7
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and run.record["params"]["min_topic_size"] == 7
+    # Without one, the configured size applies again.
+    _run(_service(client, root, fit, cfg=_cfg(min_topic_size=3)), "build")
+    assert fit.requests[1][2].min_topic_size == 3
+
+
 def _strand_a_discover(
     client: QdrantClient, root: Path, monkeypatch: pytest.MonkeyPatch, cfg: TopicsConfig, written: list[str]
 ) -> tuple[str, list[str]]:
@@ -2243,6 +2272,418 @@ def test_the_outcome_artifact_carries_the_published_keys() -> None:
         "assigned": 10,
         "deferred": False,
     }
+
+
+class _Prompts:
+    """A fake chat model for labels that records each prompt it is sent."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """Start empty.
+
+        Args:
+            fail: Whether every call raises, so every label falls back.
+        """
+        self.prompts: list[str] = []
+        self.fail = fail
+
+    def __call__(self, prompt: str, response_format: dict[str, Any] | None) -> str:
+        """Record the prompt and answer with a label naming how many were asked.
+
+        Args:
+            prompt: The rendered prompt.
+            response_format: Ignored.
+
+        Returns:
+            A JSON reply.
+
+        Raises:
+            RuntimeError: When scripted to fail.
+        """
+        self.prompts.append(prompt)
+        if self.fail:
+            raise RuntimeError("model down")
+        return json.dumps({"label": f"Group label {len(self.prompts)}", "description": "A merged summary."})
+
+
+def _reduce(
+    svc: TopicsService,
+    run_id: str | None,
+    groups: Sequence[Sequence[int]],
+    frames: Frames | None = None,
+) -> TopicsOutcome:
+    """Run a reduce.
+
+    Args:
+        svc: The service.
+        run_id: The run the groups were drawn up against.
+        groups: The groups.
+        frames: Frame recorder; a fresh one when omitted.
+
+    Returns:
+        The outcome.
+    """
+    rec = frames or Frames()
+    return svc.run(
+        "reduce",
+        COLL,
+        logical="coll",
+        owner_created_at=lambda: CREATED,
+        progress=rec.progress,
+        warn=rec.warn,
+        run_id=run_id,
+        groups=groups,
+    )
+
+
+def _built(client: QdrantClient, root: Path) -> TopicRun:
+    """Build three topics over three blobs, labelled by the fake model.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+
+    Returns:
+        The active run.
+    """
+    _add_blobs(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None and [t.id for t in run.table.topics] == [0, 1, 2]
+    return run
+
+
+def test_a_reduce_stores_its_groups_and_labels_each_group_once(client: QdrantClient, root: Path) -> None:
+    """A new group is labelled from its own passages; the same group again, or after a reset, costs no call.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    before = _topics(client)
+    model = _Prompts()
+    svc = _service(client, root, labeller=TopicLabeller(model, template=DEFAULT_TEMPLATE))
+    frames = Frames()
+
+    outcome = _reduce(svc, run.run_id, [[2, 0]], frames)
+
+    assert outcome == TopicsOutcome("reduce", run.run_id, 3, 0, 0, empty=False)
+    assert len(model.prompts) == 1
+    assert "blob1" not in model.prompts[0]
+    assert "blob0" in model.prompts[0] and "blob2" in model.prompts[0]
+    assert "labelling" in frames.stages()
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 2]]
+    assert stored.record["group_labels"] == {"0,2": {"label": "Group label 1", "description": "A merged summary."}}
+    merged = stored.view.table.topic(0)
+    assert merged is not None and merged.label == "Group label 1"
+    assert stored.table.topics == run.table.topics
+    # Only the run's record changes: every chunk keeps its own topic.
+    assert _topics(client) == before
+
+    _reduce(svc, run.run_id, [[0, 2]])
+    reset = _reduce(svc, run.run_id, [])
+    assert reset.empty is False
+    cleared = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert cleared is not None and cleared.record["groups"] == []
+    assert cleared.view.members == {0: (0,), 1: (1,), 2: (2,)}
+    assert "0,2" in cleared.record["group_labels"]
+    _reduce(svc, run.run_id, [[0, 2]])
+    assert len(model.prompts) == 1
+
+
+def test_a_label_the_model_could_not_write_is_not_kept(client: QdrantClient, root: Path) -> None:
+    """A fallback label is not cached, so the group is labelled again next time; its groups still apply.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    model = _Prompts(fail=True)
+    svc = _service(client, root, labeller=TopicLabeller(model, template=DEFAULT_TEMPLATE))
+
+    _reduce(svc, run.run_id, [[0, 1]])
+    _reduce(svc, run.run_id, [[0, 1]])
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 1]]
+    assert stored.record["group_labels"] == {}
+    assert len(model.prompts) >= 2
+    merged = stored.view.table.topic(0)
+    assert merged is not None and merged.label == run.table.topics[0].label
+
+
+def test_without_labels_a_group_is_named_by_its_largest_topic(client: QdrantClient, root: Path) -> None:
+    """With TOPICS_LABELS off nothing is asked of a model and the group carries its largest topic's label.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    svc = TopicsService(replace(_service(client, root)._deps, labeller=None))
+
+    _reduce(svc, run.run_id, [[1, 2]])
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None and stored.record["group_labels"] == {}
+    merged = stored.view.table.topic(1)
+    assert merged is not None and merged.label == run.table.topics[1].label
+
+
+@pytest.mark.parametrize("groups", [[[0, 9]], [[0, 1], [1, 2]]])
+def test_a_reduce_for_another_run_or_unknown_topics_is_refused(
+    client: QdrantClient, root: Path, groups: list[list[int]]
+) -> None:
+    """A run id that is not the active run's, or groups the run cannot hold, are refused and store nothing.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+        groups: Groups the run cannot hold.
+    """
+    run = _built(client, root)
+    svc = _service(client, root)
+
+    with pytest.raises(TopicsRefused) as stale:
+        _reduce(svc, "20200101-000000-abcdef", [[0, 1]])
+    assert stale.value.code == "run_changed"
+    with pytest.raises(TopicsRefused) as unknown:
+        _reduce(svc, run.run_id, groups)
+    assert unknown.value.code == "run_changed"
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None and "groups" not in stored.record
+
+
+def test_a_cancelled_reduce_changes_nothing(client: QdrantClient, root: Path) -> None:
+    """A reduce stopped while its labels are written stores neither its groups nor any label.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+
+    def stop(stage: str, _done: int, _total: int) -> None:
+        """Cancel once labelling reports.
+
+        Args:
+            stage: The stage.
+            _done: Ignored.
+            _total: Ignored.
+
+        Raises:
+            Stop: At the first labelling frame.
+        """
+        if stage == "labelling":
+            raise Stop
+
+    with pytest.raises(Stop):
+        _reduce(_service(client, root), run.run_id, [[0, 1]], Frames(stop))
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None and "groups" not in stored.record and "group_labels" not in stored.record
+
+
+def test_a_reduction_outlives_later_aligns_and_discovers(client: QdrantClient, root: Path) -> None:
+    """Groups stay as stored while later jobs place chunks and widen dates.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    run = _built(client, root)
+    _reduce(_service(client, root), run.run_id, [[0, 1]])
+    _add_blobs(client, per=5, offset=500, seed=3)
+
+    _run(_service(client, root), "align")
+
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert stored.record["groups"] == [[0, 1]]
+    assert "0,1" in stored.record["group_labels"]
+
+
+#: Outliers' cosines to topic 0's centre, each well inside its own 0.01 histogram bin.
+OUTLIER_COSINES = (0.205, 0.305, 0.405, 0.455)
+
+
+def _add_outliers(client: QdrantClient, cosines: Sequence[float] = OUTLIER_COSINES, *, offset: int = 900) -> list[str]:
+    """Add points at a given cosine to blob 0, too far for the fit or a floor to place them.
+
+    Args:
+        client: Qdrant client.
+        cosines: Each point's cosine to blob 0's centre; its other part is orthogonal to every blob.
+        offset: Id offset.
+
+    Returns:
+        The ids, in the order of ``cosines``.
+    """
+    ids = _ids(len(cosines), offset)
+    rows = []
+    for pid, cosine in zip(ids, cosines, strict=True):
+        vector = np.zeros(DIM)
+        vector[0], vector[DIM - 1] = cosine, np.sqrt(1.0 - cosine**2)
+        rows.append((pid, vector, {"search_text": f"passage {pid} outlier words", "file_hash": "hx"}))
+    add_points(client, COLL, rows)
+    return ids
+
+
+def _relax(svc: TopicsService, run_id: str | None, threshold: float | None) -> TopicsOutcome:
+    """Run a relax.
+
+    Args:
+        svc: The service.
+        run_id: The run it is asked against.
+        threshold: The lowered bar, ``None`` to undo and measure.
+
+    Returns:
+        The outcome.
+    """
+    rec = Frames()
+    return svc.run(
+        "relax",
+        COLL,
+        logical="coll",
+        owner_created_at=lambda: CREATED,
+        progress=rec.progress,
+        warn=rec.warn,
+        run_id=run_id,
+        threshold=threshold,
+    )
+
+
+def _relaxed_marks(client: QdrantClient) -> dict[str, str]:
+    """Read every point's relaxed marker.
+
+    Args:
+        client: Qdrant client.
+
+    Returns:
+        Point id to its marker; points never written by a run are left out.
+    """
+    return {pid: p[gather.RELAXED_FIELD] for pid, p in _payloads(client).items() if gather.RELAXED_FIELD in p}
+
+
+def test_a_relax_places_chunks_at_or_above_its_bar_marks_them_and_undoes_exactly(
+    client: QdrantClient, root: Path
+) -> None:
+    """Each relax starts over; the marked chunks and the histogram follow the bar, and undoing restores the build.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    outliers = _add_outliers(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    built, floors = _topics(client), [t.floor for t in run.table.topics]
+    assert {built[pid] for pid in outliers} == {-1}
+    svc = _service(client, root)
+
+    placed = _relax(svc, run.run_id, 0.3)
+
+    assert placed == TopicsOutcome("relax", run.run_id, 3, 0, 3, empty=False)
+    topics, marks = _topics(client), _relaxed_marks(client)
+    assert [topics[pid] for pid in outliers] == [-1, 0, 0, 0]
+    assert [marks[pid] for pid in outliers] == ["", run.run_id, run.run_id, run.run_id]
+    assert all(marks[pid] == "" for pid in built if pid not in outliers)
+    stored = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert stored is not None
+    assert [t.floor for t in stored.table.topics] == floors
+    relax = stored.record["relax"]
+    assert relax["threshold"] == 0.3
+    assert relax["basis"] == len(outliers)
+    assert [i for i, n in enumerate(relax["histogram"]) if n] == [20, 30, 40, 45]
+    assert sum(relax["histogram"]) == len(outliers)
+
+    _relax(svc, run.run_id, 0.4)
+    assert [_topics(client)[pid] for pid in outliers] == [-1, -1, 0, 0]
+    assert count(client, COLL, gather.relaxed_filter(run.run_id)) == 2
+
+    undone = _relax(svc, run.run_id, None)
+
+    assert undone.assigned == 0
+    assert _topics(client) == built
+    assert set(_relaxed_marks(client).values()) == {""}
+    after = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert after is not None and after.record["relax"]["threshold"] is None
+    assert sum(after.record["relax"]["histogram"]) == len(outliers)
+
+
+def test_a_relax_places_a_chunk_the_rule_admits_without_its_marker(client: QdrantClient, root: Path) -> None:
+    """A pool chunk that clears its topic's floor, as an interrupted discover can leave one, is placed by the rule.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    ids = _add_blobs(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    gather.write_assignments(client, COLL, run.run_id, {-1: ids[:1]})
+
+    outcome = _relax(_service(client, root), run.run_id, None)
+
+    assert outcome.assigned == 1
+    assert _topics(client)[ids[0]] == 0
+    assert _relaxed_marks(client)[ids[0]] == ""
+
+
+def test_later_jobs_keep_the_floors_and_never_leave_an_old_marker(client: QdrantClient, root: Path) -> None:
+    """An align after a relax places new chunks by the rule, and a rebuild's write clears a relaxed chunk's marker.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    outliers = _add_outliers(client)
+    _run(_service(client, root), "build")
+    run = TopicStore(root).active(COLL, owner_created_at=CREATED)
+    assert run is not None
+    svc = _service(client, root)
+    _relax(svc, run.run_id, 0.3)
+    late = _add_outliers(client, (0.455,), offset=950)
+
+    _run(svc, "align")
+
+    assert _topics(client)[late[0]] == -1
+    assert _relaxed_marks(client)[late[0]] == ""
+    # A rebuild that wrote a relaxed chunk and was cancelled before it took over...
+    gather.write_assignments(client, COLL, "20200101-000000-abcdef", {0: outliers[3:]})
+    assert _relaxed_marks(client)[outliers[3]] == ""
+    _run(svc, "align")
+    # ...leaves it pending, re-placed by the rule, no longer the relax's to undo.
+    assert count(client, COLL, gather.relaxed_filter(run.run_id)) == 2
+    _relax(svc, run.run_id, None)
+    assert count(client, COLL, gather.relaxed_filter(run.run_id)) == 0
+    assert {_topics(client)[pid] for pid in [*outliers, *late]} == {-1}
+
+
+def test_a_relax_for_another_run_is_refused_and_writes_nothing(client: QdrantClient, root: Path) -> None:
+    """A relax asked against a run that is no longer active is refused before anything is written.
+
+    Args:
+        client: Qdrant client.
+        root: Store root.
+    """
+    _add_blobs(client)
+    _add_outliers(client)
+    _run(_service(client, root), "build")
+    before = _topics(client)
+
+    with pytest.raises(TopicsRefused) as caught:
+        _relax(_service(client, root), "20200101-000000-abcdef", 0.3)
+
+    assert caught.value.code == "run_changed"
+    assert _topics(client) == before
 
 
 def test_the_topics_package_imports_nothing_from_rag_state_or_api() -> None:

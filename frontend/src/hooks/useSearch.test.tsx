@@ -207,7 +207,7 @@ describe('useSearch', () => {
           embed_model: 'embed-small',
           embed_model_changed: false,
           coverage: { total: 10, assigned: 8, unassigned: 2, pending: 0 },
-          topics: []
+          topics: [{ id: 3, members: [3], label: 'Harbour cranes' }]
         })
       }
       return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })
@@ -267,7 +267,7 @@ describe('useSearch', () => {
           embed_model: 'embed-small',
           embed_model_changed: false,
           coverage: { total: 10, assigned: 8, unassigned: 2, pending: 0 },
-          topics: []
+          topics: [{ id: 3, members: [3], label: 'Harbour cranes' }]
         })
       }
       return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })
@@ -369,7 +369,7 @@ describe('useSearch', () => {
           embed_model: 'embed-small',
           embed_model_changed: false,
           coverage: { total: 10, assigned: 8, unassigned: 2, pending: 0 },
-          topics: []
+          topics: [{ id: 3, members: [3], label: 'Harbour cranes' }]
         })
       }
       return respond({ status: 'ok', hits: [], total: 0, next_cursor: null, index_status: INDEX_STATUS })

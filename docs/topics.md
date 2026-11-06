@@ -16,7 +16,7 @@ payload writes.
 ## Runs
 
 A collection has at most one **active** run, named by `active.json` in its
-store directory (see [The store and its lock](#the-store-and-its-lock)). Three
+store directory (see [The store and its lock](#the-store-and-its-lock)). Five
 actions work on it, each as a background job:
 
 | Action | What it does | Refused when |
@@ -24,6 +24,8 @@ actions work on it, each as a background job:
 | `build` | Samples the collection, fits a new run, assigns every eligible chunk to it, activates it and deletes every other run. | The sample is too small (`too_few_chunks`), or the collection was deleted and created again while the build ran (`collection_changed`). |
 | `discover` | Fits the active run's unassigned chunks and appends the topics that are new. Existing topics are untouched. | There is no active run (`no_run`), the dense vectors changed size since the build (`dimension_changed`), too few chunks are unassigned (`too_few_unassigned`), or the collection was deleted and created again while the discover ran (`collection_changed`). |
 | `align` | Assigns every eligible chunk the active run has not placed yet: chunks ingested since, or left behind by an interrupted job. | `no_run`, `dimension_changed` or `collection_changed`, as for discover. |
+| `reduce` | Stores which of the run's topics are read as one, and labels each new group (see [Fine-tuning](#fine-tuning)). No chunk is rewritten. | `no_run`, `dimension_changed` or `collection_changed`, as for discover; `run_changed` when the request names another run than the active one, or a topic the run lacks. |
+| `relax` | Places unassigned chunks under a lowered admission bar, or takes back the last such placement (see [Fine-tuning](#fine-tuning)). | As for reduce. |
 
 A refusal is not a failure: the job completes with `empty: true` and a warning
 carrying the code (see [Jobs and events](#jobs-and-events)).
@@ -49,7 +51,8 @@ cannot stay pending forever.
    prepared text is shorter than `TOPICS_MIN_TEXT_CHARS` leaves the sample.
    Points with an identical vector are fitted once: the first by point id
    represents the others.
-3. **Size.** The minimum topic size is `TOPICS_MIN_TOPIC_SIZE`, or, at `0`,
+3. **Size.** The minimum topic size is the job's `min_topic_size` when it
+   names one, else `TOPICS_MIN_TOPIC_SIZE`, or, at `0`,
    `round(√n / 3)` between 2 and 10 for a sample of `n` chunks, and from 813
    chunks on `n // 1000` between 10 and 100. A sample smaller than
    `max(8, 2 × minimum topic size)` is refused: 8 is the fewest points the
@@ -131,6 +134,92 @@ Align writes every **pending** chunk — every eligible chunk whose
 below, in up to five forward passes. The ingest stage runs the same pass at the
 end of an ingest job (see [The ingest stage](#the-ingest-stage)).
 
+## Fine-tuning
+
+A fit seldom finds the grain a reader needs at the first try: on a large
+collection it can find a hundred topics or more, many of them close
+neighbours. Three jobs adjust a run after its build, cheaply and, except for
+a rebuild, without losing anything: each can be undone.
+
+### Reduce: merging topics
+
+BERTopic's own `reduce_topics` needs the fitted model, which the fit service
+does not keep. docint merges topics as BERTopic does by topic embeddings
+instead (`reduce_topics(use_ctfidf=False)`), from the centres every run
+stores: average-linkage clustering over the cosine distance between topic
+centres orders the topics into a tree, whose first `k − n` merges leave `n` of
+the `k` topics (`docint/core/topics/reduce.py`). The tree costs milliseconds
+and no model call; `GET /collections/{name}/topics/tuning` sends it, and the
+SPA cuts it itself, so previewing a reduction asks nothing more of the server.
+
+A reduction is a **view**, never a rewrite:
+
+- The run keeps its own topics, the *leaves*, with their centres, floors and
+  keywords, and every chunk keeps the leaf it was placed in. Alignment,
+  discovery and the ingest stage go on working on the leaves.
+- The run's record stores the groups (`groups`: lists of two or more leaf
+  ids) and the labels written for them (`group_labels`, keyed by the members
+  joined with commas). Every read that shows, counts or filters topics goes
+  through the view (`TopicRun.view`): the overview, a topic's evidence,
+  documents and passages, the agent's topics tool, the CLI status, the CSV,
+  the report item and the topic focus.
+- A group is one topic under its **lowest** leaf id, so a topic that absorbs
+  others keeps its number. Its size, share and seen dates add its leaves up;
+  its keywords are its leaves' scores weighted by fit size (an approximation:
+  the c-TF-IDF of the merged texts would need the texts); its centre is the
+  unit mean of its leaves' centres weighted by fit size; its reads match any of
+  its leaves (`MatchAny`).
+- A leaf in no group is shown as itself; a topic a later discover adds is one.
+  A rebuild starts a new run with no groups.
+
+The `reduce` job takes the `run_id` it was drawn up against and the `groups`
+(an empty list undoes the reduction). It labels every group no label was
+written for yet, from its merged keywords and its eight passages nearest the
+group centre, through the same prompt and model as a build, and stores the
+groups and the new labels in one save at the end, so a cancelled reduce
+changes nothing. A label the model could not write is not kept: the group
+carries its largest leaf's label (by fit size) and is labelled again by the
+next reduce that keeps it. With `TOPICS_LABELS` off, every group carries its
+largest leaf's label. A merge the tree makes repeats only its own k − 1
+nodes, so moving the SPA's slider back and forth costs no label twice.
+
+### Relax: placing unassigned chunks
+
+The relax job is BERTopic's `reduce_outliers` by embeddings, as a one-off. It
+takes the `run_id` and a `threshold` from 0.01 to 0.99, and starts over each
+time:
+
+1. Every chunk an earlier relax placed goes back to the unassigned pool.
+2. Every pool chunk is scored against the leaves: its nearest leaf and its
+   cosine to that leaf's centre. One that clears the leaf's floor is placed by
+   the rule (an interrupted discover can leave one). One that reaches only the
+   threshold is placed and marked: its `docint_topic_relaxed` is the run's id.
+3. The scan counts every chunk the rule leaves out by its best cosine, in 100
+   bins of 0.01. The threshold admits exactly the bins at or above it, so the
+   histogram previews any threshold exactly. The run's record keeps the
+   threshold, the histogram and the count it measured (`relax`).
+
+A `threshold` of `null` places nothing under a lowered bar: it takes the last
+relax back and only measures. Floors never change, so later aligns,
+discovers and ingest stages place chunks by the rule; a relax is applied
+again by hand to reach chunks ingested since. The tuning view says how many
+chunks are placed under the bar now and whether the pool has changed since
+the histogram was counted (`stale`).
+
+Every assignment write sets `docint_topic_relaxed` too, empty unless the
+chunk was placed under the bar, so no write leaves an earlier placement's
+marker behind: a rebuild cancelled after writing a relaxed chunk would
+otherwise hand it back to the old run still marked.
+
+### Rebuilding with another grain
+
+`build` takes a `min_topic_size` from 2 to 10,000 in place of
+`TOPICS_MIN_TOPIC_SIZE` and the automatic size (see [Build](#build)). It is
+the one fine-tuning step that refits: a larger size gives fewer, broader
+topics. The run records the size it used, and a later discover takes it as a
+floor as it does any build's, counted up to 10 (see [Discover](#discover)).
+The rebuild replaces the run, so its groups and relaxed placements go with it.
+
 ## Assignment
 
 Every eligible chunk gets exactly one value:
@@ -158,16 +247,18 @@ the topic's own fit members. A higher percentile admits fewer chunks.
 |---|---|
 | `docint_topic` | `"<run_id>:<topic_id>"`, or `"<run_id>:-1"` for an unassigned chunk |
 | `docint_topic_run` | `"<run_id>"` |
+| `docint_topic_relaxed` | `"<run_id>"` for a chunk a relax placed under its lowered bar, else `""` |
 
-Both are written **payload-only**: `batch_update_points` with one
-`SetPayloadOperation` per topic per page of 256 points, `wait=True`, retried on
-transient errors. An assignment never touches a point's vectors, its text, its
+All three are written **payload-only**: `batch_update_points` with one
+`SetPayloadOperation` per topic (and kind of placement) per page of 256 points,
+`wait=True`, retried on transient errors. Taking a relax back is one filtered
+`SetPayloadOperation` over the chunks marked with the run's id. An assignment never touches a point's vectors, its text, its
 `_node_content` or its full-text index. Points are selected by an id filter
 (`HasIdCondition`) rather than a list of points, so a point deleted during a
 pass is skipped instead of failing the batch.
 
-`docint_topic`, `docint_topic_run` and `file_hash` carry KEYWORD indexes, and an
-index of the wrong kind is replaced. Every job ensures them before it reads the
+`docint_topic`, `docint_topic_run`, `docint_topic_relaxed` and `file_hash`
+carry KEYWORD indexes, and an index of the wrong kind is replaced. Every job ensures them before it reads the
 collection, and a process ensures them once per collection before its first
 topics read: a Qdrant server needs the index to facet on a key (local mode
 needs none). Every count is exact:
@@ -177,7 +268,9 @@ exact counts.
 A topic is an ordinary metadata filter. The rule
 `{"field": "docint_topic", "operator": "eq", "value": "<run_id>:<topic_id>"}`
 on `/query`, `/stream_query` or `/search` narrows an answer or a search to that
-topic's chunks; it is the rule the SPA's topic focus sends. Image points in the
+topic's chunks; for a merged topic, one rule
+`{"field": "docint_topic", "operator": "in", "values": [...]}` over its
+members' values does. These are the rules the SPA's topic focus sends. Image points in the
 `_images` companion carry no topic keys, so such a rule selects text chunks
 only. An answer under it is built from the matching chunks alone: a chunk's
 parent section and a posting's linked siblings hold passages of other topics,
@@ -219,7 +312,10 @@ so parent-context expansion and link-following are left out (see
   discover's entry adds how many topics it kept; a discover that finds nothing
   new adds none), and the topics:
   id, label, description, keywords, origin (`build` or `discover`), when it was
-  added, its fit size, its floor, and its first and last seen.
+  added, its fit size, its floor, and its first and last seen. Fine-tuning adds
+  `groups`, `group_labels` and `relax` (see [Fine-tuning](#fine-tuning)); every
+  save carries the record's keys over, and groups this code did not write read
+  as no reduction.
 - **The lock** is an exclusive `fcntl.flock` on `.lock`. Every job takes it
   before it reads anything and holds it to the end, the wait on the fit
   included. It works across processes, so a CLI run and an API job never write
@@ -350,11 +446,13 @@ sample's texts, and the library versions and runtime the service reported.
 A topics job runs from any of three places:
 
 - the Analysis screen's **Topics** tab (see [In the app](#in-the-app));
-- `POST /collections/{name}/topics` with `{"action": "build" | "discover" | "align"}`
-  (see [api-reference.md](api-reference.md#topics));
+- `POST /collections/{name}/topics` with
+  `{"action": "build" | "discover" | "align" | "reduce" | "relax"}` and the
+  action's settings (see [api-reference.md](api-reference.md#topics));
 - `uv run topics <op> <collection>` or `make topics OP=<op> COLLECTION=<name>`,
-  which also takes `status` (see
-  [cli-reference.md](cli-reference.md#topics--topic-runs)).
+  for `build`, `discover` and `align`, which also takes `status` (see
+  [cli-reference.md](cli-reference.md#topics--topic-runs)). Fine-tuning has no
+  command.
 
 Over HTTP it is a `kind="topics"` job on the shared registry and the
 owner-multiplexed stream at `GET /ingest/jobs/events`, with its own concurrency
@@ -378,13 +476,16 @@ holds the lock. A build then reports `scanning`, `sampling`, `fitting`,
 `labelling`, `assigning` and `aligning`, in that order. A discover reports
 `aligning` first, for the pending chunks and the unassigned pool, then
 `scanning` through `labelling` as a build does, `assigning` for the pool's
-re-align, and `aligning` again; an align reports `aligning` alone. A stage with
+re-align, and `aligning` again; an align reports `aligning` alone. A reduce
+reports `labelling` for the groups it labels, a relax `assigning` for the
+pool it scans. A stage with
 nothing to do may send no frame, and `labelling` sends none while
 `TOPICS_LABELS` is off. A frame's `message` is static English, such as
 `Aligning topics: 1200/4000 chunks processed`; the SPA writes its own copy
 from `stage`, `done` and `total`. In the artifact, `topics` counts the run's
-topics after the job, `added` the topics it added, and `assigned` the chunks
-it placed in a topic (chunks written as unassigned are not counted).
+topics after the job, before any reduction, `added` the topics it added, and
+`assigned` the chunks it placed in a topic (chunks written as unassigned are
+not counted).
 
 Warning codes:
 
@@ -394,12 +495,13 @@ Warning codes:
 | `too_few_unassigned` | completes, `empty` | Too few unassigned chunks to look for new topics; `found` and `needed` as for `too_few_chunks`. |
 | `no_run` | completes, `empty` | There is no active run to discover on or align. |
 | `dimension_changed` | completes, `empty` | The dense vectors changed size since the build; rebuild. |
-| `collection_changed` | completes, `empty` | The collection was replaced while a build, discover or align ran. |
+| `collection_changed` | completes, `empty` | The collection was replaced while a job ran. |
+| `run_changed` | completes, `empty` | A reduce or relax named another run than the active one, or a topic the run lacks; nothing was applied. |
 | `none_found` | completes, `empty` | The fit found no topics; the current run stays. |
 | `none_new` | completes, `empty` | No pool topic was new; the unassigned chunks stay unassigned. |
 | `topics_unreachable` … `topics_failed` | fails | An endpoint fault (see [The fit service](#the-fit-service)). |
 
-A refusal (the first five) completes without an `artifact`; `none_found` and
+A refusal (the first six) completes without an `artifact`; `none_found` and
 `none_new` complete with one. No kind emits a `*_failed` event: a failure is the
 `error` frame, and its copy is static, so an exception's text never reaches a
 client.
@@ -476,7 +578,10 @@ described in [ui-guide.md](ui-guide.md).
   active report as a single item, rendered right after the collection summary
   ([reports.md](reports.md)). Which job outcome it shows, and how its CSV keeps
   a spreadsheet from reading a cell as a formula, are in
-  [ui-guide.md](ui-guide.md#analysis-srcroutesanalysistsx).
+  [ui-guide.md](ui-guide.md#analysis-srcroutesanalysistsx). Its
+  **fine-tuning** controls run the three jobs of [Fine-tuning](#fine-tuning).
+- **The topic focus** on a merged topic sends one `in` rule over its members;
+  a focus on a topic since merged into another reads as not applied.
 - **The topic focus** narrows the chat and the search panel to one topic. A
   topic row's **Ask in chat** opens a new chat with it, and the chat's first
   turn stores it with the session (`topic_focus` on `/query` and
@@ -486,7 +591,8 @@ described in [ui-guide.md](ui-guide.md).
   points carry no topic keys, so a focused search returns no image hits and a
   focused answer has no image lane.
 - **The Inspector's Topics column** shows each document's topics in the active
-  run, from the documents listing's `topics` field.
+  run, from the documents listing's `topics` field, which names leaves: the
+  SPA counts a merged topic's members as that one topic.
 
 ## In agent turns
 
@@ -558,3 +664,21 @@ with its compose value, in its Paths table.
   summaries grew to four or five sentences keeps its one-sentence descriptions
   until it is rebuilt; a discover writes the new length for the topics it
   adds only.
+- **A focus follows the topic's number, not its first members.** A chat
+  focused on a group keeps its rule while the group keeps its lowest id: a
+  later reduce that grows the group widens the focus with it, and undoing the
+  reduction narrows it to the topic of that id alone. A focus on a topic that
+  went into a group under a lower id is not applied.
+- **A merged topic's keywords are approximate.** They weigh its topics'
+  keywords by fit size; the c-TF-IDF of the merged texts would need the texts,
+  which docint does not keep.
+- **Discover does not see relaxed chunks.** A relax takes chunks out of the
+  unassigned pool a discover fits, so new subjects among them cannot form
+  topics of their own; undo the relax first to search them.
+- **A relax does not reach later chunks.** Floors never change, so chunks
+  ingested after a relax are placed by the rule; apply the relax again for
+  them. The tuning view flags its histogram as stale once the pool has
+  changed.
+- **Labels written for groups are kept.** `group_labels` is never pruned: a
+  group made by the merge tree is one of its k − 1 nodes, and groups merged by
+  hand add one entry each. A rebuild starts without any.

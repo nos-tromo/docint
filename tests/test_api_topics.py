@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 import time
@@ -26,7 +27,7 @@ from docint.core.jobs import TERMINAL_STATUSES, IngestJobManager, IngestJobState
 from docint.core.rag import RAG
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
-from docint.core.topics.service import TopicsRefused, progress_payload
+from docint.core.topics.service import TopicsOutcome, TopicsRefused, progress_payload
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.topics_client import TopicsUnreachable
 
@@ -75,6 +76,7 @@ class _TopicsRAG:
         self._com._SessionMaker = sessionmaker(bind=engine)
         self.store = _Store()
         self.overview: dict[str, Any] | None = None
+        self.tuning: dict[str, Any] | None = None
         self.evidence: list[dict[str, Any]] | None = None
         self.documents: dict[str, Any] | None = None
         self.chunks: dict[str, Any] | None = None
@@ -179,6 +181,18 @@ class _TopicsRAG:
         if self.overview_error is not None:
             raise self.overview_error
         return self.overview
+
+    def topics_tuning(self, physical: str) -> dict[str, Any] | None:
+        """Return the scripted tuning view.
+
+        Args:
+            physical: Physical collection name.
+
+        Returns:
+            The tuning view.
+        """
+        self.reads.append(("tuning", physical, None))
+        return self.tuning
 
     def topic_evidence(
         self, physical: str, topic_id: int, *, limit: int, run_id: str | None = None
@@ -385,9 +399,10 @@ def _call(client: TestClient, method: str, path: str, logical: str, headers: dic
 
 
 def test_the_topics_routes_exist() -> None:
-    """The enumeration below covers all five routes."""
+    """The enumeration below covers all six routes."""
     assert _topics_routes() == [
         ("GET", PREFIX),
+        ("GET", f"{PREFIX}/tuning"),
         ("GET", f"{PREFIX}/{{topic_id}}/chunks"),
         ("GET", f"{PREFIX}/{{topic_id}}/documents"),
         ("GET", f"{PREFIX}/{{topic_id}}/evidence"),
@@ -404,6 +419,7 @@ def test_topics_routes_honor_admin_owner_context(client: TestClient, fake: _Topi
     """
     physical = fake._com.register("analyst-b", "shared-docs")
     fake.overview = {"run_id": "synthetic-run"}
+    fake.tuning = {"run_id": "synthetic-run", "leaves": []}
     fake.evidence = []
     fake.documents = {"documents": [], "more": False}
     fake.chunks = {"items": [], "next_cursor": None}
@@ -440,6 +456,258 @@ def test_post_queues_a_topics_job_with_its_action(client: TestClient, fake: _Top
     assert _physical(fake) not in json.dumps(built)
 
     assert client.post("/collections/docs/topics", json={"action": "other"}).status_code == 422
+
+
+def test_a_builds_topic_size_reaches_its_job(make_client: Callable[[JobRunner], TestClient]) -> None:
+    """A build asked for a topic size carries it to the job; one without carries no settings.
+
+    Args:
+        make_client: The client factory.
+    """
+    seen: list[tuple[str | None, dict[str, Any] | None]] = []
+
+    def recording(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Record the job's action and settings.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        seen.append((state.action, state.topics_options))
+        return {"empty": True, "resolution": None}
+
+    client = make_client(recording)
+    sized = client.post("/collections/docs/topics", json={"action": "build", "min_topic_size": 7})
+    assert sized.status_code == 202
+    _await_terminal(client, sized.json()["job_id"])
+    plain = client.post("/collections/docs/topics", json={})
+    _await_terminal(client, plain.json()["job_id"])
+
+    assert seen == [("build", {"min_topic_size": 7}), ("build", None)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"min_topic_size": 1},
+        {"min_topic_size": 10_001},
+        {"action": "discover", "min_topic_size": 5},
+        {"action": "align", "min_topic_size": 5},
+    ],
+)
+def test_a_setting_out_of_range_or_for_another_action_is_refused(client: TestClient, body: dict[str, Any]) -> None:
+    """The route is the trust boundary: a bad size, or one for an action that takes none, is a 422.
+
+    Args:
+        client: The client.
+        body: The request body.
+    """
+    assert client.post("/collections/docs/topics", json=body).status_code == 422
+
+
+def test_the_runner_hands_a_jobs_settings_to_the_service_and_its_audit_record(
+    fake: _TopicsRAG, audit_stream: io.StringIO
+) -> None:
+    """The settings reach the service as keywords and the run's modify event as criteria.
+
+    Args:
+        fake: The RAG stand-in.
+        audit_stream: The test's audit stream.
+    """
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _Recorder:
+        """A topics service stand-in that records its run."""
+
+        def run(self, action: str, physical: str, **kwargs: Any) -> TopicsOutcome:
+            """Record the call and report a finished build.
+
+            Args:
+                action: The action.
+                physical: Physical collection name.
+                **kwargs: The run's keywords.
+
+            Returns:
+                A build's outcome.
+            """
+            calls.append((action, kwargs))
+            return TopicsOutcome("build", "20260101-000000-abcdef", 3, 3, 10, empty=False)
+
+    fake.service = _Recorder()
+    state = _topics_state("p1")
+    state.topics_options = {"min_topic_size": 7}
+
+    api_module._run_topics_job(state, lambda event, payload: None)
+
+    assert calls[0][0] == "build"
+    assert calls[0][1]["min_topic_size"] == 7
+    events = [json.loads(line) for line in audit_stream.getvalue().splitlines()]
+    (built,) = [event for event in events if event.get("operation") == "topics.build"]
+    assert built["criteria"]["min_topic_size"] == 7
+    assert built["criteria"]["job_id"] == "job-1"
+
+
+RUN = "20260101-000000-abcdef"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "reduce", "groups": [[0, 1]]},
+        {"action": "reduce", "run_id": RUN},
+        {"action": "reduce", "run_id": "not-a-run", "groups": []},
+        {"action": "reduce", "run_id": f"x{RUN}", "groups": []},
+        {"action": "reduce", "run_id": RUN, "groups": [[0]]},
+        {"action": "reduce", "run_id": RUN, "groups": [[0, 0]]},
+        {"action": "reduce", "run_id": RUN, "groups": [[0, 1], [1, 2]]},
+        {"action": "reduce", "run_id": RUN, "groups": [[-1, 2]]},
+        {"action": "build", "run_id": RUN},
+        {"action": "align", "groups": [[0, 1]]},
+    ],
+)
+def test_a_reduce_needs_its_run_and_well_formed_groups(client: TestClient, body: dict[str, Any]) -> None:
+    """A reduce names its run and disjoint groups of two or more ids; no other action takes either.
+
+    Args:
+        client: The client.
+        body: The request body.
+    """
+    assert client.post("/collections/docs/topics", json=body).status_code == 422
+
+
+def test_a_reduce_reaches_its_job_with_its_run_and_groups(
+    make_client: Callable[[JobRunner], TestClient], fake: _TopicsRAG
+) -> None:
+    """A reduce on a collection with a run is queued with its settings; an empty list is a valid undo.
+
+    Args:
+        make_client: The client factory.
+        fake: The RAG stand-in.
+    """
+    seen: list[tuple[str | None, dict[str, Any] | None]] = []
+
+    def recording(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Record the job's action and settings.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        seen.append((state.action, state.topics_options))
+        return {"empty": True, "resolution": None}
+
+    client = make_client(recording)
+    undo: dict[str, Any] = {"action": "reduce", "run_id": RUN, "groups": []}
+    assert client.post("/collections/docs/topics", json=undo).status_code == 400
+    fake.store.run = object()
+    asked: list[list[list[int]]] = [[[3, 1], [4, 5]], []]
+    for groups in asked:
+        res = client.post("/collections/docs/topics", json={"action": "reduce", "run_id": RUN, "groups": groups})
+        assert res.status_code == 202
+        _await_terminal(client, res.json()["job_id"])
+
+    assert seen == [
+        ("reduce", {"run_id": RUN, "groups": [[3, 1], [4, 5]]}),
+        ("reduce", {"run_id": RUN, "groups": []}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "relax", "threshold": 0.4},
+        {"action": "relax", "run_id": RUN, "threshold": 0.0},
+        {"action": "relax", "run_id": RUN, "threshold": 1.0},
+        {"action": "relax", "run_id": RUN, "groups": [[0, 1]]},
+        {"action": "build", "threshold": 0.4},
+        {"action": "reduce", "run_id": RUN, "groups": [], "threshold": 0.4},
+    ],
+)
+def test_a_relax_needs_its_run_and_a_bar_within_range(client: TestClient, body: dict[str, Any]) -> None:
+    """A relax names its run and a bar from 0.01 to 0.99, or none; no other action takes a bar.
+
+    Args:
+        client: The client.
+        body: The request body.
+    """
+    assert client.post("/collections/docs/topics", json=body).status_code == 422
+
+
+def test_a_relax_reaches_its_job_with_its_bar_or_none(
+    make_client: Callable[[JobRunner], TestClient], fake: _TopicsRAG
+) -> None:
+    """A relax is queued with its run and bar; without a bar it is queued to undo and measure.
+
+    Args:
+        make_client: The client factory.
+        fake: The RAG stand-in.
+    """
+    seen: list[dict[str, Any] | None] = []
+
+    def recording(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Record the job's settings.
+
+        Args:
+            state: The job.
+            push: The event publisher.
+
+        Returns:
+            An empty result.
+        """
+        seen.append(state.topics_options)
+        return {"empty": True, "resolution": None}
+
+    client = make_client(recording)
+    fake.store.run = object()
+    bodies: list[dict[str, Any]] = [
+        {"action": "relax", "run_id": RUN, "threshold": 0.42},
+        {"action": "relax", "run_id": RUN, "threshold": None},
+    ]
+    for body in bodies:
+        res = client.post("/collections/docs/topics", json=body)
+        assert res.status_code == 202
+        _await_terminal(client, res.json()["job_id"])
+
+    assert seen == [{"run_id": RUN, "threshold": 0.42}, {"run_id": RUN}]
+
+
+def test_a_jobs_audit_criteria_name_its_settings_by_number_only() -> None:
+    """A reduce's groups are recorded as their count, never their ids; other settings as given."""
+    criteria = api_module._topics_job_criteria({"run_id": RUN, "groups": [[0, 1], [2, 3]], "min_topic_size": 9})
+
+    assert criteria == {"run_id": RUN, "min_topic_size": 9, "groups": 2}
+    assert api_module._topics_job_criteria({}) == {}
+
+
+def test_tuning_answers_200_or_204_and_records_the_topics_it_shows(
+    client: TestClient, fake: _TopicsRAG, audit_stream: io.StringIO
+) -> None:
+    """The tuning view is read like the overview: 204 without a run, else 200 recorded as a topics query.
+
+    Args:
+        client: The client.
+        fake: The RAG stand-in.
+        audit_stream: The test's audit stream.
+    """
+    assert client.get("/collections/docs/topics/tuning").status_code == 204
+    fake.tuning = {"run_id": RUN, "leaves": [{"id": 0}, {"id": 4}], "merges": [[0, 4, 0.9]]}
+
+    res = client.get("/collections/docs/topics/tuning")
+
+    assert res.status_code == 200
+    assert res.json() == fake.tuning
+    events = [json.loads(line) for line in audit_stream.getvalue().splitlines()]
+    reads = [event for event in events if event.get("operation") == "topics.tuning"]
+    assert [event["outcome"] for event in reads] == ["ok"]
+    assert reads[0]["target"]["kind"] == "topic"
+    assert reads[0]["target"]["ids"] == ["0", "4"]
+    assert reads[0]["criteria"]["run_id"] == RUN
 
 
 def test_a_second_post_answers_409_with_the_running_job_id(make_client: Callable[[JobRunner], TestClient]) -> None:
