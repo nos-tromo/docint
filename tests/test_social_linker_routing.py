@@ -203,6 +203,7 @@ def _media(
     published_at: str = "2023-01-01T10:00:00+00:00",
     status: str = "complete",
     attached_to: Sequence[str] = (),
+    in_file: bool = True,
 ) -> dict[str, Any]:
     """Return an invented media record.
 
@@ -213,6 +214,8 @@ def _media(
         published_at: ISO-8601 publication time.
         status: ``complete`` or ``missing``.
         attached_to: Postings the media names (the media side of the link).
+        in_file: Whether those postings are in ``postings[]``; ``False`` for
+            another profile's post the account reacted to.
 
     Returns:
         dict[str, Any]: The media item as a dossier writes it.
@@ -223,7 +226,40 @@ def _media(
         "publishedAt": published_at,
         "file": file,
         "status": status,
-        "attachedTo": {"postings": [{"id": posting, "inFile": True} for posting in attached_to], "albumId": None},
+        "attachedTo": {"postings": [{"id": posting, "inFile": in_file} for posting in attached_to], "albumId": None},
+    }
+
+
+def _reaction(
+    uuid: str, root: str, text: str | None, *, root_kind: str = "posting", media_ids: Sequence[str] = ()
+) -> dict[str, Any]:
+    """Return an invented ``ownReactions`` entry: the account liking another profile's post.
+
+    The post itself is no entry of ``postings[]``; the export carries it only
+    inline, as the reaction's ``context``.
+
+    Args:
+        uuid: The reaction's own id.
+        root: The id of the post reacted to.
+        text: The post's text.
+        root_kind: What was reacted to.
+        media_ids: Media the post names (the post side of the link).
+
+    Returns:
+        dict[str, Any]: The reaction as a dossier writes it.
+    """
+    return {
+        "id": uuid,
+        "type": "LIKE",
+        "rootKind": root_kind,
+        "rootId": root,
+        "context": {
+            "author": _author("Max Other", "max.other", "99"),
+            "publishedAt": "2023-03-03T09:00:00+00:00",
+            "text": text,
+            "url": f"https://social.invalid/{root}",
+            "mediaIds": list(media_ids),
+        },
     }
 
 
@@ -476,6 +512,111 @@ def test_a_media_item_two_postings_name_is_linked_to_both(tmp_path: Path) -> Non
     assert sorted(asset.source_doc_id for asset in img.images) == ["u1", "u2"]
 
 
+def test_media_of_a_post_the_account_reacted_to_link_to_that_post(tmp_path: Path) -> None:
+    """Another profile's post the account liked owns its media, named from either side of the link.
+
+    The post is no entry of ``postings[]`` (its media say ``inFile: false``);
+    the dossier carries it only as the reaction's ``context``. Left unlinked,
+    those media reached reports as loose files with no posting metadata.
+    """
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[_posting("u1", "P_1", "own post")],
+        media=[
+            _media("m1", "M_1", f"{_FB}/media/photos/liked.jpg", attached_to=["r1"], in_file=False),
+            _media("m2", "M_2", f"{_FB}/media/photos/named.jpg"),
+        ],
+        files={"media/photos/liked.jpg": b"\xff\xd8\xff", "media/photos/named.jpg": b"\xff\xd8\xff1"},
+        network="facebook",
+        ownReactions=[_reaction("like-1", "r1", "their post"), _reaction("like-2", "r2", "more", media_ids=["m2"])],
+    )
+    img = _FakeImageService()
+
+    result = _linker(image_service=img).run(tmp_path)
+
+    assert _linked(img) == {"liked": "r1", "named": "r2"}
+    assert {"liked.jpg", "named.jpg"} <= {path.name for path in result.consumed_paths}
+    liked = next(asset for asset in img.images if asset.source_doc_id == "r1")
+    assert {key: value for key, value in liked.extra_metadata.items() if key.startswith("posting_")} == {
+        "posting_uuid": "r1",
+        "posting_id": "",
+        "posting_network": "facebook",
+        "posting_author": "Max Other",
+        "posting_author_id": "99",
+        "posting_vanity": "max.other",
+        "posting_timestamp": "2023-03-03T09:00:00+00:00",
+        "posting_url": "https://social.invalid/r1",
+        "posting_text": "their post",
+    }
+
+
+def test_a_post_the_account_reacted_to_becomes_a_reaction_row(
+    tmp_path: Path, loguru_caplog_info: LogCaptureFixture
+) -> None:
+    """The liked post is a posting-shaped row, typed so it is never read as the account's own.
+
+    Its ``uuid`` is the post's id (the reaction's ``rootId``), the same value
+    its media carry as ``posting_uuid``, so an extract files both under one
+    posting. A second reaction to it, or one to the account's own post, adds no row.
+    """
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[_posting("u1", "P_1", "own post")],
+        network="facebook",
+        ownReactions=[
+            _reaction("like-1", "r1", "their post"),
+            _reaction("like-2", "r1", "their post"),
+            _reaction("like-3", "u1", "own post"),
+            _reaction("like-4", "r2", "  "),
+        ],
+    )
+
+    result = _linker().run(tmp_path)
+
+    rows = _rows(result, "postings")
+    assert [row.text for row in rows] == ["own post", "their post"]
+    assert rows[1].metadata["reference_metadata"] == {
+        "network": "facebook",
+        "type": "reaction",
+        "uuid": "r1",
+        "url": "https://social.invalid/r1",
+        "timestamp": "2023-03-03T09:00:00+00:00",
+        "author": "Max Other",
+        "author_id": "99",
+        "vanity": "max.other",
+        "text": "their post",
+        "text_id": None,
+        "anchor_text": None,
+        "parent_text": None,
+    }
+    assert rows[1].metadata["table"] == {"style": "postings", "row_index": 1, "n_rows": 3}
+    assert is_social_payload(rows[1].metadata)
+    assert "1 postings, 1 reacted-to postings and 0 comments" in loguru_caplog_info.text
+
+
+def test_records_without_a_network_take_the_dossiers(tmp_path: Path) -> None:
+    """A real export names its network once, at the top level; rows and linked media must still carry it."""
+    comment = _comment("c1", "C_1", "a reply", posting="u1")
+    posting = _posting("u1", "P_1", "a", media_ids=["m1"], comments=[comment])
+    del comment["network"], posting["network"]
+    _write_dossier(
+        tmp_path,
+        _FB,
+        postings=[posting],
+        media=[_media("m1", "M_1", f"{_FB}/media/photos/pic.jpg")],
+        files={"media/photos/pic.jpg": b"\xff\xd8\xff"},
+        network="facebook",
+    )
+    img = _FakeImageService()
+
+    result = _linker(image_service=img).run(tmp_path)
+
+    assert [row.metadata["reference_metadata"]["network"] for row in result.documents] == ["facebook", "facebook"]
+    assert img.images[0].extra_metadata["posting_network"] == "facebook"
+
+
 def test_media_the_export_or_the_upload_lacks_is_counted_and_left_unclaimed(
     tmp_path: Path, loguru_caplog_info: LogCaptureFixture
 ) -> None:
@@ -697,12 +838,19 @@ def test_an_unreadable_or_foreign_dossier_is_claimed_and_skipped(
 def test_sections_without_a_sample_are_reported_not_dropped_silently(
     tmp_path: Path, loguru_caplog: LogCaptureFixture
 ) -> None:
-    """Messages and own comments have no known shape yet, so they are skipped out loud."""
-    _write_dossier(tmp_path, _FB, messages=[{"id": "x"}], ownComments=[{"id": "y"}, {"id": "z"}])
+    """Sections with no sample yet (messages, own comments, reactions to anything but a post) are skipped out loud."""
+    _write_dossier(
+        tmp_path,
+        _FB,
+        messages=[{"id": "x"}],
+        ownComments=[{"id": "y"}, {"id": "z"}],
+        ownReactions=[_reaction("like-1", "c1", "a comment", root_kind="comment")],
+    )
 
-    _linker().run(tmp_path)
+    result = _linker().run(tmp_path)
 
-    assert "1 messages and 2 own comments are not ingested" in loguru_caplog.text
+    assert _rows(result, "postings") == []
+    assert "1 messages, 2 own comments and 1 reactions to something other than a posting" in loguru_caplog.text
 
 
 class _FailingImageService(_FakeImageService):
