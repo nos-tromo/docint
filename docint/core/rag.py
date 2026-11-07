@@ -12764,7 +12764,7 @@ class RAG:
     ) -> ResolutionSummary:
         """Resolve the active collection's entities into durable canonicals.
 
-        Mirrors chorus's batch ``resolve`` stage: collapse extracted entities to
+        Batch ``resolve`` stage: collapse extracted entities to
         unique ``(surface, type)`` pairs, embed them once, and resolve each
         most-mentioned-first into the hidden ``{collection}_entities`` store
         (exact alias -> type-blocked vector match -> conservative LLM tie-break

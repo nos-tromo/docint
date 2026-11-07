@@ -1629,8 +1629,7 @@ def load_nextext_env(
 class ResolutionConfig:
     """Dataclass for entity-resolution clustering parameters.
 
-    Mirrors the chorus resolution stage so the two apps share one operator
-    vocabulary (``RES_*`` env vars). Consumed by the batch ``resolve`` step
+    Tuned through the ``RES_*`` env vars. Consumed by the batch ``resolve`` step
     (see :mod:`docint.core.entities.resolution`) that merges
     semantically-equivalent named entities into durable canonical records
     before they surface in the NER analytics views.
