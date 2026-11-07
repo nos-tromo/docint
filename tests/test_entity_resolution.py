@@ -1,8 +1,7 @@
 """Tests for the pure entity-resolution pipeline.
 
 These exercise :mod:`docint.core.entities.resolution` against an
-in-memory fake store plus fake embed / chat callables, mirroring the
-behaviours pinned by chorus's ``tests/ingestion/test_resolution.py``:
+in-memory fake store plus fake embed / chat callables, covering
 type-blocking, mint-vs-attach decision tree, conservative LLM
 tie-break, idempotent re-runs and the in-run case-variant cache.
 """

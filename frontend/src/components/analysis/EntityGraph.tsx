@@ -67,7 +67,7 @@ export function EntityGraph({
   exportName
 }: Props) {
   const t = useT()
-  // View-only node removal (mirrors chorus's expand-on-click graphs): removed
+  // View-only node removal: removed
   // ids are local component state, never sent upstream. A fresh `nodes` array
   // (new fetch, top-K change, merge-mode switch) resets it, so removal never
   // outlives the payload it was applied to.
@@ -158,7 +158,7 @@ export function EntityGraph({
   // selection has no representation there, so the panel follows whichever
   // node was most recently added to the selection. The canvas itself keeps
   // the full set via `graphSelection`. An empty selection (background click)
-  // clears both, same as chorus.
+  // clears both.
   const handleSelectionChange = useCallback(
     (ids: string[]) => {
       setGraphSelection(ids)

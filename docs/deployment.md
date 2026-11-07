@@ -47,7 +47,7 @@ the nginx sidecar. `make up-dev` layers `docker/compose.override.yaml` so
 the frontend port is published for local development.
 
 > Qdrant is **not** part of this compose project. It is owned by the
-> sibling `data-plane` project (`../data-plane/`), which runs Neo4j and
+> sibling `data-plane` project (`../data-plane/`), which runs
 > Qdrant for the whole nos-tromo stack. See
 > [Vector store: the `data-plane` project](#vector-store-the-data-plane-project)
 > below.
@@ -108,8 +108,8 @@ the frontend port is published for local development.
 ## Vector store: the `data-plane` project
 
 Docint uses Qdrant as its vector store, but it no longer runs its own
-Qdrant container. Qdrant (and Neo4j) are owned by the sibling
-`data-plane` project at `../data-plane/`, which serves them to the whole
+Qdrant container. Qdrant is owned by the sibling
+`data-plane` project at `../data-plane/`, which serves it to the whole
 nos-tromo stack over the shared `data-net` network.
 
 - The backend reaches Qdrant at `http://qdrant:6333` over `data-net` —
@@ -118,7 +118,7 @@ nos-tromo stack over the shared `data-net` network.
 - Bring Qdrant up before starting docint:
 
   ```bash
-  cd ../data-plane && make up        # Neo4j + Qdrant on data-net
+  cd ../data-plane && make up        # Qdrant on data-net
   cd ../data-plane && make up-dev    # also publishes Qdrant on localhost:6333
   ```
 

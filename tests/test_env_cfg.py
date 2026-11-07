@@ -513,10 +513,10 @@ def _clear_resolution_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-def test_resolution_config_defaults_match_chorus(
+def test_resolution_config_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Defaults mirror chorus: threshold 0.86, tiebreak+case-norm on, k=5.
+    """Defaults: threshold 0.86, tiebreak+case-norm on, k=5.
 
     Args:
         monkeypatch: Fixture to override environment variables.

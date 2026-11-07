@@ -8,10 +8,8 @@ companion collection:
   base collection so name vectors are comparable)
 - payload = ``{canonical_name, type, aliases: [surface forms], embed_model}``
 
-This is the docint analogue of chorus's ``:Entity`` node plus its
-``:Alias -[:RESOLVED_TO]-> :Entity`` links — except the alias->entity mapping
-lives in the entity's ``aliases`` payload list rather than on separate nodes,
-so chunk payloads stay immutable.
+The alias->entity mapping lives in the entity's ``aliases`` payload list, so
+chunk payloads stay immutable.
 
 The class satisfies
 :class:`docint.core.entities.resolution.EntityStoreProtocol`.

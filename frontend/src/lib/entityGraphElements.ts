@@ -3,9 +3,8 @@
  *
  * No React, no rendering runtime — converts the flat entity/edge arrays the
  * NER graph endpoint returns into the shape the shared `ForceGraph` primitive
- * consumes (ADR 0016 in chorus, where the primitive was extracted from). Kept
- * as a small lib file (mirroring chorus's `networkElements.ts`/
- * `socialElements.ts`) rather than inlined in the component so the mapping —
+ * consumes. Kept
+ * as a small lib file rather than inlined in the component so the mapping —
  * and the type→color palette — stay independently testable.
  */
 

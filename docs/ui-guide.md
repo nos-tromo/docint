@@ -369,8 +369,7 @@ at a time):
 - **Table** — an `EntitySelect` category + entity picker. The category filter
   re-filters the entity dropdown and pre-selects that category's top entity.
 - **Graph** — an interactive, force-directed entity graph rendered by the
-  shared `@infra/ui` `ForceGraph` primitive (the same component chorus's
-  reactive graph exploration uses; see chorus ADR 0016), fed by
+  shared `@infra/ui` `ForceGraph` primitive, fed by
   `GET /collections/ner/graph`. `EntityGraph` (`src/components/analysis/
   EntityGraph.tsx`) is a thin adapter: `src/lib/entityGraphElements.ts` maps
   the NER graph payload onto `ForceGraph`'s `{nodes, edges}` shape and bridges

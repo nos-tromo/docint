@@ -1,8 +1,7 @@
 """Pure entity-resolution pipeline (no I/O, no model runtime).
 
-This mirrors chorus's ``chorus/ingestion/resolution.py`` decision logic but
-keeps every side effect behind injected callables so the module is trivially
-unit-testable:
+The decision logic keeps every side effect behind injected callables so the
+module is trivially unit-testable:
 
 - the entity store (lookups / vector clustering / mint / attach) is an
   :class:`EntityStoreProtocol`,
