@@ -3152,6 +3152,8 @@ def load_topics_client_env() -> TopicsClientConfig:
 
 
 DEFAULT_DOCUMENT_RETENTION_DAYS = 365
+#: Whether this process has warned that document retention is off (once is enough).
+_RETENTION_OFF_WARNED = False
 MAX_DOCUMENT_RETENTION_DAYS = 3650
 DEFAULT_RETENTION_NOTICE_DAYS = 30
 MAX_RETENTION_NOTICE_DAYS = 365
@@ -3219,6 +3221,8 @@ def load_document_retention_env() -> DocumentRetentionConfig:
     notice = _retention_days(
         "RETENTION_NOTICE_DAYS", DEFAULT_RETENTION_NOTICE_DAYS, MAX_RETENTION_NOTICE_DAYS, allow_off=False
     )
-    if days is None:
+    global _RETENTION_OFF_WARNED
+    if days is None and not _RETENTION_OFF_WARNED:
+        _RETENTION_OFF_WARNED = True
         logger.warning("DOCUMENT_RETENTION_DAYS=off: no document is ever deleted (development only).")
     return DocumentRetentionConfig(days=days, notice_days=DEFAULT_RETENTION_NOTICE_DAYS if notice is None else notice)

@@ -25,3 +25,8 @@ class RetentionState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     window: Mapped[str] = mapped_column(String, nullable=False)
     window_set_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # When the period's notice ends, and the rule in force before a change
+    # (docs/retention.md); NULL in rows of the release before.
+    grace_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    in_force_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    in_force_grace: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

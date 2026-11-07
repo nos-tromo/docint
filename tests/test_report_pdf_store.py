@@ -151,3 +151,12 @@ def test_report_pdf_dir_relocates_the_store(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setenv("REPORT_PDF_DIR", str(tmp_path / "r"))
 
     assert load_path_env().report_pdfs == tmp_path / "r"
+
+
+def test_ids_names_every_stored_report(tmp_path: Path) -> None:
+    """The store lists the reports it holds renders of, so the sweep can find orphans."""
+    store = _store(tmp_path)
+    assert store.ids() == set()
+    _write(store, 7)
+    _write(store, 12, created="2026-01-03T09:00:00")
+    assert store.ids() == {7, 12}

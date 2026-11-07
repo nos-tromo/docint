@@ -548,6 +548,17 @@ def test_warning_flags_items_within_the_notice(client: TestClient, _patch_rag: _
     assert all(i["warning"] for i in items)
 
 
+def test_a_chat_without_a_collection_is_listed(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """A chat from before collections were recorded is still announced, with no collection."""
+    _patch_rag._sessions.expiring = [
+        ExpiringItem("session", None, None, "alice", "s1", "What did the memo say?", NOW, NOW + 3 * DAY)
+    ]
+
+    items = _retention(client, {"X-Auth-User": "alice"})["items"]
+
+    assert [(i["kind"], i["id"], i["collection"]) for i in items] == [("session", "s1", "")]
+
+
 def test_admin_all_is_recorded(client: TestClient, _patch_rag: _OwnRAG, audit_stream: io.StringIO) -> None:
     """An admin's listing across owners names each foreign item's owner and is recorded."""
     _ingest(client, "alice", "alpha")

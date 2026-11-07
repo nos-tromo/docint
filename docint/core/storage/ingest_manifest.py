@@ -191,7 +191,8 @@ class IngestManifest:
         Idempotent: re-marking an already-started file refreshes
         ``updated_at`` but preserves the original ``started_at``. Files
         already in ``completed`` status are not regressed back to
-        ``in_progress``.
+        ``in_progress`` and keep their ``updated_at``: retention reads it as
+        the time the document was stored.
 
         Args:
             collection: Logical Qdrant collection name.
@@ -212,7 +213,10 @@ class IngestManifest:
                         WHEN ingest_manifest.status = 'completed' THEN 'completed'
                         ELSE excluded.status
                     END,
-                    updated_at = excluded.updated_at,
+                    updated_at = CASE
+                        WHEN ingest_manifest.status = 'completed' THEN ingest_manifest.updated_at
+                        ELSE excluded.updated_at
+                    END,
                     error_message = NULL
                 """,
                 (collection, file_hash, STATUS_IN_PROGRESS, now, now),

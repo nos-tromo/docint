@@ -852,7 +852,7 @@ export interface AppConfig {
 /** A document, chat or report due for deletion within the notice period (`GET /collections/retention`). */
 export interface RetentionItem {
   kind: 'document' | 'session' | 'report'
-  /** The collection's user-visible name. */
+  /** The collection's user-visible name; empty for a chat recorded without one. */
   collection: string
   /** `null` for the caller's own items; another owner's name otherwise. */
   owner: string | null

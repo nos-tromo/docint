@@ -3586,7 +3586,10 @@ class RAG:
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
     _collection_backfill_done: bool = field(default=False, init=False, repr=False)
     document_retention: DocumentRetentionManager | None = field(default=None, init=False)
-    _ingest_doc_meta: dict[str, tuple[str, set[str]]] = field(default_factory=dict, init=False, repr=False)
+    _ingest_doc_meta: dict[tuple[str, str], tuple[str, set[str]]] = field(default_factory=dict, init=False, repr=False)
+    _retention_repaired: bool = field(default=False, init=False, repr=False)
+    _retention_dirty: set[str] = field(default_factory=set, init=False, repr=False)
+    _retention_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
@@ -8087,7 +8090,6 @@ class RAG:
         Returns:
             IngestStats: What the run did.
         """
-        self._ingest_doc_meta.clear()
         # Make the target Qdrant collection visible to the user before any
         # batch work begins, so it remains selectable even if every embedding
         # batch later fails. A probe failure here surfaces the embedding
@@ -8262,6 +8264,7 @@ class RAG:
             raise
         finally:
             manifest.close()
+            self._drop_ingest_meta(self.qdrant_collection)
             if ingest_failures:
                 aggregated = sorted({fh for hashes, _ in ingest_failures for fh in hashes})
                 logger.warning(
@@ -9031,19 +9034,46 @@ class RAG:
             file_hash = str(metadata.get("file_hash") or "").strip()
             if not file_hash:
                 continue
-            name, hashes = self._ingest_doc_meta.get(file_hash, ("", {file_hash}))
+            doc_key = (self.qdrant_collection, file_hash)
+            name, hashes = self._ingest_doc_meta.get(doc_key, ("", {file_hash}))
             name = name or str(metadata.get("file_name") or metadata.get("filename") or "")
             for key in ("media_file_hash", "source_doc_id"):
                 value = str(metadata.get(key) or "").strip()
                 if not value or (key == "source_doc_id" and value == str(metadata.get("posting_uuid") or "").strip()):
                     continue
                 hashes.add(value)
-            self._ingest_doc_meta[file_hash] = (name, hashes)
+            self._ingest_doc_meta[doc_key] = (name, hashes)
+
+    def _drop_ingest_meta(self, physical: str) -> None:
+        """Forget what an ingest run gathered for documents it never indexed.
+
+        A document that failed, or went through a path that indexes nothing,
+        leaves its entry behind; the collection is then marked for the next
+        sweep's repair, which indexes whatever points it holds.
+
+        Args:
+            physical (str): The Qdrant collection the run ingested into.
+        """
+        # A snapshot, since another ingest may add entries meanwhile.
+        leftover = [key for key in self._ingest_doc_meta.copy() if key[0] == physical]
+        for key in leftover:
+            self._ingest_doc_meta.pop(key, None)
+        if leftover:
+            self._mark_retention_dirty(physical)
+
+    def _mark_retention_dirty(self, physical: str) -> None:
+        """Have the next sweep's repair read this collection again.
+
+        Args:
+            physical (str): The Qdrant collection.
+        """
+        with self._retention_lock:
+            self._retention_dirty.add(physical)
 
     def _index_completed_document(self, file_hash: str, *, now: datetime | None = None) -> None:
         """Index a document whose ingest into the active collection completed.
 
-        Best-effort: the points already carry the clock, and the next startup
+        Best-effort: the points already carry the clock, and the next sweep
         repairs a row that could not be written (:meth:`repair_retention_index`).
 
         Args:
@@ -9052,7 +9082,7 @@ class RAG:
         """
         moment = now or datetime.now(UTC)
         physical = self.qdrant_collection
-        name, hashes = self._ingest_doc_meta.pop(file_hash, ("", {file_hash}))
+        name, hashes = self._ingest_doc_meta.pop((physical, file_hash), ("", {file_hash}))
         try:
             owners = self.ensure_collection_owner_manager()
             activity = owners.get_activity(physical)
@@ -9071,7 +9101,8 @@ class RAG:
                 notice_days=cfg.notice_days,
             )
         except Exception as exc:
-            logger.warning("Retention index not written for a document ({}); repaired at the next startup.", exc)
+            self._mark_retention_dirty(physical)
+            logger.warning("Retention index not written for a document ({}); repaired at the next sweep.", exc)
 
     def payload_documents(self, physical: str) -> list[PayloadDocument]:
         """Describe each document of a collection from its points' payloads.
@@ -9084,6 +9115,7 @@ class RAG:
                 its points carry, its name and its stamped ingest time.
         """
         found: dict[str, tuple[str, set[str], float | None]] = {}
+        unclaimed = 0
         offset: Any = None
         keys = [
             "file_hash",
@@ -9102,6 +9134,7 @@ class RAG:
                 payload = point.payload or {}
                 file_hash = str(payload.get("file_hash") or "").strip()
                 if not file_hash:
+                    unclaimed += 1
                     continue
                 name, hashes, stamp = found.get(file_hash, ("", {file_hash}, None))
                 name = name or str(payload.get("file_name") or payload.get("filename") or "")
@@ -9117,6 +9150,10 @@ class RAG:
                 found[file_hash] = (name, hashes, stamp)
             if offset is None:
                 break
+        if unclaimed:
+            logger.warning(
+                "{} point(s) of {} carry no file hash; the retention index cannot track them.", unclaimed, physical
+            )
         return [
             PayloadDocument(
                 file_hash,
@@ -9153,20 +9190,45 @@ class RAG:
             return {}
         return {str(fh): datetime.fromtimestamp(float(ts), tz=UTC) for fh, ts in rows}
 
-    def repair_retention_index(self, period: RetentionPeriodState, *, notice_days: int) -> int:
-        """Index every document Qdrant holds that the retention index lacks (at startup).
+    def repair_retention_index(
+        self,
+        period: RetentionPeriodState,
+        *,
+        notice_days: int,
+        skip: Callable[[str], bool] | None = None,
+    ) -> int:
+        """Index every document Qdrant holds that the retention index lacks.
+
+        The first call in a process reads every collection; later calls read
+        only the collections an ingest marked, so a sweep does not scroll all
+        of Qdrant every time. A collection the caller skips (one being deleted)
+        stays marked, and rows written for a collection that vanished during
+        the repair are dropped again.
 
         Args:
             period (RetentionPeriodState): The period in force.
             notice_days (int): The grace after it took effect.
+            skip (Callable[[str], bool] | None): Collections to leave alone this time.
 
         Returns:
             int: Rows added across all collections.
         """
         owners = self.ensure_collection_owner_manager()
         manager = self.ensure_document_retention_manager()
+        # Listed first: a failure leaves the marks and the full scan due.
+        collections = self.list_collections()
+        with self._retention_lock:
+            full = not self._retention_repaired
+            marked = set(self._retention_dirty)
+            self._retention_dirty.clear()
+            self._retention_repaired = True
         added = 0
-        for physical in self.list_collections():
+        for physical in collections:
+            if not full and physical not in marked:
+                continue
+            if skip is not None and skip(physical):
+                self._mark_retention_dirty(physical)
+                continue
             try:
                 activity = owners.get_activity(physical)
                 owner, logical = (activity.owner, activity.logical) if activity is not None else (None, physical)
@@ -9179,8 +9241,11 @@ class RAG:
                     period=period,
                     notice_days=notice_days,
                 )
+                if not self.qdrant_client.collection_exists(physical):
+                    manager.delete_collection(physical)
             except Exception as exc:
-                logger.warning("Retention index of {} not repaired ({}); retried at the next startup.", physical, exc)
+                self._mark_retention_dirty(physical)
+                logger.warning("Retention index of {} not repaired ({}); retried at the next sweep.", physical, exc)
         return added
 
     def ensure_collection_owner_manager(self) -> CollectionOwnerManager:

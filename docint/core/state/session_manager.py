@@ -1892,7 +1892,10 @@ class SessionManager:
             if lowered != current:
                 conv.expires_at = lowered
         except Exception as exc:
-            logger.warning("Session deadline not updated: {}", exc)
+            # A date that may be later than this turn's sources is worse than
+            # none: the next sweep derives it again from every turn.
+            conv.expires_at = None
+            logger.warning("Session deadline not updated; the next sweep derives it again: {}", exc)
 
     def update_turn_validation(
         self,

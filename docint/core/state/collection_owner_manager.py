@@ -19,10 +19,11 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from docint.core.retention import RetentionPeriodState
+from docint.core.retention import RetentionPeriodState, next_period_state
 from docint.core.state.base import _make_session_maker
 from docint.core.state.collection_ownership import CollectionOwnership
 from docint.core.state.retention_state import RetentionState
+from docint.utils.env_cfg import DEFAULT_RETENTION_NOTICE_DAYS
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -383,30 +384,43 @@ class CollectionOwnerManager:
             days = _period_days(str(row.window))
             if days is False:
                 return None
-            return RetentionPeriodState(days=days, set_at=_as_utc(cast(datetime, row.window_set_at)))
+            return RetentionPeriodState(
+                days=days,
+                set_at=_as_utc(cast(datetime, row.window_set_at)),
+                grace_until=None if row.grace_until is None else _as_utc(cast(datetime, row.grace_until)),
+                in_force_days=None if row.in_force_days is None else int(row.in_force_days),
+                in_force_grace=None if row.in_force_grace is None else _as_utc(cast(datetime, row.in_force_grace)),
+            )
 
-    def record_retention_period(self, days: int | None, *, now: datetime) -> RetentionPeriodState:
-        """Record the period in force at startup; a new or changed one takes effect now.
+    def record_retention_period(
+        self, days: int | None, *, now: datetime, notice_days: int = DEFAULT_RETENTION_NOTICE_DAYS
+    ) -> RetentionPeriodState:
+        """Record the period in force at startup, by :func:`~docint.core.retention.next_period_state`.
 
         Args:
             days (int | None): The period; ``None`` is off.
             now (datetime): The startup time, timezone-aware.
+            notice_days (int): The notice configured now.
 
         Returns:
-            RetentionPeriodState: The period and when it took effect.
+            RetentionPeriodState: The period, when it took effect, its notice end and the rule in force.
         """
-        token = "off" if days is None else f"{days}d"
+        previous = self.retention_period()
+        state = next_period_state(previous, days, notice_days, now)
+        if state == previous:
+            return state
         with self._session_scope() as s:
             row = s.get(RetentionState, 1)
-            if row is not None and row.window == token:
-                return RetentionPeriodState(days=days, set_at=_as_utc(cast(datetime, row.window_set_at)))
             if row is None:
                 row = RetentionState(id=1)
                 s.add(row)
-            row.window = cast(Any, token)
-            row.window_set_at = cast(Any, now)
+            row.window = cast(Any, "off" if days is None else f"{days}d")
+            row.window_set_at = cast(Any, state.set_at)
+            row.grace_until = cast(Any, state.grace_until)
+            row.in_force_days = cast(Any, state.in_force_days)
+            row.in_force_grace = cast(Any, state.in_force_grace)
             s.commit()
-        return RetentionPeriodState(days=days, set_at=_as_utc(now))
+        return state
 
     @staticmethod
     def _activity(row: CollectionOwnership) -> CollectionActivity:

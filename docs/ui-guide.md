@@ -70,7 +70,9 @@ While document retention is on ([retention.md](retention.md)), an
 **Automatic deletion** card (`src/components/dashboard/RetentionCard.tsx`)
 states the rule and lists the owner's documents, chats and reports due for
 deletion within the notice period, grouped by collection, each with its kind,
-name and date — the eight soonest, with the rest counted. Nothing on it keeps
+name and date — the eight soonest, with the rest counted. A chat recorded
+without a collection is grouped under *No collection*, and an item already past
+its date says it goes at the next run instead of naming a date gone by. Nothing on it keeps
 an item: it names the date the item goes. In the sidebar, a line under the
 collection picker says how many items are due within the notice period and
 links here; it is one line rather than a marker on each option because the

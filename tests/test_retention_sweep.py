@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -78,7 +78,9 @@ class _SweepRAG:
     def list_collections(self) -> list[str]:
         return sorted(self.existing)
 
-    def repair_retention_index(self, period: RetentionPeriodState, *, notice_days: int) -> int:
+    def repair_retention_index(
+        self, period: RetentionPeriodState, *, notice_days: int, skip: Callable[[str], bool] | None = None
+    ) -> int:
         self.repaired += 1
         return 0
 
@@ -130,6 +132,7 @@ def fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[_SweepRAG
     instance = _SweepRAG(tmp_path)
     monkeypatch.setattr(api_module, "rag", instance)
     monkeypatch.setattr(api_module, "_discard_report_pdfs", lambda ids: None)
+    monkeypatch.setattr(api_module, "_report_pdf_store", lambda: api_module.ReportPdfStore(tmp_path / "pdfs"))
     monkeypatch.setattr(api_module, "_extract_store", lambda: api_module.ExtractStore(tmp_path / "extracts"))
     yield instance
 
@@ -203,6 +206,7 @@ def test_last_document_takes_the_collection_and_its_sessions(fake: _SweepRAG, au
     assert report.collections == 1
     assert [e["operation"] for e in _events(audit_stream) if e["action"] == "delete"] == [
         "retention.document",
+        "retention.document.removed",
         "retention.collection",
     ]
 
@@ -400,7 +404,7 @@ def test_a_failed_collection_cascade_is_retried(fake: _SweepRAG, monkeypatch: py
     physical = fake.owners.register("alice", "docs")
     _doc(fake, "old", days_ago=370, physical=physical)
     fake.empty_after = True
-    real = api_module._purge_collection
+    real = api_module._purge_collection_held
     calls: list[str] = []
 
     def flaky(owner: str | None, logical: str, phys: str) -> object:
@@ -409,7 +413,7 @@ def test_a_failed_collection_cascade_is_retried(fake: _SweepRAG, monkeypatch: py
             raise RuntimeError("store offline")
         return real(owner, logical, phys)
 
-    monkeypatch.setattr(api_module, "_purge_collection", flaky)
+    monkeypatch.setattr(api_module, "_purge_collection_held", flaky)
     first = _sweep()
     assert first.failed == [physical] and fake.deleted_collections == []
     second = _sweep()
@@ -446,3 +450,101 @@ def test_one_unreadable_session_never_blocks_the_others(fake: _SweepRAG, monkeyp
     _sweep()
     assert _session_expiry(fake, "good") is not None
     assert _report_expiry(fake, rid) is not None
+
+
+def test_the_busy_check_runs_under_the_purge_guard(fake: _SweepRAG) -> None:
+    """No job can start between the busy check and the delete: the guard is taken first."""
+    _doc(fake, "old", days_ago=370)
+    seen: list[bool] = []
+
+    class _WatchingJobs:
+        async def any_active_for(self, physical: str) -> bool:
+            seen.append(physical in api_module._purging)
+            return False
+
+    anyio.run(api_module._retention_sweep, CFG, STATE, cast(Any, _WatchingJobs()))
+    assert seen == [True]
+    assert fake.deleted_docs == [("phys", ["old"])]
+
+
+def test_a_document_purge_names_itself_in_the_409() -> None:
+    """Work refused while documents are deleted says so, not that the whole collection goes."""
+    from fastapi import HTTPException
+
+    with api_module._purge_guard("phys-x", detail="Documents of this collection are being deleted."):
+        with pytest.raises(HTTPException) as caught:
+            api_module._refuse_while_purging("phys-x")
+    assert caught.value.detail == "Documents of this collection are being deleted."
+    with api_module._purge_guard("phys-y"):
+        with pytest.raises(HTTPException) as caught:
+            api_module._refuse_while_purging("phys-y")
+    assert caught.value.detail == "Collection is being deleted."
+
+
+def test_a_pdf_whose_report_is_gone_is_deleted(
+    fake: _SweepRAG, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A render left behind by a report delete that failed to remove it goes with the next sweep."""
+    store = api_module.ReportPdfStore(tmp_path / "pdfs")
+    monkeypatch.setattr(api_module, "_report_pdf_store", lambda: store)
+    live = fake.reports.create_report(title="r", owner="alice", collection_name="docs")
+    for report_id in (int(live["id"]), 9999):
+        store.write(
+            report_id,
+            b"%PDF-1.7",
+            report_created_at="2026-01-01T00:00:00",
+            report_updated_at="2026-01-01T00:00:00",
+            filename="r.pdf",
+            pages=1,
+            now=NOW,
+        )
+    report = _sweep()
+    assert store.ids() == {int(live["id"])}
+    assert report.report_pdfs == 1
+
+
+def test_what_a_document_delete_removed_is_recorded(fake: _SweepRAG, audit_stream: io.StringIO) -> None:
+    """After the delete, a child event counts what went: points, images, nodes, files."""
+    _doc(fake, "old", days_ago=370)
+    _sweep()
+    events = _events(audit_stream)
+    (primary,) = [e for e in events if e["operation"] == "retention.document"]
+    (removed,) = [e for e in events if e["operation"] == "retention.document.removed"]
+    assert removed["parent_event_id"] == primary["event_id"]
+    assert removed["outcome"] == "ok"
+    assert removed["target"]["ids"] == ["old"]
+    assert removed["criteria"]["points"] == 1
+    assert {"image_points", "image_occurrences", "nodes", "source_files", "artifacts"} <= set(removed["criteria"])
+
+
+def test_a_second_change_during_a_notice_moves_derived_deadlines_by_its_own_step(fake: _SweepRAG) -> None:
+    """365 → 300 → 330 → 200: chats move as their sources do, never by the shortening already applied."""
+    fake.owners.record_retention_period(365, now=NOW - 400 * DAY)
+    with fake.sessions._session_scope() as s:
+        s.add(Conversation(id="far", owner="alice", collection_name="phys", expires_at=NOW + 300 * DAY))
+        s.commit()
+    api_module._record_retention_period(DocumentRetentionConfig(days=365, notice_days=30))
+    api_module._record_retention_period(DocumentRetentionConfig(days=300, notice_days=30))
+    assert _session_expiry(fake, "far") == NOW + 235 * DAY
+    api_module._record_retention_period(DocumentRetentionConfig(days=330, notice_days=30))
+    assert _session_expiry(fake, "far") == NOW + 235 * DAY
+    api_module._record_retention_period(DocumentRetentionConfig(days=200, notice_days=30))
+    assert _session_expiry(fake, "far") == NOW + 105 * DAY
+
+
+def test_a_failed_removal_record_still_lets_the_collection_go(fake: _SweepRAG, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deletion was recorded before it ran; a failing count afterwards never strands the emptied collection."""
+    physical = fake.owners.register("alice", "docs")
+    _doc(fake, "old", days_ago=370, physical=physical)
+    fake.empty_after = True
+    original = api_module.Operation.child
+
+    def child(self: Any, action: str, operation: str, **kwargs: Any) -> str:
+        if operation == "retention.document.removed":
+            raise OSError("audit sink full")
+        return original(self, action, operation, **kwargs)
+
+    monkeypatch.setattr(api_module.Operation, "child", child)
+    report = _sweep()
+    assert fake.deleted_collections == [physical]
+    assert (report.collections, report.failed) == (1, [])

@@ -247,8 +247,43 @@ def _ensure_derived_expiry_columns(engine: Engine) -> None:
             for table in ("conversations", "reports"):
                 if table in tables and "expires_at" not in {col["name"] for col in inspector.get_columns(table)}:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN expires_at DATETIME"))
+            if "conversations" in tables:
+                # create_all adds no index to an existing table; the sweep and
+                # the notice read sessions by deadline.
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_conversations_expires_at ON conversations (expires_at)")
+                )
     except Exception as exc:
         raise _migration_failure("derived expiry columns", engine, exc) from exc
+
+
+def _ensure_retention_state_columns(engine: Engine) -> None:
+    """Add the notice end and the rule in force to ``retention_state``.
+
+    Existing rows stay ``NULL`` there; the next startup writes their notice
+    end (``docs/retention.md``).
+
+    Args:
+        engine (Engine): The session-store engine.
+
+    Raises:
+        SessionStoreMigrationError: If the migration cannot be applied.
+    """
+    try:
+        inspector = inspect(engine)
+        if "retention_state" not in set(inspector.get_table_names()):
+            return
+        present = {col["name"] for col in inspector.get_columns("retention_state")}
+        with engine.begin() as conn:
+            for column, kind in (
+                ("grace_until", "DATETIME"),
+                ("in_force_days", "INTEGER"),
+                ("in_force_grace", "DATETIME"),
+            ):
+                if column not in present:
+                    conn.execute(text(f"ALTER TABLE retention_state ADD COLUMN {column} {kind}"))
+    except Exception as exc:
+        raise _migration_failure("retention state columns", engine, exc) from exc
 
 
 def _ensure_collection_owner_activity_column(engine: Engine) -> None:
@@ -306,4 +341,5 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     _ensure_report_columns(engine)
     _ensure_collection_owner_activity_column(engine)
     _ensure_derived_expiry_columns(engine)
+    _ensure_retention_state_columns(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)

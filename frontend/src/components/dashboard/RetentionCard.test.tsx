@@ -109,4 +109,22 @@ describe('RetentionCard', () => {
     expect(screen.queryByText('doc-8.pdf')).not.toBeInTheDocument()
     expect(screen.getByText(/2 more/)).toBeInTheDocument()
   })
+
+  it('names the group of items without a collection', async () => {
+    vi.stubGlobal('fetch', retentionFetch(365, [item('session', 'Old question', '', '2099-11-22T08:00:00Z')]))
+    renderCard()
+
+    const card = await screen.findByRole('region', { name: /automatic deletion/i })
+    const [group] = within(card).getAllByRole('group')
+    expect(within(group).getByRole('heading')).toHaveTextContent('No collection')
+  })
+
+  it('says an overdue item goes at the next run, not on a past date', async () => {
+    vi.stubGlobal('fetch', retentionFetch(365, [item('document', 'old.pdf', 'alpha', '2000-01-01T00:00:00Z')]))
+    renderCard()
+
+    const row = (await screen.findByText('old.pdf')).closest('li')
+    expect(row).toHaveTextContent('Deleted at the next run')
+    expect(row).not.toHaveTextContent('2000')
+  })
 })
