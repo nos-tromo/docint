@@ -26,8 +26,8 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_PROVIDER` | `ollama` | One of `ollama`, `openai`, `vllm`. Invalid values raise `ValueError`. |
-| `OPENAI_API_BASE` | `http://localhost:11434/v1` | Base URL of the OpenAI-compatible endpoint. |
+| `INFERENCE_PROVIDER` | `ollama` (compose: `vllm`) | One of `ollama`, `openai`, `vllm`. Invalid values raise `ValueError`. `docker/compose.yaml` sets `${INFERENCE_PROVIDER:-vllm}` on the backend, so under Docker the default is the federation's router; a run outside Docker keeps `ollama`. |
+| `OPENAI_API_BASE` | `http://localhost:11434/v1` (compose: `http://vllm-router:4000/v1`) | Base URL of the OpenAI-compatible endpoint. `docker/compose.yaml` sets `${OPENAI_API_BASE:-http://vllm-router:4000/v1}` on the backend, the router on `inference-net`; a run outside Docker keeps the localhost default. |
 | `OPENAI_API_KEY` | `sk-no-key-required` | Bearer token. Required for the `openai` provider. |
 | `OPENAI_CTX_WINDOW` | `4096` (8192 min when provider is `vllm`) | Context window for the text model. Falls back to `CHAT_MAX_MODEL_LEN` when `vllm`. |
 | `OPENAI_DIMENSIONS` | *unset* | Optional override for embedding dimension. |
@@ -98,7 +98,7 @@ existed.
 | `OCR_MODEL` | `""` (unset) | Model id of the document OCR model. Setting it also turns image OCR on by default. A **layout** model (`dots-studio/dots.mocr`, `rednote-hilab/dots.ocr`) returns bounding boxes, categories and tables as HTML; anything else is asked for plain text. |
 | `OCR_API_BASE` | `OPENAI_API_BASE` | Endpoint serving that model — e.g. the vllm-service `ocr` backend via the router. |
 | `OCR_API_KEY` | `OPENAI_API_KEY` | API key for that endpoint. |
-| `OCR_TIMEOUT` | `OPENAI_TIMEOUT` | Client timeout. A page takes a minute or two, not seconds. |
+| `OCR_TIMEOUT` | `60` | Seconds one read of an image may take: an image file, a figure lifted out of a PDF, a keyframe. Scanned PDF pages and table regions take `PIPELINE_OCR_TIMEOUT` instead (see [Pipeline](#pipeline--pipelineconfig)), which inherits `OPENAI_TIMEOUT`, since a page takes a minute or two, not seconds. |
 
 `OCR_MODEL` is the seam a dedicated document-parsing model plugs into
 without a code change. It replaces the `TABLE_VLM_*` knobs, which were a
@@ -345,13 +345,13 @@ Out-of-range values here **raise** at startup rather than warning.
 
 Loaded by `load_nextext_env()`. docint ships no media runtime: audio and video
 are forwarded to a remote [Nextext](https://github.com/nos-tromo/nextext)
-service, which returns a transcript plus keyframes. Leaving `NEXTEXT_API_BASE`
-unset disables the path — video/audio is skipped fail-soft and images are
-unaffected.
+service, which returns a transcript plus keyframes. Outside Docker, leaving
+`NEXTEXT_API_BASE` unset disables the path — video/audio is skipped fail-soft
+and images are unaffected; under Docker the compose default always sets it.
 
 | Variable | Default | Description |
 |---|---|---|
-| `NEXTEXT_API_BASE` | *empty* (disabled) | Base URL of the Nextext API. **Must include Nextext's `/api/v1` prefix** (e.g. `http://nextext-backend:8000/api/v1`): docint calls `{base}/jobs`, so omitting it 404s every request. |
+| `NEXTEXT_API_BASE` | *empty* (disabled) (compose: `http://nextext-backend:8000/api/v1`) | Base URL of the Nextext API. **Must include Nextext's `/api/v1` prefix** (e.g. `http://nextext-backend:8000/api/v1`): docint calls `{base}/jobs`, so omitting it 404s every request. `docker/compose.yaml` sets `${NEXTEXT_API_BASE:-http://nextext-backend:8000/api/v1}`, where an empty value counts as unset too, so under Docker the path cannot be switched off; outside Docker the empty default disables it. |
 | `NEXTEXT_API_KEY` | *unset* | docint's service token for Nextext, sent as `Authorization: Bearer …`. Set it to the token Nextext's `NEXTEXT_SERVICE_TOKENS` lists for docint; Nextext then identifies docint as the service principal `service:<entry name>` (`service:docint` for `docint=<token>`), a namespace no user identity can take, and ignores the identity header below. docint's principal there therefore changes from `docint` to `service:docint` once the token matches, and Nextext jobs started under one are invisible to the other, so make the switch while docint has no Nextext job in flight. Generate the token with `make secret` in edge-plane: Nextext refuses to start on a token under 32 characters, a duplicate, or one equal to its `NEXTEXT_EDGE_SECRET`. docint calls Nextext's backend directly, not through the gateway, so once Nextext sets its edge secret this token is the only identity it accepts from docint: set it first, or every call is anonymous there (401 unless Nextext has a default identity). |
 | `NEXTEXT_AUTH_HEADER` | `X-Auth-User` | Trusted identity header docint sends. Must match Nextext's own `NEXTEXT_AUTH_HEADER`. Nextext reads it only from a caller without a valid service token, and only while its `NEXTEXT_EDGE_SECRET` is unset. |
 | `NEXTEXT_IDENTITY` | `docint` | Identity sent under that header. Set it empty to send no header and fall back to Nextext's server-side default identity. Never a `service:` value: Nextext reserves that prefix for token callers and ignores such a header, so it cannot stand in for the token. |

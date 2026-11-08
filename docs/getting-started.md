@@ -52,6 +52,10 @@ extra context a new user needs to understand what they just started.
    TEXT_MODEL=gpt-4o
    ```
 
+   Under Docker the router's `INFERENCE_PROVIDER` and `OPENAI_API_BASE` are
+   already the defaults of `docker/compose.yaml`, so the first shape needs
+   only the key and the model.
+
 2. **Create the shared networks and volumes** (idempotent):
 
    ```bash

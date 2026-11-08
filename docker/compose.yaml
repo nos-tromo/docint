@@ -108,6 +108,10 @@ services:
       - "8000"
     environment:
       <<: *no-proxy-env
+      # The federation's vllm router on inference-net. A run outside Docker
+      # keeps the code defaults (ollama on localhost).
+      INFERENCE_PROVIDER: ${INFERENCE_PROVIDER:-vllm}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:4000/v1}
       NEXTEXT_API_BASE: ${NEXTEXT_API_BASE:-http://nextext-backend:8000/api/v1}
       RESPONSE_LANGUAGE: ${RESPONSE_LANGUAGE:-en}
       QDRANT_HOST: http://qdrant:6333

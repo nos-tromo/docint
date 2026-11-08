@@ -406,6 +406,10 @@ rejected as unauthenticated — and with `DOCINT_EDGE_SECRET` set the fallback
 is ignored anyway. The dev override's `DOCINT_DEFAULT_IDENTITY` fallback stays
 dev-only.
 
+## Environment example
+
+`.env.example` follows deploy's shared format (deploy `docs/runbooks/env-sync.md`, For member authors); check with `python3 -B ../deploy/scripts/check_env_examples.py .`.
+
 ## Git & PR Workflow
 
 - Never commit directly to `main`; always branch (`feat/`, `fix/`) and open a PR.

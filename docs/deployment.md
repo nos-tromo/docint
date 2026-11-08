@@ -213,12 +213,13 @@ no Python or ML dependencies.
 
 `.env` at the repository root feeds both Compose variable interpolation
 (via `--env-file`) and the backend container (`env_file: ../.env`). Put
-provider-specific settings there:
+provider-specific settings there. `docker/compose.yaml` already defaults
+`INFERENCE_PROVIDER=vllm` and `OPENAI_API_BASE=http://vllm-router:4000/v1`,
+so against the federation's router `.env` needs only the router's key and,
+where it differs from the default, the model:
 
 ```bash
-INFERENCE_PROVIDER=vllm
-OPENAI_API_BASE=http://vllm-router:4000/v1
-OPENAI_API_KEY=sk-no-key-required
+OPENAI_API_KEY=<the router's master key>
 TEXT_MODEL=Qwen/Qwen3.5-2B
 ```
 
@@ -230,6 +231,7 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `EXTRA_NO_PROXY` | Comma-separated hostnames appended to the backend's `NO_PROXY` / `no_proxy` (must start with a leading comma). |
 | `INFERENCE_NET` | Name of the shared external inference network (default `inference-net`). |
 | `DATA_NET` | Name of the shared external data network (default `data-net`). |
+| `EDGE_NET` | Name of the shared external edge network the frontend joins (default `edge-net`). |
 | `DOCINT_HOST_PORT` | Host port for the React SPA under `make up-dev` (default `8080`). |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
 | `DOCINT_API_MAX_BODY_SIZE` | Per-request cap nginx enforces on the JSON API locations (default `64m`), sized for the report batch add. Frontend-only — nothing advertises it. Raise it alongside `REPORT_BATCH_MAX_ITEMS` when a section's findings run into the tens of thousands. |
