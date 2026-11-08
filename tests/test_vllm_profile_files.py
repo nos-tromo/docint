@@ -33,6 +33,14 @@ def test_docint_compose_joins_shared_INFERENCE_NET() -> None:
     assert "- docint-backend" in compose
 
 
+def test_docint_compose_defaults_inference_to_the_router() -> None:
+    """Under compose the backend defaults to the vllm router; .env overrides both."""
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
+
+    assert "INFERENCE_PROVIDER: ${INFERENCE_PROVIDER:-vllm}" in compose
+    assert "OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:4000/v1}" in compose
+
+
 def test_bundled_vllm_artifacts_are_removed_from_docint() -> None:
     """Bundled vLLM assets should be removed from the Docint repository."""
     assert not (REPO_ROOT / "Dockerfile.vllm").exists()
