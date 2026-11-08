@@ -40,9 +40,7 @@ extra context a new user needs to understand what they just started.
 
    ```bash
    # Using the federation's vllm-service router
-   INFERENCE_PROVIDER=vllm
-   OPENAI_API_BASE=http://vllm-router:4000/v1
-   OPENAI_API_KEY=sk-no-key-required
+   OPENAI_API_KEY=<the router's master key>
    TEXT_MODEL=Qwen/Qwen3.5-2B
 
    # Using the OpenAI API
@@ -52,9 +50,10 @@ extra context a new user needs to understand what they just started.
    TEXT_MODEL=gpt-4o
    ```
 
-   Under Docker the router's `INFERENCE_PROVIDER` and `OPENAI_API_BASE` are
-   already the defaults of `docker/compose.yaml`, so the first shape needs
-   only the key and the model.
+   `docker/compose.yaml` already defaults `INFERENCE_PROVIDER=vllm` and
+   `OPENAI_API_BASE=http://vllm-router:4000/v1`, so the router shape needs
+   only the router's key and, where it differs from the default, the model.
+   A run outside Docker sets those two itself.
 
 2. **Create the shared networks and volumes** (idempotent):
 

@@ -26,8 +26,8 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_PROVIDER` | `ollama` (compose: `vllm`) | One of `ollama`, `openai`, `vllm`. Invalid values raise `ValueError`. `docker/compose.yaml` sets `${INFERENCE_PROVIDER:-vllm}` on the backend, so under Docker the default is the federation's router; a run outside Docker keeps `ollama`. |
-| `OPENAI_API_BASE` | `http://localhost:11434/v1` (compose: `http://vllm-router:4000/v1`) | Base URL of the OpenAI-compatible endpoint. `docker/compose.yaml` sets `${OPENAI_API_BASE:-http://vllm-router:4000/v1}` on the backend, the router on `inference-net`; a run outside Docker keeps the localhost default. |
+| `INFERENCE_PROVIDER` | `ollama` (compose: `vllm`) | One of `ollama`, `openai`, `vllm`. Invalid values raise `ValueError`. `docker/compose.yaml` sets `${INFERENCE_PROVIDER:-vllm}` on the backend, so under Docker the default is the federation's router; a run outside Docker keeps `ollama`. Under compose a value exported in the shell that runs `make up` / `make up-dev` beats `.env`, because the shell wins compose interpolation, so do not export it in a dev shell. |
+| `OPENAI_API_BASE` | `http://localhost:11434/v1` (compose: `http://vllm-router:4000/v1`) | Base URL of the OpenAI-compatible endpoint. `docker/compose.yaml` sets `${OPENAI_API_BASE:-http://vllm-router:4000/v1}` on the backend, the router on `inference-net`; a run outside Docker keeps the localhost default. Under compose a value exported in the shell that runs `make up` / `make up-dev` beats `.env`, because the shell wins compose interpolation, so do not export it in a dev shell. |
 | `OPENAI_API_KEY` | `sk-no-key-required` | Bearer token. Required for the `openai` provider. |
 | `OPENAI_CTX_WINDOW` | `4096` (8192 min when provider is `vllm`) | Context window for the text model. Falls back to `CHAT_MAX_MODEL_LEN` when `vllm`. |
 | `OPENAI_DIMENSIONS` | *unset* | Optional override for embedding dimension. |

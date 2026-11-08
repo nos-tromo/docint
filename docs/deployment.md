@@ -264,12 +264,11 @@ To run both on a single host with a shared network:
 
 2. Start `vllm-service` attached to that network.
 
-3. In the Docint `.env`, set:
+3. In the Docint `.env`, set the router's key (`INFERENCE_PROVIDER=vllm` and
+   `OPENAI_API_BASE=http://vllm-router:4000/v1` are compose defaults):
 
    ```bash
-   INFERENCE_PROVIDER=vllm
-   OPENAI_API_BASE=http://vllm-router:4000/v1
-   OPENAI_API_KEY=sk-no-key-required
+   OPENAI_API_KEY=<the router's master key>
    TEXT_MODEL=Qwen/Qwen3.5-2B
    VISION_MODEL=Qwen/Qwen3.5-2B
    EMBED_MODEL=BAAI/bge-m3
