@@ -571,10 +571,13 @@ export const de: Strings = {
   'topics.lab_merge_similarity': 'zusammengeführt ab Ähnlichkeit {similarity}',
   'topics.lab_preview': 'Vorschau mit {count} Themen, noch nicht übernommen.',
   'topics.lab_merge_selected': 'Auswahl zusammenführen',
+  'topics.lab_selected': '{selected} von {count} ausgewählt',
   'topics.lab_split': 'Auflösen',
   'topics.lab_apply': 'Übernehmen',
   'topics.lab_discard': 'Verwerfen',
   'topics.lab_reset': 'Ursprüngliche Themen wiederherstellen',
+  'topics.lab_reset_confirm':
+    'Ursprüngliche Themen wiederherstellen? Übernommene Zusammenführungen werden zurückgenommen.',
   'topics.lab_outliers_title': 'Nicht zugeordnete Chunks',
   'topics.lab_outliers_hint':
     'Ordnet einen nicht zugeordneten Chunk seinem nächsten Thema zu, wenn er ihm mindestens so ähnlich ist.',
@@ -587,7 +590,7 @@ export const de: Strings = {
   'topics.lab_outliers_preview_one': '{count} Chunk ab Ähnlichkeit {threshold}',
   'topics.lab_outliers_preview_other': '{count} Chunks ab Ähnlichkeit {threshold}',
   'topics.lab_outliers_apply': 'Zuordnen',
-  'topics.lab_outliers_undo': 'Rückgängig',
+  'topics.lab_outliers_undo': 'Zuordnung rückgängig machen',
   'topics.lab_rebuild_title': 'Neu berechnen',
   'topics.lab_rebuild_hint': 'Eine größere Mindestgröße ergibt weniger, breitere Themen.',
   'topics.lab_rebuild_size': 'Mindestgröße eines Themas',
