@@ -8,6 +8,7 @@ import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useUiStore } from '@/stores/ui'
 import type { ExtractRecord, IngestEvent } from '@/api/types'
 import { captureDownloads, fileResponse } from '@/test/downloads'
+import { createExtract, listExtracts } from '@/api/extracts'
 
 const RECORD: ExtractRecord = {
   extract_id: '20260102-030405-deadbeef',
@@ -69,6 +70,32 @@ describe('ExtractsPanel', () => {
     await waitFor(() => expect(downloads.saved()).toHaveLength(1))
     expect(String(fetchMock.mock.calls[0][0])).toBe('/collections/mydocs/extracts/20260102-030405-deadbeef/download')
     expect(downloads.saved()[0].download).toBe('mydocs-extract-20260102-0304.zip')
+  })
+
+  it('offers a labelled build action while there is no extract', async () => {
+    vi.mocked(listExtracts).mockResolvedValueOnce({ extracts: [] })
+    render(<ExtractsPanel />, { wrapper })
+    const build = await screen.findByRole('button', { name: 'Build extract' })
+    expect(build).toHaveTextContent('Build extract')
+    expect(build.closest('.border-dashed')).toHaveTextContent('No extracts yet.')
+    await userEvent.click(build)
+    await waitFor(() => expect(createExtract).toHaveBeenCalled())
+  })
+
+  it('moves the build action into the header once extracts exist', async () => {
+    render(<ExtractsPanel />, { wrapper })
+    await screen.findByText('mydocs-extract-20260102-0304.zip')
+    const build = screen.getByRole('button', { name: 'Build extract' })
+    expect(build).toHaveTextContent('')
+    expect(build).toHaveAttribute('title', 'Build extract')
+    expect(document.querySelector('.border-dashed')).toBeNull()
+  })
+
+  it('cannot start a second build while one runs', async () => {
+    vi.mocked(listExtracts).mockResolvedValueOnce({ extracts: [] })
+    useIngestJobsStore.getState().appendEvent('j1', frame('extract_started', { job_id: 'j1' }))
+    render(<ExtractsPanel />, { wrapper })
+    expect(await screen.findByRole('button', { name: 'Build extract' })).toBeDisabled()
   })
 
   it('shows progress from the shared job stream', async () => {
