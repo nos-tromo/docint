@@ -812,6 +812,7 @@ export const en = {
   'ingest.stream_lost': 'Live updates disconnected.',
   'ingest.reconnect': 'Reconnect',
   'ingest.dismiss': 'Dismiss',
+  'ingest.jobs_heading': 'Ingest jobs',
   'ingest.clear_finished': 'Clear finished ({count})',
   'ingest.clear_partial_failure': 'Cleared {cleared} of {total}; {failed} failed',
   'nav.ingest_running': 'Ingestion running',

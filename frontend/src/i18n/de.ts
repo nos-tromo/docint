@@ -838,6 +838,7 @@ export const de: Strings = {
   'ingest.stream_lost': 'Live-Aktualisierung getrennt.',
   'ingest.reconnect': 'Neu verbinden',
   'ingest.dismiss': 'Ausblenden',
+  'ingest.jobs_heading': 'Importläufe',
   'ingest.clear_finished': 'Abgeschlossene ausblenden ({count})',
   'ingest.clear_partial_failure': '{cleared} von {total} ausgeblendet; {failed} fehlgeschlagen',
   'nav.ingest_running': 'Verarbeitung läuft',

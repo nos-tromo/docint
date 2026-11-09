@@ -706,6 +706,51 @@ describe('Ingest — several runs at once', () => {
     vi.unstubAllGlobals()
   })
 
+  it('names the job list and clears finished jobs from its header', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    finishedJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    const clear = await screen.findByRole('button', { name: 'Clear finished (1)' })
+    expect(clear.closest('.flex-wrap')).toContainElement(screen.getByRole('heading', { name: 'Ingest jobs' }))
+  })
+
+  it('dismisses and aborts from the card header', async () => {
+    track('job-1', 'first')
+    track('job-2', 'second')
+    knownJobIds.add('job-1')
+    knownJobIds.add('job-2')
+    finishedJobIds.add('job-1')
+    jobCollections['job-1'] = 'first'
+    jobCollections['job-2'] = 'second'
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-2', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-2', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    const dismiss = await screen.findByRole('button', { name: /dismiss/i })
+    const abort = await screen.findByRole('button', { name: /^abort$/i })
+    // Icon actions, each in the header row that names its run's collection.
+    expect(dismiss).toHaveTextContent('')
+    expect(abort).toHaveTextContent('')
+    expect(dismiss.closest('.justify-between')).toHaveTextContent('first')
+    expect(abort.closest('.justify-between')).toHaveTextContent('second')
+  })
+
   it('offers no abort once a job has finished', async () => {
     track('job-1', 'first')
     knownJobIds.add('job-1')
