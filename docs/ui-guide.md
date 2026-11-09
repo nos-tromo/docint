@@ -87,11 +87,11 @@ formatted by `src/lib/formatDate.ts` in UTC, the day the server acts on.
 The primary surface. Streams the answer token-by-token from
 `POST /stream_query` over SSE, loads/saves session history
 (`/chat/:sessionId`), and builds metadata filters (MIME, date range,
-hate-speech-only, custom field/operator/value rules) via
-`src/components/chat/FilterBuilder.tsx`. Each exchange renders as a
-`ChatTurn` with `Citation`s, a `ValidationBanner` for answer/source
-mismatches, and an optional `GraphDebugPanel`. Cancellation uses an
-`AbortController`.
+hate-speech-only, custom field/operator/value rules, each added with the + in
+the custom-rules header) via `src/components/chat/FilterBuilder.tsx`. Each
+exchange renders as a `ChatTurn` with `Citation`s, a `ValidationBanner` for
+answer/source mismatches, and an optional `GraphDebugPanel`. Cancellation uses
+an `AbortController`.
 
 The answer is Markdown: `grounded_qa.txt` on a plain turn, and
 `agent_system.txt` on an agent turn, ask the model for lists, bold, tables and
@@ -270,7 +270,11 @@ a blank query, where it exports the whole filtered collection.
 ### Ingest (`src/routes/Ingest.tsx`)
 
 Drag-and-drop upload (`src/components/ingest/Dropzone.tsx`) into a selected
-or newly-created collection. Streams the multipart upload plus SSE progress
+or newly-created collection. The picked files are listed with **Clear
+selection** in the list's header (a selection too large to list shows its count
+and size in the same header), and **Ingest** runs the full width of the form's
+foot. If the live progress stream drops, a banner says so and offers
+**Reconnect**. Streams the multipart upload plus SSE progress
 events (`src/components/ingest/IngestionStatus.tsx`) for per-file and
 per-stage status. A selection goes up in small batches (at most 100 files and
 64 MiB per request); a batch that stops making progress for two minutes is
@@ -316,19 +320,19 @@ clips it has to send to Nextext itself, because the pool left them without a
 transcript.
 
 Below the form, every ingest job the caller owns is listed newest first, one
-card each (`src/components/ingest/IngestJobList.tsx`): queued runs waiting on
-a worker slot, runs in progress, finished runs with their warnings, and
+card each (`src/components/ingest/IngestJobList.tsx`): queued runs waiting on a
+worker slot, runs in progress, finished runs with their warnings, and
 interrupted runs offering a re-queue. Starting a second run therefore never
 hides the first. The list has its own **Ingest jobs** header; each card's
 header row carries the run's one action at its right edge — a stop control
 (**Abort**, which asks first) while it is queued or running, a dismiss (×) once
 it has ended. **Clear finished** in the list's header dismisses every ended run
 at once and leaves anything still running. An interrupted run offers **Run
-again** at the foot of its card. A completed run selects the collection it filled, so
-with several finishing in a row the last one wins. The list and its live
-progress belong to the owner selected in the sidebar: an admin viewing another
-user's collections sees that user's jobs, and each job is checked, re-run,
-dismissed and selected in the namespace it was queued in.
+again** at the foot of its card. A completed run selects the collection it
+filled, so with several finishing in a row the last one wins. The list and its
+live progress belong to the owner selected in the sidebar: an admin viewing
+another user's collections sees that user's jobs, and each job is checked,
+re-run, dismissed and selected in the namespace it was queued in.
 
 ### Analysis (`src/routes/Analysis.tsx`)
 
@@ -384,7 +388,8 @@ at a time):
   the maximize overlay, and adds native `<title>` tooltips, fit-to-view, and
   marquee/shift-click multi-select (docint's single-entity findings panel
   just follows the most recently selected node). A small node-count control
-  (`GraphTopKControl`, parent-owned state) sits above the graph. Selecting one
+  (`GraphTopKControl`, parent-owned state) sits above the graph, with an undo
+  icon beside it that resets the count to the deployment default. Selecting one
   or more nodes shows a **Remove node**/**Remove {n} nodes** button
   (Backspace/Delete also works); removal is view-only local state in
   `EntityGraph` — the underlying NER data is untouched, and removed nodes
@@ -402,8 +407,10 @@ locator/reference metadata flattened into a single Metadata column and an
 inline "Add to report" control. `HateSpeechTable` follows the same one-row-per-
 finding table shape.
 
-Both tables carry the same three section-wide controls in their header, in
-order: **Translate all**, **Add all findings to report**, **Export CSV**. Each
+Both tables open with one header row — the count on the left, the same three
+section-wide controls on the right, in order: **Translate all**, **Add all
+findings to report**, **Export CSV** — and end with **Load more** under the
+list once more rows exist. Each
 acts on every finding the section's filter matches — the tables page 50 rows at
 a time, so all three walk the remaining cursor pages themselves rather than act
 on what happens to be on screen.
@@ -458,8 +465,9 @@ runs:
   under a lowered bar. **Measure the distribution** runs a relax that places
   nothing new; after it, a slider for the minimum similarity says how many
   chunks it would place, exactly, and **Place them** runs it. **Undo
-  placement**, the undo icon in the section's header, takes the placement back. A distribution measured before the pool changed says so and
-  offers **Apply again** at the bar applied.
+  placement**, the undo icon in the section's header, takes the placement
+  back. A distribution measured before the pool changed says so and offers
+  **Apply again** at the bar applied.
 - **Recompute.** A minimum topic size (blank for automatic) with the size the
   run was built with under it, and **Recompute** at the section's foot, which
   asks first as **Restart analysis** does.
