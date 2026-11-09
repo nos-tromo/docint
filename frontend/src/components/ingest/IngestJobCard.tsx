@@ -224,7 +224,10 @@ export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobC
         if (!window.confirm(t('ingest.abort_confirm'))) return
         cancelMutation.mutate()
       }}
-    />
+    >
+      {/* A stop is cooperative and can take minutes: say so beside the icon. */}
+      {stopping && <span className="text-xs">{t('ingest.abort_stopping')}</span>}
+    </StopButton>
   ) : dismissable ? (
     <RemoveButton
       label={t('ingest.dismiss')}

@@ -55,6 +55,8 @@ let queuedJobIds: Set<string>
 let jobTimes: Record<string, { started_at: string | null; finished_at: string | null }>
 /** Job ids the mocked list reports as already finished. */
 let finishedJobIds: Set<string>
+/** Jobs the server reports as asked to stop but not yet stopped. */
+let stoppingJobIds: Set<string>
 /** Per-job collection names, for tests that run several collections at once. */
 let jobCollections: Record<string, string>
 /** Per-job owners, for an admin's jobs in another user's namespace; absent = the caller's own. */
@@ -80,6 +82,7 @@ function jobSnapshot(id: string) {
       : finishedJobIds.has(id)
         ? 'completed'
         : 'running') as 'queued' | 'running' | 'completed',
+    cancel_requested: stoppingJobIds.has(id),
     message: null,
     error: null,
     empty: false,
@@ -111,6 +114,7 @@ beforeEach(() => {
   jobOwners = {}
   queuedJobIds = new Set()
   finishedJobIds = new Set()
+  stoppingJobIds = new Set()
   jobCollections = {}
   jobTimes = {}
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -749,6 +753,30 @@ describe('Ingest — several runs at once', () => {
     expect(abort).toHaveTextContent('')
     expect(dismiss.closest('.justify-between')).toHaveTextContent('first')
     expect(abort.closest('.justify-between')).toHaveTextContent('second')
+  })
+
+  it('shows a stopping run as stopping, and asks nothing a second time', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    stoppingJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+
+    renderIn(<Ingest />)
+    const stop = await screen.findByRole('button', { name: 'Stopping…' })
+    expect(stop).toBeDisabled()
+    // A stop can take minutes: the state must be readable, not only named.
+    expect(stop).toHaveTextContent('Stopping…')
+    stop.click()
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/cancel'))).toBe(false)
+    vi.unstubAllGlobals()
   })
 
   it('offers no abort once a job has finished', async () => {
