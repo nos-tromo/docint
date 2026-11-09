@@ -309,3 +309,19 @@ describe('IngestionStatus live region', () => {
     expect(body).not.toHaveAttribute('role')
   })
 })
+
+describe('IngestionStatus header on a narrow card', () => {
+  it('lets the timer and actions wrap below the run instead of squeezing its name', () => {
+    render(
+      <IngestionStatus
+        status={completeStatus({ collection: 'projekt-alpha', startedAt: 0, finishedAt: 65_000 })}
+        actions={<button>Dismiss</button>}
+      />
+    )
+    const run = screen.getByRole('status')
+    const side = screen.getByRole('button', { name: 'Dismiss' }).parentElement!
+    expect(run.parentElement).toHaveClass('flex-wrap')
+    expect(run).toHaveClass('min-w-0', 'grow')
+    expect(side).toHaveClass('ml-auto')
+  })
+})

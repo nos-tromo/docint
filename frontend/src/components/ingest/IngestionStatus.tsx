@@ -244,8 +244,9 @@ function Header({
   // The terminal phases mark themselves; the live ones pulse a dot instead.
   const Marker = status.phase === 'complete' ? CheckIcon : status.phase === 'error' ? XIcon : null
   return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="flex items-center gap-2 min-w-0" role="status">
+    // On a narrow card the timer and actions wrap below rather than squeeze the run's name.
+    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+      <div className="flex min-w-0 grow basis-52 items-center gap-2" role="status">
         {Marker ? (
           <Marker
             className={cn(
@@ -267,7 +268,7 @@ function Header({
         )}
         <span
           className={cn(
-            'text-xs font-medium uppercase tracking-wide',
+            'whitespace-nowrap text-xs font-medium uppercase tracking-wide',
             theme.label
           )}
         >
@@ -282,7 +283,7 @@ function Header({
           </>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="ml-auto flex shrink-0 items-center gap-2">
         {showTimer && (
           <span className="inline-flex items-center gap-1 tabular-nums text-xs text-muted-foreground">
             <StopwatchIcon className="h-3.5 w-3.5" />
