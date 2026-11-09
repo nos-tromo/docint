@@ -54,17 +54,19 @@ export function RetentionCard() {
   const shown = items.slice(0, SHOWN)
   const now = Date.now()
   return (
-    <Card role="region" aria-labelledby={headingId}>
-      <h2 id={headingId} className="text-lg font-semibold text-primary">
-        {t('dashboard.retention_title')}
-      </h2>
-      <p className="mt-1 text-sm text-muted-foreground">{t('dashboard.retention_rule', { days: period.days })}</p>
+    <Card
+      role="region"
+      aria-labelledby={headingId}
+      title={t('dashboard.retention_title')}
+      titleId={headingId}
+      caption={t('dashboard.retention_rule', { days: period.days })}
+    >
       {items.length === 0 ? (
-        <div className="mt-3 text-sm text-muted-foreground">
+        <div className="text-sm text-muted-foreground">
           {t('dashboard.retention_empty', { days: data.notice_days })}
         </div>
       ) : (
-        <div className="mt-3 space-y-3">
+        <div className="space-y-3">
           {groupByCollection(shown).map((group, index) => (
             <section key={group.key} role="group" aria-labelledby={`${headingId}-g${index}`}>
               <h3 id={`${headingId}-g${index}`} className="truncate text-sm font-medium text-primary">
