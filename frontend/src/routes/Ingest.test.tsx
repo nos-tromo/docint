@@ -483,6 +483,42 @@ describe('Ingest — several runs at once', () => {
     expect(screen.queryByText('f0.txt')).not.toBeInTheDocument()
   })
 
+  it('clears a short selection from the file list header', async () => {
+    useIngestRunStore.getState().addFiles([new File(['x'], 'a.txt'), new File(['y'], 'b.txt')])
+    renderIn(<Ingest />)
+
+    const clear = await screen.findByRole('button', { name: 'Clear selection' })
+    expect(clear.closest('.flex-wrap')).toHaveTextContent('2 files')
+    clear.click()
+    await waitFor(() => expect(useIngestRunStore.getState().files).toHaveLength(0))
+  })
+
+  it('clears a folder-sized selection from the same header place', async () => {
+    useIngestRunStore.getState().addFiles(Array.from({ length: 600 }, (_, i) => new File(['x'], `f${i}.txt`)))
+    renderIn(<Ingest />)
+
+    const clear = await screen.findByRole('button', { name: 'Clear selection' })
+    expect(clear.parentElement).toHaveClass('ml-auto')
+    expect(clear.closest('.flex-wrap')).toHaveTextContent('600 files')
+  })
+
+  it('imports from a full-width bar', async () => {
+    renderIn(<Ingest />)
+    const ingest = await screen.findByRole('button', { name: 'Ingest' })
+    expect(ingest.parentElement).toHaveClass('flex-wrap', '*:flex-[1_1_8rem]')
+  })
+
+  it('offers reconnecting from an announced banner', async () => {
+    const retry = vi.spyOn(useIngestJobsStore.getState(), 'retryStream')
+    act(() => useIngestJobsStore.setState({ streamLost: true }))
+    renderIn(<Ingest />)
+
+    const banner = (await screen.findByText('Live updates disconnected.')).closest('[role="alert"]') as HTMLElement
+    expect(banner).toHaveClass('rounded-md', 'border')
+    within(banner).getByRole('button', { name: 'Reconnect' }).click()
+    expect(retry).toHaveBeenCalled()
+  })
+
   it('does not rebuild the file list as upload frames arrive', async () => {
     useIngestRunStore.getState().addFiles([new File(['x'], 'a.txt')])
     renderIn(<Ingest />)
