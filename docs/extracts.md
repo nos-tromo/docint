@@ -99,8 +99,9 @@ with no report to inherit from.
 
 ## Building one
 
-**From the SPA.** The Inspector has an *Data extracts* panel: **Build
-extract** queues one for the active collection, progress appears in the
+**From the SPA.** The Inspector has a *Data extracts* panel: **Build
+extract** (the labelled button while the panel is empty, the + icon in its
+header after) queues one for the active collection, progress appears in the
 panel, and finished bundles are listed underneath, each with a download
 button. Each document row also carries a download action for that source
 alone. Both fetch the archive with the stated purpose

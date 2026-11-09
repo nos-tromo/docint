@@ -184,7 +184,84 @@ describe('TopicsLab', () => {
     expect(screen.getByRole('button', { name: /T0\s*Kitchens and harbours/ })).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Restore the original topics' }))
 
+    expect(window.confirm).toHaveBeenCalledOnce()
     await waitFor(() => expect(posted(fetchMock)).toEqual([{ action: 'reduce', run_id: RUN_ID, groups: [] }]))
+  })
+
+  it('restoring asks first and sends nothing when cancelled', async () => {
+    const fetchMock = stubApi({ ...TUNING, groups: [[0, 5]], group_labels: { '0,5': 'Kitchens and harbours' } })
+    await openLab()
+    vi.mocked(window.confirm).mockReturnValueOnce(false)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Restore the original topics' }))
+
+    expect(window.confirm).toHaveBeenCalledOnce()
+    expect(posted(fetchMock)).toEqual([])
+    expect(screen.getByRole('button', { name: /T0\s*Kitchens and harbours/ })).toBeInTheDocument()
+  })
+
+  it('counts the selection above the list', async () => {
+    stubApi()
+    await openLab()
+
+    expect(screen.getByText('0 of 3 selected')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Merge selected' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: /T2\s*Orbits and comets/ }))
+    await userEvent.click(screen.getByRole('button', { name: /T5\s*Knots and sails/ }))
+
+    expect(screen.getByText('2 of 3 selected')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Merge selected' })).toBeEnabled()
+  })
+
+  it('commits from one full-width bar, Apply last', async () => {
+    stubApi()
+    await openLab()
+
+    const apply = screen.getByRole('button', { name: 'Apply' })
+    const bar = apply.parentElement!
+    expect(bar).toHaveClass('flex-wrap', '*:flex-[1_1_8rem]')
+    expect(bar).toContainElement(screen.getByRole('button', { name: 'Discard' }))
+    expect(bar.lastElementChild).toBe(apply)
+  })
+
+  it('restore and undo sit in their section headers', async () => {
+    stubApi()
+    await openLab()
+
+    const restore = screen.getByRole('button', { name: 'Restore the original topics' })
+    expect(restore.closest('section')).toContainElement(
+      screen.getByRole('heading', { level: 3, name: 'Merge similar topics' })
+    )
+    const undo = screen.getByRole('button', { name: 'Undo placement' })
+    expect(undo.closest('section')).toContainElement(
+      screen.getByRole('heading', { level: 3, name: 'Unassigned chunks' })
+    )
+    // Icon actions: the label is the accessible name, not visible text.
+    expect(restore).toHaveTextContent('')
+    expect(undo).toHaveTextContent('')
+  })
+
+  it('holds the header actions too while a topics job runs', async () => {
+    stubApi({
+      ...TUNING,
+      groups: [[0, 5]],
+      group_labels: { '0,5': 'Kitchens and harbours' },
+      relax: { threshold: 0.45, histogram: HISTOGRAM, applied: 4, stale: false }
+    })
+    await openLab()
+    expect(screen.getByRole('button', { name: 'Restore the original topics' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Undo placement' })).toBeEnabled()
+
+    act(() =>
+      useIngestJobsStore.getState().appendEvent('job-1', {
+        event: 'topics_started',
+        data: { job_id: 'job-1', collection: COLLECTION, action: 'reduce' },
+        receivedAt: 1
+      })
+    )
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore the original topics' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: 'Undo placement' })).toBeDisabled()
   })
 
   it('measures the unassigned chunks before offering a bar', async () => {
@@ -193,7 +270,7 @@ describe('TopicsLab', () => {
 
     expect(screen.getByText('20 unassigned · 0 placed under a lowered bar')).toBeInTheDocument()
     expect(screen.queryByRole('slider', { name: 'Minimum similarity' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Undo placement' })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: 'Measure the distribution' }))
 
     await waitFor(() => expect(posted(fetchMock)).toEqual([{ action: 'relax', run_id: RUN_ID, threshold: null }]))
@@ -225,7 +302,7 @@ describe('TopicsLab', () => {
     await openLab()
 
     expect(screen.getByText('20 unassigned · 4 placed under a lowered bar')).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Undo' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Undo placement' }))
 
     await waitFor(() => expect(posted(fetchMock)).toEqual([{ action: 'relax', run_id: RUN_ID, threshold: null }]))
   })

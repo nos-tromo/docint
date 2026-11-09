@@ -194,6 +194,15 @@ describe('TopicsPanel', () => {
     expect(window.confirm).not.toHaveBeenCalled()
   })
 
+  it('centres its empty state around the build action', async () => {
+    stubApi({ overview: null })
+    renderPanel()
+
+    const box = (await screen.findByText('No topics for this collection yet.')).closest('.border-dashed')
+    expect(box).toHaveClass('items-center')
+    expect(box).toContainElement(screen.getByRole('button', { name: 'Start analysis' }))
+  })
+
   it('asks for a collection before anything else', () => {
     stubApi()
     useUiStore.setState({ selectedCollection: null })

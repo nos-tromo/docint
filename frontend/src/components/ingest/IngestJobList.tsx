@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Button } from '@infra/ui'
+import { Button, SectionHeader } from '@infra/ui'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '@/api/client'
 import { dismissIngestJob } from '@/api/jobs'
@@ -97,22 +97,30 @@ export function IngestJobList() {
 
   return (
     <div className="space-y-4">
-      {finishedIds.length > 0 && (
-        <div className="flex items-center justify-end gap-2">
-          {clearError && <span className="text-sm text-[var(--status-amber-fg)]">{clearError}</span>}
-          {/* No confirmation: this removes job records, not indexed data, and
-              the per-card control it batches has none either. */}
-          <Button
-            variant="secondary"
-            disabled={clearMutation.isPending}
-            onClick={() => {
-              setClearError(null)
-              clearMutation.mutate()
-            }}
-          >
-            {t('ingest.clear_finished', { count: finishedIds.length })}
-          </Button>
-        </div>
+      <SectionHeader
+        title={t('ingest.jobs_heading')}
+        actions={
+          // No confirmation: this removes job records, not indexed data, and
+          // the per-card control it batches has none either.
+          finishedIds.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={clearMutation.isPending}
+              onClick={() => {
+                setClearError(null)
+                clearMutation.mutate()
+              }}
+            >
+              {t('ingest.clear_finished', { count: finishedIds.length })}
+            </Button>
+          )
+        }
+      />
+      {clearError && (
+        <p role="alert" className="text-sm text-[var(--status-amber-fg)]">
+          {clearError}
+        </p>
       )}
       {cards.map((card) => (
         <IngestJobCard

@@ -105,6 +105,14 @@ describe('SummaryPanel cache hit', () => {
     expect(mockSummarize).not.toHaveBeenCalled()
   })
 
+  it('centres its empty state around the create action', async () => {
+    render(<SummaryPanel />)
+
+    const box = (await screen.findByText('No summary for this collection yet.')).closest('.border-dashed')
+    expect(box).toHaveClass('items-center')
+    expect(box).toContainElement(screen.getByRole('button', { name: /generate/i }))
+  })
+
   it('offers the create action when the probe itself fails', async () => {
     // A transport blip on the read must not lock the panel out of building.
     mockCachedSummary.mockRejectedValue(new Error('network'))

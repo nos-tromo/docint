@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { CheckIcon, StopwatchIcon, XIcon } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import {
@@ -172,7 +172,7 @@ function useElapsedMs(
   return Math.max(0, end - startedAt)
 }
 
-export function IngestionStatus({ status }: { status: IngestStatus }) {
+export function IngestionStatus({ status, actions }: { status: IngestStatus; actions?: ReactNode }) {
   const theme = PHASE_THEME[status.phase]
   const elapsedMs = useElapsedMs(
     status.phase,
@@ -183,24 +183,24 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
   if (status.phase === 'idle') return null
 
   return (
-    <div
-      className={cn('rounded-lg border bg-muted p-4', theme.border)}
-      role="status"
-      aria-live="polite"
-    >
-      <Header status={status} theme={theme} elapsedMs={elapsedMs} />
-      {/* Inside the run's own box: with several runs listed, a warning outside
-          one names no run. For a job card these are the merged upload+job
-          warnings — a job-stream one (a soft-empty ingest, a failed entity
-          resolution) is as actionable as an upload one. */}
-      <IngestWarnings warnings={status.warnings} className="mt-3" />
+    // Not live as a whole: the ticking timer and the header actions would be
+    // read out on every tick and every label swap.
+    <div className={cn('rounded-lg border bg-muted p-4', theme.border)}>
+      <Header status={status} theme={theme} elapsedMs={elapsedMs} actions={actions} />
+      <div aria-live="polite">
+        {/* Inside the run's own box: with several runs listed, a warning outside
+            one names no run. For a job card these are the merged upload+job
+            warnings — a job-stream one (a soft-empty ingest, a failed entity
+            resolution) is as actionable as an upload one. */}
+        <IngestWarnings warnings={status.warnings} className="mt-3" />
 
-      {status.phase === 'queued' && <QueuedBody />}
-      {status.phase === 'uploading' && <UploadingBody status={status} />}
-      {status.phase === 'processing' && <ProcessingBody status={status} />}
-      {status.phase === 'complete' && <CompleteBody status={status} />}
-      {status.phase === 'cancelled' && <CancelledBody status={status} />}
-      {status.phase === 'error' && <ErrorBody status={status} />}
+        {status.phase === 'queued' && <QueuedBody />}
+        {status.phase === 'uploading' && <UploadingBody status={status} />}
+        {status.phase === 'processing' && <ProcessingBody status={status} />}
+        {status.phase === 'complete' && <CompleteBody status={status} />}
+        {status.phase === 'cancelled' && <CancelledBody status={status} />}
+        {status.phase === 'error' && <ErrorBody status={status} />}
+      </div>
     </div>
   )
 }
@@ -229,11 +229,13 @@ export function IngestWarnings({ warnings, className }: { warnings: string[]; cl
 function Header({
   status,
   theme,
-  elapsedMs
+  elapsedMs,
+  actions
 }: {
   status: IngestStatus
   theme: PhaseTheme
   elapsedMs: number
+  actions?: ReactNode
 }) {
   const t = useT()
   // Either measurement is enough to show a timer: a reattached run can carry
@@ -242,8 +244,9 @@ function Header({
   // The terminal phases mark themselves; the live ones pulse a dot instead.
   const Marker = status.phase === 'complete' ? CheckIcon : status.phase === 'error' ? XIcon : null
   return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="flex items-center gap-2 min-w-0">
+    // On a narrow card the timer and actions wrap below rather than squeeze the run's name.
+    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+      <div className="flex min-w-0 grow basis-52 items-center gap-2" role="status">
         {Marker ? (
           <Marker
             className={cn(
@@ -265,7 +268,7 @@ function Header({
         )}
         <span
           className={cn(
-            'text-xs font-medium uppercase tracking-wide',
+            'whitespace-nowrap text-xs font-medium uppercase tracking-wide',
             theme.label
           )}
         >
@@ -280,12 +283,15 @@ function Header({
           </>
         )}
       </div>
-      {showTimer && (
-        <span className="inline-flex items-center gap-1 tabular-nums text-xs text-muted-foreground shrink-0">
-          <StopwatchIcon className="h-3.5 w-3.5" />
-          {formatDuration(elapsedMs)}
-        </span>
-      )}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        {showTimer && (
+          <span className="inline-flex items-center gap-1 tabular-nums text-xs text-muted-foreground">
+            <StopwatchIcon className="h-3.5 w-3.5" />
+            {formatDuration(elapsedMs)}
+          </span>
+        )}
+        {actions}
+      </div>
     </div>
   )
 }

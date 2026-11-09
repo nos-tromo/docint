@@ -55,6 +55,8 @@ let queuedJobIds: Set<string>
 let jobTimes: Record<string, { started_at: string | null; finished_at: string | null }>
 /** Job ids the mocked list reports as already finished. */
 let finishedJobIds: Set<string>
+/** Jobs the server reports as asked to stop but not yet stopped. */
+let stoppingJobIds: Set<string>
 /** Per-job collection names, for tests that run several collections at once. */
 let jobCollections: Record<string, string>
 /** Per-job owners, for an admin's jobs in another user's namespace; absent = the caller's own. */
@@ -80,6 +82,7 @@ function jobSnapshot(id: string) {
       : finishedJobIds.has(id)
         ? 'completed'
         : 'running') as 'queued' | 'running' | 'completed',
+    cancel_requested: stoppingJobIds.has(id),
     message: null,
     error: null,
     empty: false,
@@ -111,6 +114,7 @@ beforeEach(() => {
   jobOwners = {}
   queuedJobIds = new Set()
   finishedJobIds = new Set()
+  stoppingJobIds = new Set()
   jobCollections = {}
   jobTimes = {}
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -703,6 +707,75 @@ describe('Ingest — several runs at once', () => {
         fetchMock.mock.calls.some(([u]) => String(u).includes('/ingest/jobs/job-1/cancel'))
       ).toBe(true)
     )
+    vi.unstubAllGlobals()
+  })
+
+  it('names the job list and clears finished jobs from its header', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    finishedJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    const clear = await screen.findByRole('button', { name: 'Clear finished (1)' })
+    expect(clear.closest('.flex-wrap')).toContainElement(screen.getByRole('heading', { name: 'Ingest jobs' }))
+  })
+
+  it('dismisses and aborts from the card header', async () => {
+    track('job-1', 'first')
+    track('job-2', 'second')
+    knownJobIds.add('job-1')
+    knownJobIds.add('job-2')
+    finishedJobIds.add('job-1')
+    jobCollections['job-1'] = 'first'
+    jobCollections['job-2'] = 'second'
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'first' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-2', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-2', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    const dismiss = await screen.findByRole('button', { name: /dismiss/i })
+    const abort = await screen.findByRole('button', { name: /^abort$/i })
+    // Icon actions, each in the header row that names its run's collection.
+    expect(dismiss).toHaveTextContent('')
+    expect(abort).toHaveTextContent('')
+    expect(dismiss.closest('.justify-between')).toHaveTextContent('first')
+    expect(abort.closest('.justify-between')).toHaveTextContent('second')
+  })
+
+  it('shows a stopping run as stopping, and asks nothing a second time', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    stoppingJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+
+    renderIn(<Ingest />)
+    const stop = await screen.findByRole('button', { name: 'Stopping…' })
+    expect(stop).toBeDisabled()
+    // A stop can take minutes: the state must be readable, not only named.
+    expect(stop).toHaveTextContent('Stopping…')
+    stop.click()
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/cancel'))).toBe(false)
     vi.unstubAllGlobals()
   })
 

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactElement } from 'react'
@@ -54,9 +54,7 @@ describe('IngestJobCard', () => {
     renderIn(<IngestJobCard jobId="job-1" collection="mydocs" owner={null} />)
 
     await waitFor(() =>
-      expect(
-        within(screen.getByRole('status')).getByText('One file held no extractable text.')
-      ).toBeInTheDocument()
+      expect(screen.getByText('One file held no extractable text.')).toBeInTheDocument()
     )
   })
 

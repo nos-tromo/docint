@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from 'react'
-import { Badge, Banner, Button, ToggleButton } from '@infra/ui'
+import { ActionBar, Badge, Banner, Button, Input, SectionHeader, ToggleButton, UndoButton } from '@infra/ui'
 import type { TopicsOverview, TopicsRequest, TopicsTuning } from '@/api/topics'
 import { describeError } from '@/api/errorMessage'
 import { useTopicsTuning } from '@/hooks/useTopics'
@@ -72,16 +72,22 @@ export function TopicsLab({ overview, onStart, busy }: TopicsLabProps) {
   )
 }
 
-function Section({ title, hint, children }: { title: string; hint: string; children: ReactNode }) {
+/** One fine-tuning step: its header (title, hint, quiet actions), then its body. */
+function Section({
+  title,
+  hint,
+  actions,
+  children
+}: {
+  title: string
+  hint: string
+  actions?: ReactNode
+  children: ReactNode
+}) {
   const titleId = useId()
   return (
-    <section aria-labelledby={titleId} className="space-y-2">
-      <div>
-        <h3 id={titleId} className="text-sm font-medium">
-          {title}
-        </h3>
-        <p className="text-xs text-muted-foreground">{hint}</p>
-      </div>
+    <section aria-labelledby={titleId} className="space-y-3">
+      <SectionHeader level={3} title={title} caption={hint} titleId={titleId} actions={actions} />
       {children}
     </section>
   )
@@ -114,7 +120,22 @@ function MergeSection({ tuning, onStart }: { tuning: TopicsTuning; onStart: (req
     setSelected((current) => (current.includes(id) ? current.filter((other) => other !== id) : [...current, id]))
 
   return (
-    <Section title={t('topics.lab_merge_title')} hint={t('topics.lab_merge_hint')}>
+    <Section
+      title={t('topics.lab_merge_title')}
+      hint={t('topics.lab_merge_hint')}
+      actions={
+        <UndoButton
+          label={t('topics.lab_reset')}
+          disabled={tuning.groups.length === 0}
+          onClick={() => {
+            // It queues a job that drops every merge applied so far.
+            if (!window.confirm(t('topics.lab_reset_confirm'))) return
+            edit([])
+            onStart({ action: 'reduce', run_id: tuning.run_id, groups: [] })
+          }}
+        />
+      }
+    >
       {total > 2 && (
         <div className="space-y-1">
           <input
@@ -140,59 +161,60 @@ function MergeSection({ tuning, onStart }: { tuning: TopicsTuning; onStart: (req
           {t('topics.lab_preview', { count })}
         </p>
       )}
-      <ul className="max-h-96 divide-y divide-border overflow-y-auto rounded-md border border-border">
-        {topics.map((topic) => (
-          <li key={topic.id} className="flex items-center gap-2 px-2 py-1.5">
-            <ToggleButton
+      <div className="rounded-md border border-border">
+        <SectionHeader
+          className="border-b border-border px-2 py-1.5"
+          caption={
+            <span className="tabular-nums">
+              {t('topics.lab_selected', { selected: picked.length, count: topics.length })}
+            </span>
+          }
+          actions={
+            <Button
+              variant="ghost"
               size="sm"
-              pressed={picked.includes(topic.id)}
-              onClick={() => toggle(topic.id)}
-              className="min-w-0 flex-1 justify-start gap-2 text-left"
+              disabled={picked.length < 2}
+              onClick={() => edit(mergeGroups(groups, picked))}
             >
-              <span className="font-mono text-xs tabular-nums">T{topic.id}</span>
-              <span className="min-w-0 truncate">{topic.label || `T${topic.id}`}</span>
-            </ToggleButton>
-            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{topic.size}</span>
-            {topic.members.length > 1 && (
-              <>
-                <Badge variant="accent" className="shrink-0">
-                  {t('topics.merged_from', { count: topic.members.length })}
-                </Badge>
-                <Button variant="ghost" size="sm" onClick={() => edit(splitGroup(groups, topic.id))}>
-                  {t('topics.lab_split')}
-                </Button>
-              </>
-            )}
-          </li>
-        ))}
-      </ul>
-      <div className="flex flex-wrap gap-2">
-        <Button variant="secondary" size="sm" disabled={picked.length < 2} onClick={() => edit(mergeGroups(groups, picked))}>
-          {t('topics.lab_merge_selected')}
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={!dirty}
-          onClick={() => onStart({ action: 'reduce', run_id: tuning.run_id, groups })}
-        >
-          {t('topics.lab_apply')}
-        </Button>
-        <Button variant="ghost" size="sm" disabled={!dirty} onClick={() => edit(null)}>
+              {t('topics.lab_merge_selected')}
+            </Button>
+          }
+        />
+        <ul className="max-h-96 divide-y divide-border overflow-y-auto">
+          {topics.map((topic) => (
+            <li key={topic.id} className="flex items-center gap-2 px-2 py-1.5">
+              <ToggleButton
+                size="sm"
+                pressed={picked.includes(topic.id)}
+                onClick={() => toggle(topic.id)}
+                className="min-w-0 flex-1 justify-start gap-2 text-left"
+              >
+                <span className="font-mono text-xs tabular-nums">T{topic.id}</span>
+                <span className="min-w-0 truncate">{topic.label || `T${topic.id}`}</span>
+              </ToggleButton>
+              <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{topic.size}</span>
+              {topic.members.length > 1 && (
+                <>
+                  <Badge variant="accent" className="shrink-0">
+                    {t('topics.merged_from', { count: topic.members.length })}
+                  </Badge>
+                  <Button variant="ghost" size="sm" onClick={() => edit(splitGroup(groups, topic.id))}>
+                    {t('topics.lab_split')}
+                  </Button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <ActionBar>
+        <Button variant="secondary" disabled={!dirty} onClick={() => edit(null)}>
           {t('topics.lab_discard')}
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={tuning.groups.length === 0}
-          onClick={() => {
-            edit([])
-            onStart({ action: 'reduce', run_id: tuning.run_id, groups: [] })
-          }}
-        >
-          {t('topics.lab_reset')}
+        <Button disabled={!dirty} onClick={() => onStart({ action: 'reduce', run_id: tuning.run_id, groups })}>
+          {t('topics.lab_apply')}
         </Button>
-      </div>
+      </ActionBar>
     </Section>
   )
 }
@@ -221,7 +243,13 @@ function OutlierSection({
   const relaxAt = (threshold: number | null) => onStart({ action: 'relax', run_id: tuning.run_id, threshold })
 
   return (
-    <Section title={t('topics.lab_outliers_title')} hint={t('topics.lab_outliers_hint')}>
+    <Section
+      title={t('topics.lab_outliers_title')}
+      hint={t('topics.lab_outliers_hint')}
+      actions={
+        <UndoButton label={t('topics.lab_outliers_undo')} disabled={relax.applied === 0} onClick={() => relaxAt(null)} />
+      }
+    >
       <p className="text-xs tabular-nums text-muted-foreground">
         {t('topics.lab_outliers_counts', { unassigned, applied: relax.applied })}
       </p>
@@ -245,11 +273,10 @@ function OutlierSection({
           <p className="text-xs tabular-nums text-muted-foreground">{preview}</p>
         </div>
       )}
-      <div className="flex flex-wrap gap-2">
+      <ActionBar>
         {(!histogram || relax.stale) && (
           <Button
             variant="secondary"
-            size="sm"
             // Measuring undoes an applied relax, so a stale one is applied again at its own bar instead.
             onClick={() => relaxAt(relax.applied > 0 ? relax.threshold : null)}
           >
@@ -259,17 +286,13 @@ function OutlierSection({
         {histogram && !relax.stale && top !== null && (
           <Button
             variant="primary"
-            size="sm"
             disabled={placed === 0 || value === relax.threshold}
             onClick={() => relaxAt(value)}
           >
             {t('topics.lab_outliers_apply')}
           </Button>
         )}
-        <Button variant="ghost" size="sm" disabled={relax.applied === 0} onClick={() => relaxAt(null)}>
-          {t('topics.lab_outliers_undo')}
-        </Button>
-      </div>
+      </ActionBar>
     </Section>
   )
 }
@@ -282,6 +305,7 @@ function RebuildSection({
   onStart: (request: TopicsRequest) => void
 }) {
   const t = useT()
+  const hintId = useId()
   const [size, setSize] = useState('')
   const asked = size.trim() === '' ? null : Number(size)
   const valid = asked === null || (Number.isInteger(asked) && asked >= MIN_TOPIC_SIZE && asked <= MAX_TOPIC_SIZE)
@@ -292,10 +316,10 @@ function RebuildSection({
   }
   return (
     <Section title={t('topics.lab_rebuild_title')} hint={t('topics.lab_rebuild_hint')}>
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+      <div>
+        <label className="block text-sm">
           <span>{t('topics.lab_rebuild_size')}</span>
-          <input
+          <Input
             type="number"
             min={MIN_TOPIC_SIZE}
             max={MAX_TOPIC_SIZE}
@@ -303,17 +327,22 @@ function RebuildSection({
             value={size}
             placeholder={t('topics.lab_rebuild_auto')}
             aria-invalid={!valid || undefined}
+            aria-describedby={minTopicSize !== null ? hintId : undefined}
             onChange={(e) => setSize(e.target.value)}
-            className="h-7 w-28 rounded-md border border-border bg-transparent px-2 text-sm text-foreground"
+            className="mt-1"
           />
         </label>
         {minTopicSize !== null && (
-          <span className="text-xs text-muted-foreground">{t('topics.lab_rebuild_current', { size: minTopicSize })}</span>
+          <p id={hintId} className="mt-1 text-xs text-muted-foreground">
+            {t('topics.lab_rebuild_current', { size: minTopicSize })}
+          </p>
         )}
-        <Button variant="secondary" size="sm" disabled={!valid} onClick={rebuild}>
+      </div>
+      <ActionBar>
+        <Button variant="secondary" disabled={!valid} onClick={rebuild}>
           {t('topics.lab_rebuild')}
         </Button>
-      </div>
+      </ActionBar>
     </Section>
   )
 }

@@ -319,9 +319,12 @@ Below the form, every ingest job the caller owns is listed newest first, one
 card each (`src/components/ingest/IngestJobList.tsx`): queued runs waiting on
 a worker slot, runs in progress, finished runs with their warnings, and
 interrupted runs offering a re-queue. Starting a second run therefore never
-hides the first. Each card carries its own Dismiss once the run has ended;
-"Clear finished" above the list dismisses them all at once and leaves
-anything still running. A completed run selects the collection it filled, so
+hides the first. The list has its own **Ingest jobs** header; each card's
+header row carries the run's one action at its right edge — a stop control
+(**Abort**, which asks first) while it is queued or running, a dismiss (×) once
+it has ended. **Clear finished** in the list's header dismisses every ended run
+at once and leaves anything still running. An interrupted run offers **Run
+again** at the foot of its card. A completed run selects the collection it filled, so
 with several finishing in a row the last one wins. The list and its live
 progress belong to the owner selected in the sidebar: an admin viewing another
 user's collections sees that user's jobs, and each job is checked, re-run,
@@ -444,20 +447,22 @@ runs:
   merge tree in the browser (`src/lib/topicMerge.ts`), so moving it asks
   nothing of the server. Below it, a compact list of the draft's topics: each
   a toggle for selection, its size, a **from N topics** badge and **Split** on
-  a merged one; **Merge selected** joins the selected topics. While the draft
-  differs from the stored reduction a line says it is a preview. **Apply**
-  queues a reduce with the draft's groups, **Discard** drops the draft, and
-  **Restore the original topics** queues a reduce with none. Moving the slider
-  after merging by hand replaces the hand-made draft.
+  a merged one. The list's header counts the selection, and **Merge selected**
+  there joins the selected topics. While the draft differs from the stored
+  reduction a line says it is a preview. **Discard** and **Apply** share the
+  bar at the section's foot: Apply queues a reduce with the draft's groups,
+  Discard drops the draft. **Restore the original topics**, the undo icon in
+  the section's header, asks first and then queues a reduce with none. Moving
+  the slider after merging by hand replaces the hand-made draft.
 - **Unassigned chunks.** The counts of unassigned chunks and of those placed
   under a lowered bar. **Measure the distribution** runs a relax that places
   nothing new; after it, a slider for the minimum similarity says how many
-  chunks it would place, exactly, and **Place them** runs it. **Undo** takes the
-  placement back. A distribution measured before the pool changed says so and
+  chunks it would place, exactly, and **Place them** runs it. **Undo
+  placement**, the undo icon in the section's header, takes the placement back. A distribution measured before the pool changed says so and
   offers **Apply again** at the bar applied.
-- **Recompute.** A minimum topic size (blank for automatic), the size the run
-  was built with beside it, and **Recompute**, which asks first as **Restart
-  analysis** does.
+- **Recompute.** A minimum topic size (blank for automatic) with the size the
+  run was built with under it, and **Recompute** at the section's foot, which
+  asks first as **Restart analysis** does.
 
 Closing fine-tuning drops a draft not applied.
 
@@ -487,9 +492,11 @@ file-type / entity-type breakdown stay accurate regardless of how many pages
 the table has lazily loaded (the counts are not derived from the loaded rows).
 
 Between the two sits the **Data extracts** panel
-(`src/components/inspector/ExtractsPanel.tsx`): one control builds a written
-extract of the collection, and the bundles already stored for it are listed
-with their size, contents and a download button. Progress comes from the shared
+(`src/components/inspector/ExtractsPanel.tsx`): **Build extract** builds a
+written extract of the collection — a labelled button in the panel's empty
+state before the first one, the + icon in the panel's header after — and the
+bundles already stored for it are listed with their size, contents and a
+download button. Progress comes from the shared
 job store that `Shell`'s single owner-multiplexed stream already feeds, so a
 build survives navigating away and a reload re-attaches to it like an ingest
 run. Each document row also carries a download action for that source alone

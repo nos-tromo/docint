@@ -281,3 +281,47 @@ describe('IngestionStatus preprocess bars', () => {
     expect(screen.getByText('Embedding and storing')).toBeInTheDocument()
   })
 })
+
+describe('IngestionStatus live region', () => {
+  it('keeps the timer and actions out of the live region', () => {
+    const { container } = render(
+      <IngestionStatus
+        status={completeStatus({ collection: 'projekt-alpha', startedAt: 0, finishedAt: 65_000 })}
+        actions={<button>Dismiss</button>}
+      />
+    )
+    const dismiss = screen.getByRole('button', { name: 'Dismiss' })
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent('projekt-alpha')
+    expect(status).not.toHaveTextContent('01:05')
+    expect(status).not.toContainElement(dismiss)
+    expect(container.firstElementChild).not.toHaveAttribute('aria-live')
+    for (const region of container.querySelectorAll('[aria-live]')) {
+      expect(region).not.toHaveTextContent('01:05')
+      expect(region).not.toContainElement(dismiss)
+    }
+  })
+
+  it('announces the phase body politely', () => {
+    render(<IngestionStatus status={errorStatus({ errorMessage: 'Upload failed: every batch was rejected.' })} />)
+    const body = screen.getByText(/Upload failed: every batch was rejected\./).closest('[aria-live]')
+    expect(body).toHaveAttribute('aria-live', 'polite')
+    expect(body).not.toHaveAttribute('role')
+  })
+})
+
+describe('IngestionStatus header on a narrow card', () => {
+  it('lets the timer and actions wrap below the run instead of squeezing its name', () => {
+    render(
+      <IngestionStatus
+        status={completeStatus({ collection: 'projekt-alpha', startedAt: 0, finishedAt: 65_000 })}
+        actions={<button>Dismiss</button>}
+      />
+    )
+    const run = screen.getByRole('status')
+    const side = screen.getByRole('button', { name: 'Dismiss' }).parentElement!
+    expect(run.parentElement).toHaveClass('flex-wrap')
+    expect(run).toHaveClass('min-w-0', 'grow')
+    expect(side).toHaveClass('ml-auto')
+  })
+})

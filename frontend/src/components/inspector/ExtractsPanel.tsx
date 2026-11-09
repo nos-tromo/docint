@@ -1,4 +1,4 @@
-import { Button, DeleteButton } from '@infra/ui'
+import { Button, Card, DeleteButton, EmptyState, NewButton } from '@infra/ui'
 import { extractDownloadPath } from '@/api/extracts'
 import { downloadFile } from '@/api/files'
 import { FileDownloadButton } from '@/components/common/FileDownloadButton'
@@ -59,27 +59,28 @@ export function ExtractsPanel() {
   if (!collection) return null
 
   const extracts = data?.extracts ?? []
+  // While empty, the labelled button in the empty state is the way in; once
+  // there is a list, the header's quiet icon takes over.
   return (
-    <section className="rounded-lg border border-border bg-card p-4 space-y-3">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-sm font-medium">{t('extract.title')}</h2>
-          <p className="text-xs text-muted-foreground">{t('extract.caption')}</p>
-          {reportTitle && (
-            <p className="text-xs text-muted-foreground">
-              {t('extract.appendix_of', { title: reportTitle })}
-            </p>
-          )}
-        </div>
-        <Button onClick={() => void start()} disabled={running}>
-          {t('extract.build')}
-        </Button>
-      </div>
-
+    <Card
+      className="space-y-3"
+      title={t('extract.title')}
+      caption={
+        <>
+          <p>{t('extract.caption')}</p>
+          {reportTitle && <p>{t('extract.appendix_of', { title: reportTitle })}</p>}
+        </>
+      }
+      actions={
+        extracts.length > 0 && (
+          <NewButton label={t('extract.build')} busy={running} onClick={() => void start()} />
+        )
+      }
+    >
       {progress && (
         <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
           {progress.error ? (
-            <span className="text-destructive">{t('extract.failed')}</span>
+            <span className="text-danger">{t('extract.failed')}</span>
           ) : progress.totalUnits ? (
             t('extract.running_progress', {
               done: String(progress.rendered ?? 0),
@@ -94,7 +95,15 @@ export function ExtractsPanel() {
       {isLoading ? (
         <p className="text-xs text-muted-foreground">{t('common.loading_ellipsis')}</p>
       ) : extracts.length === 0 ? (
-        <p className="text-xs text-muted-foreground">{t('extract.none')}</p>
+        <EmptyState
+          action={
+            <Button onClick={() => void start()} disabled={running}>
+              {t('extract.build')}
+            </Button>
+          }
+        >
+          {t('extract.none')}
+        </EmptyState>
       ) : (
         <ul className="divide-y divide-border">
           {extracts.map((record) => (
@@ -121,6 +130,6 @@ export function ExtractsPanel() {
           ))}
         </ul>
       )}
-    </section>
+    </Card>
   )
 }

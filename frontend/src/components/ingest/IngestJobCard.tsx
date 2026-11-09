@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Button, Card } from '@infra/ui'
+import { ActionBar, Button, Card, RemoveButton, SectionHeader, StopButton } from '@infra/ui'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from '@/api/client'
 import { cancelIngestJob, createIngestJob, dismissIngestJob, getIngestJob } from '@/api/jobs'
@@ -188,68 +188,57 @@ export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobC
   const dismissable =
     status.phase === 'complete' || status.phase === 'error' || status.phase === 'cancelled'
 
-  return (
-    <div className="space-y-2">
-      {interrupted ? (
-        <Card className="text-sm space-y-2" role="status">
-          <CollectionLabel collection={collection} />
-          <p className="text-muted-foreground">{t('ingest.job_interrupted')}</p>
-          {/* A batch the upload skipped is still missing after "Run again". */}
-          <IngestWarnings warnings={status.warnings} />
-          <div className="flex gap-2">
-            <Button
-              variant="primary"
-              disabled={rerunMutation.isPending}
-              onClick={() => rerunMutation.mutate()}
-            >
-              {t('ingest.job_rerun')}
-            </Button>
-            {/* An interrupted, never-going-to-report-progress-again job would
-                otherwise sit here forever — nothing else clears it. Purely
-                local: the server has already forgotten it. */}
-            <Button variant="secondary" onClick={forget}>
-              {t('ingest.dismiss')}
-            </Button>
-          </div>
-        </Card>
-      ) : (
-        status.phase !== 'idle' && (
-          <>
-            <IngestionStatus status={preprocess ? { ...status, preprocess } : status} />
-            {abortable && (
-              <Button
-                variant="secondary"
-                disabled={stopping}
-                onClick={() => {
-                  // `window.confirm` is this codebase's confirmation (see
-                  // Sidebar.tsx, Report.tsx). Aborting throws away however
-                  // many hours the run has already spent, so it is not a
-                  // click to make by accident.
-                  if (!window.confirm(t('ingest.abort_confirm'))) return
-                  cancelMutation.mutate()
-                }}
-              >
-                {stopping ? t('ingest.abort_stopping') : t('ingest.abort')}
-              </Button>
-            )}
-            {dismissable && (
-              <Button
-                variant="secondary"
-                disabled={dismissMutation.isPending}
-                onClick={() => dismissMutation.mutate()}
-              >
-                {t('ingest.dismiss')}
-              </Button>
-            )}
-          </>
-        )
-      )}
-    </div>
-  )
+  if (interrupted) {
+    return (
+      <Card className="space-y-3 text-sm">
+        <SectionHeader
+          caption={<CollectionLabel collection={collection} />}
+          actions={
+            // An interrupted job never reports progress again and nothing else
+            // clears it. Purely local: the server has already forgotten it.
+            <RemoveButton label={t('ingest.dismiss')} onClick={forget} />
+          }
+        />
+        <p role="status" className="text-muted-foreground">
+          {t('ingest.job_interrupted')}
+        </p>
+        {/* A batch the upload skipped is still missing after "Run again". */}
+        <IngestWarnings warnings={status.warnings} />
+        <ActionBar>
+          <Button variant="primary" disabled={rerunMutation.isPending} onClick={() => rerunMutation.mutate()}>
+            {t('ingest.job_rerun')}
+          </Button>
+        </ActionBar>
+      </Card>
+    )
+  }
+  if (status.phase === 'idle') return null
+
+  const action = abortable ? (
+    <StopButton
+      label={stopping ? t('ingest.abort_stopping') : t('ingest.abort')}
+      disabled={stopping}
+      onClick={() => {
+        // `window.confirm` is this codebase's confirmation (see Sidebar.tsx,
+        // Report.tsx). Aborting throws away the hours the run has spent.
+        if (!window.confirm(t('ingest.abort_confirm'))) return
+        cancelMutation.mutate()
+      }}
+    >
+      {/* A stop is cooperative and can take minutes: say so beside the icon. */}
+      {stopping && <span className="text-xs">{t('ingest.abort_stopping')}</span>}
+    </StopButton>
+  ) : dismissable ? (
+    <RemoveButton
+      label={t('ingest.dismiss')}
+      disabled={dismissMutation.isPending}
+      onClick={() => dismissMutation.mutate()}
+    />
+  ) : null
+
+  return <IngestionStatus status={preprocess ? { ...status, preprocess } : status} actions={action} />
 }
 
-/** The collection the interrupted banner is about — the only thing telling
- *  two dead runs apart. `IngestionStatus` carries its own. */
 function CollectionLabel({ collection }: { collection: string }) {
   if (!collection) return null
   return <p className="truncate text-sm text-foreground">{collection}</p>
