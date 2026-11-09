@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef } from 'react'
-import { Button, DownloadButton, EmptyState, RefreshButton } from '@infra/ui'
+import { Button, DownloadButton, EmptyState, RefreshButton, SectionHeader } from '@infra/ui'
 import { MarkdownProse } from '@/components/common/MarkdownProse'
 import { cachedSummary, summarize } from '@/api/analysis'
 import { streamSseGet } from '@/api/sse'
@@ -280,43 +280,47 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
           refresh icon the moment content arrived, so the row's weight jumped
           sides on load. The empty state now says what it is instead. */}
       {state.phase === 'ready' && (
-        <div className="flex items-center justify-between gap-3">
-          <p className="min-w-0 truncate text-sm text-muted-foreground">
-            {t(
-              (state.meta?.sources?.length ?? 0) === 1
-                ? 'analysis.summary_caption_one'
-                : 'analysis.summary_caption_other',
-              { count: state.meta?.sources?.length ?? 0 }
-            )}
-            {state.meta?.summary_diagnostics?.partial === true && (
-              <> · {t('analysis.coverage_partial_label')}</>
-            )}
-          </p>
-          <div className="flex shrink-0 items-center gap-1">
-            {/* Its label stays "Aktualisieren":
-                `analysis.coverage_partial_detail` tells the reader to click
-                that word, and an icon whose name no longer said it would
-                leave the sentence pointing at nothing. */}
-            <RefreshButton
-              label={t('analysis.summary_refresh')}
-              busy={state.busy}
-              onClick={() => generate(true)}
-            />
-            {reportItem && reportDedupeKeys && (
-              <AddToReportButton item={reportItem} inReport={inReport} />
-            )}
-            <DownloadButton
-              label={t('analysis.summary_download_md')}
-              onClick={() =>
-                downloadText(
-                  'summary.md',
-                  summaryToMarkdown(state.meta, state.text, t),
-                  'text/markdown;charset=utf-8'
-                )
-              }
-            />
-          </div>
-        </div>
+        <SectionHeader
+          caption={
+            <>
+              {t(
+                (state.meta?.sources?.length ?? 0) === 1
+                  ? 'analysis.summary_caption_one'
+                  : 'analysis.summary_caption_other',
+                { count: state.meta?.sources?.length ?? 0 }
+              )}
+              {state.meta?.summary_diagnostics?.partial === true && (
+                <> · {t('analysis.coverage_partial_label')}</>
+              )}
+            </>
+          }
+          actions={
+            <>
+              {/* Its label stays "Aktualisieren":
+                  `analysis.coverage_partial_detail` tells the reader to click
+                  that word, and an icon whose name no longer said it would
+                  leave the sentence pointing at nothing. */}
+              <RefreshButton
+                label={t('analysis.summary_refresh')}
+                busy={state.busy}
+                onClick={() => generate(true)}
+              />
+              {reportItem && reportDedupeKeys && (
+                <AddToReportButton item={reportItem} inReport={inReport} />
+              )}
+              <DownloadButton
+                label={t('analysis.summary_download_md')}
+                onClick={() =>
+                  downloadText(
+                    'summary.md',
+                    summaryToMarkdown(state.meta, state.text, t),
+                    'text/markdown;charset=utf-8'
+                  )
+                }
+              />
+            </>
+          }
+        />
       )}
 
       {state.phase === 'probing' && (

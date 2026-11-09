@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { SectionHeader } from '@infra/ui'
 import { csvExportPath, getHateSpeechPage } from '@/api/collections'
 import { downloadFile } from '@/api/files'
 import { FileDownloadButton } from '@/components/common/FileDownloadButton'
@@ -185,29 +186,33 @@ export function HateSpeechTable({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {t(rows.length === 1 ? 'hate.count_one' : 'hate.count_other', { count: rows.length })}
-          {hasNextPage ? '+' : ''}.
-        </p>
-        <div className="flex items-center gap-1">
-          {/* Every flagged chunk, not just the rows paged in. */}
-          <TranslateAllButton fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
-          {/* Adds every flagged chunk in the collection, not only the rows
-              paged in — see AddAllToReportButton. */}
-          <AddAllToReportButton
-            fetchAll={fetchAllRows}
-            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(translatableTextOf(row)))}
-            hasRows={rows.length > 0}
-          />
-          {collection && (
-            <FileDownloadButton
-              label={t('table.export_csv')}
-              download={() => downloadFile(csvExportPath(collection, 'hate-speech'), `${collection}-hate-speech.csv`)}
+      <SectionHeader
+        caption={
+          <>
+            {t(rows.length === 1 ? 'hate.count_one' : 'hate.count_other', { count: rows.length })}
+            {hasNextPage ? '+' : ''}
+          </>
+        }
+        actions={
+          <>
+            {/* Every flagged chunk, not just the rows paged in. */}
+            <TranslateAllButton fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
+            {/* Adds every flagged chunk in the collection, not only the rows
+                paged in — see AddAllToReportButton. */}
+            <AddAllToReportButton
+              fetchAll={fetchAllRows}
+              toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(translatableTextOf(row)))}
+              hasRows={rows.length > 0}
             />
-          )}
-        </div>
-      </div>
+            {collection && (
+              <FileDownloadButton
+                label={t('table.export_csv')}
+                download={() => downloadFile(csvExportPath(collection, 'hate-speech'), `${collection}-hate-speech.csv`)}
+              />
+            )}
+          </>
+        }
+      />
       <div className="rounded-md border border-border overflow-hidden">
         <div
           className="grid gap-3 px-3 py-2 bg-muted border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"

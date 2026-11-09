@@ -19,7 +19,8 @@ import {
   ChevronUpIcon,
   ChevronsUpDownIcon,
   CopyButton,
-  EmptyState
+  EmptyState,
+  SectionHeader
 } from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
 import type { TopicSummary } from '@/api/topics'
@@ -330,19 +331,23 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {t(docs.length === 1 ? 'table.documents_one' : 'table.documents_other', { count: docs.length })}
-          {hasNextPage ? '+' : ''}
-          {isFetching ? ` ${t('table.loading_suffix')}` : ''}
-        </p>
-        {collection && (
-          <FileDownloadButton
-            label={t('table.export_csv')}
-            download={() => downloadFile(csvExportPath(collection, 'documents'), `${collection}-documents.csv`)}
-          />
-        )}
-      </div>
+      <SectionHeader
+        caption={
+          <>
+            {t(docs.length === 1 ? 'table.documents_one' : 'table.documents_other', { count: docs.length })}
+            {hasNextPage ? '+' : ''}
+            {isFetching ? ` ${t('table.loading_suffix')}` : ''}
+          </>
+        }
+        actions={
+          collection && (
+            <FileDownloadButton
+              label={t('table.export_csv')}
+              download={() => downloadFile(csvExportPath(collection, 'documents'), `${collection}-documents.csv`)}
+            />
+          )
+        }
+      />
 
       {docs.length === 0 && !isFetching ? (
         <EmptyState>

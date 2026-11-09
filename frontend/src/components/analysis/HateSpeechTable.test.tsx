@@ -66,6 +66,16 @@ describe('HateSpeechTable', () => {
     expect(downloads.saved()[0].download).toBe('alpha-hate-speech.csv')
   })
 
+  it('puts its caption and actions on one shared header row', () => {
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
+    const exportCsv = screen.getByRole('button', { name: 'Export CSV' })
+    expect(exportCsv.closest('.ml-auto')).not.toBeNull()
+    const row = exportCsv.closest('.flex-wrap')!
+    expect(row).toHaveTextContent(/flagged chunk/)
+    // The count ends like the other tables' captions, without a stray full stop.
+    expect(row.textContent).not.toMatch(/chunks?\+?\./)
+  })
+
   it('renders one row per finding with category, source and chunk text inline', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
     const row = screen.getByTestId('hate-speech-row')

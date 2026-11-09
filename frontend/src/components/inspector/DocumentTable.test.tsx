@@ -101,6 +101,13 @@ describe('DocumentTable', () => {
     expect(downloads.saved()[0].download).toBe('mydocs-documents.csv')
   })
 
+  it('puts its caption and export on one shared header row', () => {
+    render(<DocumentTable docs={DOCS} collection="mydocs" />, { wrapper })
+    const exportCsv = screen.getByRole('button', { name: /export csv/i })
+    expect(exportCsv.closest('.ml-auto')).not.toBeNull()
+    expect(exportCsv.closest('.flex-wrap')).toHaveTextContent(/2 documents/)
+  })
+
   it('renders an empty state instead of a bare table when there are no documents', () => {
     render(<DocumentTable docs={[]} collection="mydocs" isFetching={false} />, { wrapper })
     expect(screen.getByText('No documents in this collection yet.').closest('.border-dashed')).toHaveClass('items-center')

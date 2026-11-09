@@ -215,6 +215,22 @@ describe('SummaryPanel cache hit', () => {
     expect(refresh.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(report.compareDocumentPosition(download) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
+
+  it('puts its caption and actions on one shared header row', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    mockCachedSummary.mockResolvedValue({
+      summary: 'A summary.',
+      sources: [{ id: 's1', filename: 'handbook.pdf', page: 3, text: 'chunk', citation_index: 1 }]
+    })
+    render(
+      <QueryClientProvider client={qc}>
+        <SummaryPanel reportDedupeKeys={new Set()} />
+      </QueryClientProvider>
+    )
+    const refresh = await screen.findByRole('button', { name: /refresh/i })
+    expect(refresh.parentElement).toHaveClass('ml-auto')
+    expect(refresh.closest('.flex-wrap')).toHaveTextContent(/1 source/)
+  })
 })
 
 describe('SummaryPanel job-driven build', () => {

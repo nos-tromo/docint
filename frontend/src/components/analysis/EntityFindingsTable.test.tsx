@@ -73,6 +73,13 @@ describe('EntityFindingsTable', () => {
     expect(downloads.saved()[0].download).toBe('alpha-ner-sources.csv')
   })
 
+  it('puts its caption and actions on one shared header row', () => {
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+    const exportCsv = screen.getByRole('button', { name: 'Export CSV' })
+    expect(exportCsv.closest('.ml-auto')).not.toBeNull()
+    expect(exportCsv.closest('.flex-wrap')).toHaveTextContent(/findings for/i)
+  })
+
   it('shows the findings count and a table header for the selected entity', () => {
     renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     const heading = screen.getByText(/findings for/i).parentElement!
