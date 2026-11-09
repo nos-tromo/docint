@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Banner, Button, Card, FileList, Input, PageHeader, ToggleButton } from '@infra/ui'
+import { ActionBar, Banner, Button, Card, FileList, Input, PageHeader, SectionHeader, ToggleButton } from '@infra/ui'
 import { useQueryClient } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
@@ -148,20 +148,22 @@ export function Ingest() {
     if (files.length > MAX_LISTED_FILES) {
       const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
       return (
-        <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-sm text-muted-foreground">
-              {t('upload.files_other', { count: files.length })} · {formatBytes(totalBytes)}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => useIngestRunStore.getState().clearFiles()}
-            >
-              {t('ingest.clear_files')}
-            </Button>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">{t('ingest.files_too_many')}</p>
+        // The same header as FileList's, so clearing sits in one place either way.
+        <div className="rounded-lg border border-border bg-muted/30">
+          <SectionHeader
+            className="border-b border-border px-3 py-2"
+            caption={
+              <>
+                {t('upload.files_other', { count: files.length })} · {formatBytes(totalBytes)}
+              </>
+            }
+            actions={
+              <Button variant="ghost" size="sm" onClick={() => useIngestRunStore.getState().clearFiles()}>
+                {t('ingest.clear_files')}
+              </Button>
+            }
+          />
+          <p className="px-3 py-2 text-xs text-muted-foreground">{t('ingest.files_too_many')}</p>
         </div>
       )
     }
@@ -169,9 +171,11 @@ export function Ingest() {
       <FileList
         files={files}
         onRemove={(i) => useIngestRunStore.getState().removeFile(i)}
+        onClear={() => useIngestRunStore.getState().clearFiles()}
         labels={{
           files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
-          remove: t('common.remove')
+          remove: t('common.remove'),
+          clearAll: t('ingest.clear_files')
         }}
       />
     )
@@ -251,24 +255,22 @@ export function Ingest() {
             )}
           </fieldset>
 
-          {/* Full width: it is the card's one action, and everything above it —
-              the collection field, the dropzone, the file list — already runs
-              edge to edge. A small left-aligned button under all of that read
-              as an afterthought. */}
-          <Button
-            variant="primary"
-            className="w-full"
-            onClick={() => {
-              void run.start(limitBytes, t).then(() => {
-                // The new job exists server-side now; the list is what makes
-                // it visible to any other tab (and to this one after a reload).
-                void qc.invalidateQueries({ queryKey: ingestJobsKey })
-              })
-            }}
-            disabled={busy || !run.collection || run.files.length === 0}
-          >
-            {run.uploading ? t('ingest.busy') : t('ingest.button')}
-          </Button>
+          {/* The card's one commit action, in the full-width bar every form uses. */}
+          <ActionBar>
+            <Button
+              variant="primary"
+              onClick={() => {
+                void run.start(limitBytes, t).then(() => {
+                  // The new job exists server-side now; the list is what makes
+                  // it visible to any other tab (and to this one after a reload).
+                  void qc.invalidateQueries({ queryKey: ingestJobsKey })
+                })
+              }}
+              disabled={busy || !run.collection || run.files.length === 0}
+            >
+              {run.uploading ? t('ingest.busy') : t('ingest.button')}
+            </Button>
+          </ActionBar>
 
           {(dropError || run.error) && <Banner variant="danger">{dropError ?? run.error}</Banner>}
           {refused.length > 0 && <RefusedFiles names={refused} />}
@@ -297,15 +299,14 @@ export function Ingest() {
           )}
 
           {streamLost && (
-            <div className="space-y-2 text-sm text-[var(--status-amber-fg)]" role="alert">
+            <Banner variant="info" role="alert" className="space-y-3">
               <p>{t('ingest.stream_lost')}</p>
-              <Button
-                variant="secondary"
-                onClick={() => useIngestJobsStore.getState().retryStream()}
-              >
-                {t('ingest.reconnect')}
-              </Button>
-            </div>
+              <ActionBar>
+                <Button variant="secondary" onClick={() => useIngestJobsStore.getState().retryStream()}>
+                  {t('ingest.reconnect')}
+                </Button>
+              </ActionBar>
+            </Banner>
           )}
 
           <IngestJobList />

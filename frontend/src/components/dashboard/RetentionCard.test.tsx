@@ -81,6 +81,17 @@ describe('RetentionCard', () => {
     expect(screen.getByRole('listitem')).toHaveTextContent('document-a.pdf')
   })
 
+  it('names itself with the card title and states its rule as the caption', async () => {
+    vi.stubGlobal(
+      'fetch',
+      retentionFetch(365, [item('document', 'memo.pdf', 'projekt-alpha', '2026-11-20T06:45:00Z')])
+    )
+    renderCard()
+    const card = await screen.findByRole('region', { name: /automatic deletion/i })
+    const heading = within(card).getByRole('heading', { level: 2, name: 'Automatic deletion' })
+    expect(heading.closest('.flex-wrap')).toHaveTextContent(/deleted 365 days after/)
+  })
+
   it('renders nothing when retention is off, and asks for nothing', async () => {
     const fetchMock = retentionFetch(null, [])
     vi.stubGlobal('fetch', fetchMock)

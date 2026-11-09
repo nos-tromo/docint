@@ -69,7 +69,8 @@ export function IngestJobList() {
   // store. Subscribing to the event log here would re-render every card in
   // the list on every frame of every job.
   const terminal = useIngestJobsStore((s) => s.terminal)
-  const [clearError, setClearError] = useState<string | null>(null)
+  // An error is about the jobs a clear was asked to remove, and goes with them.
+  const [clearError, setClearError] = useState<{ message: string; jobIds: string[] } | null>(null)
 
   const cards = useMemo(
     () => mergeJobCards(tracked.filter((job) => job.owner === owner), listed ?? []),
@@ -81,17 +82,18 @@ export function IngestJobList() {
   )
 
   const clearMutation = useMutation({
-    mutationFn: () => dismissAll(finishedIds, owner),
-    onSuccess: ({ cleared, failed }) => {
+    mutationFn: (jobIds: string[]) => dismissAll(jobIds, owner),
+    onSuccess: ({ cleared, failed }, jobIds) => {
       setClearError(
         failed > 0
-          ? t('ingest.clear_partial_failure', { cleared, total: cleared + failed, failed })
+          ? { message: t('ingest.clear_partial_failure', { cleared, total: cleared + failed, failed }), jobIds }
           : null
       )
       void qc.invalidateQueries({ queryKey: ingestJobsKey })
     },
-    onError: () => setClearError(t('ingest.failed_default'))
+    onError: (_error, jobIds) => setClearError({ message: t('ingest.failed_default'), jobIds })
   })
+  const showClearError = clearError !== null && clearError.jobIds.some((id) => finishedIds.includes(id))
 
   if (cards.length === 0) return null
 
@@ -109,7 +111,7 @@ export function IngestJobList() {
               disabled={clearMutation.isPending}
               onClick={() => {
                 setClearError(null)
-                clearMutation.mutate()
+                clearMutation.mutate(finishedIds)
               }}
             >
               {t('ingest.clear_finished', { count: finishedIds.length })}
@@ -117,9 +119,9 @@ export function IngestJobList() {
           )
         }
       />
-      {clearError && (
+      {showClearError && (
         <p role="alert" className="text-sm text-[var(--status-amber-fg)]">
-          {clearError}
+          {clearError.message}
         </p>
       )}
       {cards.map((card) => (

@@ -57,6 +57,10 @@ let jobTimes: Record<string, { started_at: string | null; finished_at: string | 
 let finishedJobIds: Set<string>
 /** Jobs the server reports as asked to stop but not yet stopped. */
 let stoppingJobIds: Set<string>
+/** Jobs whose next DELETE fails once, as a flaky server would. */
+let failDeleteOnce: Set<string>
+/** While set, single-job snapshot reads wait for it. */
+let snapshotGate: Promise<void> | null
 /** Per-job collection names, for tests that run several collections at once. */
 let jobCollections: Record<string, string>
 /** Per-job owners, for an admin's jobs in another user's namespace; absent = the caller's own. */
@@ -115,6 +119,8 @@ beforeEach(() => {
   queuedJobIds = new Set()
   finishedJobIds = new Set()
   stoppingJobIds = new Set()
+  failDeleteOnce = new Set()
+  snapshotGate = null
   jobCollections = {}
   jobTimes = {}
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -146,9 +152,11 @@ beforeEach(() => {
       // Dismissal really removes the job, so the list stops carrying it —
       // otherwise a dismissed card would come straight back on the refetch.
       if (init?.method === 'DELETE') {
+        if (failDeleteOnce.delete(id)) return { ok: false, status: 500, json: async () => ({}), text: async () => '{}' }
         knownJobIds.delete(id)
         return jsonRes({ ok: true })
       }
+      if (snapshotGate) await snapshotGate
       return jsonRes(jobSnapshot(id))
     }
     if (u.includes('/ingest/jobs')) {
@@ -483,6 +491,42 @@ describe('Ingest — several runs at once', () => {
     expect(screen.queryByText('f0.txt')).not.toBeInTheDocument()
   })
 
+  it('clears a short selection from the file list header', async () => {
+    useIngestRunStore.getState().addFiles([new File(['x'], 'a.txt'), new File(['y'], 'b.txt')])
+    renderIn(<Ingest />)
+
+    const clear = await screen.findByRole('button', { name: 'Clear selection' })
+    expect(clear.closest('.flex-wrap')).toHaveTextContent('2 files')
+    clear.click()
+    await waitFor(() => expect(useIngestRunStore.getState().files).toHaveLength(0))
+  })
+
+  it('clears a folder-sized selection from the same header place', async () => {
+    useIngestRunStore.getState().addFiles(Array.from({ length: 600 }, (_, i) => new File(['x'], `f${i}.txt`)))
+    renderIn(<Ingest />)
+
+    const clear = await screen.findByRole('button', { name: 'Clear selection' })
+    expect(clear.parentElement).toHaveClass('ml-auto')
+    expect(clear.closest('.flex-wrap')).toHaveTextContent('600 files')
+  })
+
+  it('imports from a full-width bar', async () => {
+    renderIn(<Ingest />)
+    const ingest = await screen.findByRole('button', { name: 'Ingest' })
+    expect(ingest.parentElement).toHaveClass('flex-wrap', '*:flex-[1_1_8rem]')
+  })
+
+  it('offers reconnecting from an announced banner', async () => {
+    const retry = vi.spyOn(useIngestJobsStore.getState(), 'retryStream')
+    act(() => useIngestJobsStore.setState({ streamLost: true }))
+    renderIn(<Ingest />)
+
+    const banner = (await screen.findByText('Live updates disconnected.')).closest('[role="alert"]') as HTMLElement
+    expect(banner).toHaveClass('rounded-md', 'border')
+    within(banner).getByRole('button', { name: 'Reconnect' }).click()
+    expect(retry).toHaveBeenCalled()
+  })
+
   it('does not rebuild the file list as upload frames arrive', async () => {
     useIngestRunStore.getState().addFiles([new File(['x'], 'a.txt')])
     renderIn(<Ingest />)
@@ -776,6 +820,68 @@ describe('Ingest — several runs at once', () => {
 
     expect(confirm).not.toHaveBeenCalled()
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/cancel'))).toBe(false)
+    vi.unstubAllGlobals()
+  })
+
+  it('drops a clear error once no finished job is left to clear', async () => {
+    for (const [id, name] of [['job-1', 'first'], ['job-2', 'second']]) {
+      track(id, name)
+      knownJobIds.add(id)
+      finishedJobIds.add(id)
+      jobCollections[id] = name
+      useIngestJobsStore.getState().appendEvent(id, {
+        event: 'ingestion_complete',
+        data: { job_id: id, collection: name },
+        receivedAt: Date.now()
+      })
+    }
+    failDeleteOnce.add('job-2')
+    // A running job keeps the list on screen after the finished ones are gone.
+    track('job-3', 'third')
+    knownJobIds.add('job-3')
+    jobCollections['job-3'] = 'third'
+    useIngestJobsStore.getState().appendEvent('job-3', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-3', message: 'Reading files: 1/9 files read' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    ;(await screen.findByRole('button', { name: 'Clear finished (2)' })).click()
+    expect(await screen.findByText(/Cleared 1 of 2/)).toBeInTheDocument()
+
+    // The one left is dismissed on its own: nothing remains for the error to be about.
+    ;(await screen.findByRole('button', { name: /dismiss/i })).click()
+    await waitFor(() => expect(screen.queryByText(/Cleared 1 of 2/)).not.toBeInTheDocument())
+  })
+
+  it('keeps a stop pending until the snapshot says the run was asked to stop', async () => {
+    track('job-1', 'first')
+    knownJobIds.add('job-1')
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Reading files: 40/12000 files read' },
+      receivedAt: Date.now()
+    })
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderIn(<Ingest />)
+    const abort = await screen.findByRole('button', { name: /^abort$/i })
+
+    let release!: () => void
+    snapshotGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    stoppingJobIds.add('job-1')
+    abort.click()
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/ingest/jobs/job-1/cancel'))).toBe(true)
+    )
+    // The cancel answered, but the refreshed snapshot has not arrived: no second request may be invited.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByRole('button', { name: /^abort$/i })).toBeNull()
+    release()
+    expect(await screen.findByRole('button', { name: 'Stopping…' })).toBeDisabled()
     vi.unstubAllGlobals()
   })
 

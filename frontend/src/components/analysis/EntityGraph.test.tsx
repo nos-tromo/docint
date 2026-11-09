@@ -241,7 +241,10 @@ describe('EntityGraph', () => {
         onResetNodeCount={onResetNodeCount}
       />
     )
-    await userEvent.click(screen.getByRole('button', { name: /reset node count/i }))
+    const reset = screen.getByRole('button', { name: /reset node count/i })
+    // An undo icon action, not a bordered text chip.
+    expect(reset).toHaveTextContent('')
+    await userEvent.click(reset)
     expect(onResetNodeCount).toHaveBeenCalledTimes(1)
   })
 })

@@ -1,5 +1,6 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { SectionHeader } from '@infra/ui'
 import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportPath, getNerSourcesPage } from '@/api/collections'
 import { downloadFile } from '@/api/files'
@@ -11,6 +12,7 @@ import { fetchAllPages } from '@/lib/fetchAllPages'
 import { entityFindingSnapshot, translatableTextOf } from '@/lib/reportSnapshots'
 import { storedTranslation } from '@/stores/translations'
 import { useT } from '@/i18n/LanguageContext'
+import { LoadMore } from '@/components/common/LoadMore'
 
 // Single source of truth for the table's column widths; the header row and
 // every body row share it so columns line up. Metadata is one flexible column.
@@ -55,6 +57,8 @@ export function EntityFindingsTable({
   reportDedupeKeys
 }: Props) {
   const t = useT()
+  // The section-wide controls report here, under the header, rather than widen it.
+  const [statusLine, setStatusLine] = useState<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: findings.length,
@@ -101,42 +105,52 @@ export function EntityFindingsTable({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm">
-          <span className="text-muted-foreground">{t('entities.findings_for')} </span>
-          <span className="font-medium">{selected.text}</span>
-          <span className="text-muted-foreground">
-            {' '}—{' '}
-            {t(
-              findings.length === 1 ? 'entities.findings_chunk_one' : 'entities.findings_chunk_other',
-              { count: findings.length }
-            )}
-            {hasNextPage ? '+' : ''}
-            {isFetchingFindings ? t('entities.findings_loading_suffix') : ''}
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          {/* Every matching finding, not just the rows paged in. */}
-          <TranslateAllButton fetchAll={fetchAllFindings} textOf={translatableTextOf} hasRows={findings.length > 0} />
-          {/* Adds every finding the entity filter matches, not only the rows
-              paged in — see AddAllToReportButton. */}
-          <AddAllToReportButton
-            fetchAll={fetchAllFindings}
-            toItem={(row: NerSourceRow) =>
-              entityFindingSnapshot(row, entityLabel, storedTranslation(translatableTextOf(row)))
-            }
-            hasRows={findings.length > 0}
-          />
-          {collection && (
-            <FileDownloadButton
-              label={t('table.export_csv')}
-              download={() =>
-                downloadFile(csvExportPath(collection, 'ner-sources', exportParams), `${collection}-ner-sources.csv`)
+      <SectionHeader
+        caption={
+          <>
+            <span className="text-muted-foreground">{t('entities.findings_for')} </span>
+            <span className="font-medium text-foreground">{selected.text}</span>
+            <span className="text-muted-foreground">
+              {' '}—{' '}
+              {t(
+                findings.length === 1 ? 'entities.findings_chunk_one' : 'entities.findings_chunk_other',
+                { count: findings.length }
+              )}
+              {hasNextPage ? '+' : ''}
+              {isFetchingFindings ? t('entities.findings_loading_suffix') : ''}
+            </span>
+          </>
+        }
+        actions={
+          <>
+            {/* Every matching finding, not just the rows paged in. */}
+            <TranslateAllButton messageTarget={statusLine} fetchAll={fetchAllFindings} textOf={translatableTextOf} hasRows={findings.length > 0} />
+            {/* Adds every finding the entity filter matches, not only the rows
+                paged in — see AddAllToReportButton. */}
+            <AddAllToReportButton
+              messageTarget={statusLine}
+              fetchAll={fetchAllFindings}
+              toItem={(row: NerSourceRow) =>
+                entityFindingSnapshot(row, entityLabel, storedTranslation(translatableTextOf(row)))
               }
+              hasRows={findings.length > 0}
             />
-          )}
-        </div>
-      </div>
+            {collection && (
+              <FileDownloadButton
+                label={t('table.export_csv')}
+                download={() =>
+                  downloadFile(csvExportPath(collection, 'ner-sources', exportParams), `${collection}-ner-sources.csv`)
+                }
+              />
+            )}
+          </>
+        }
+      />
+      <div
+        ref={setStatusLine}
+        data-testid="section-status"
+        className="flex flex-wrap justify-end gap-x-3 gap-y-1 empty:hidden"
+      />
 
       {findings.length === 0 ? (
         <p className="text-sm text-muted-foreground">
@@ -183,19 +197,8 @@ export function EntityFindingsTable({
                 )
               })}
             </div>
-            {hasNextPage && onLoadMore && (
-              <div className="flex justify-center py-2">
-                <button
-                  type="button"
-                  onClick={onLoadMore}
-                  disabled={isFetchingFindings}
-                  className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
-                >
-                  {isFetchingFindings ? t('common.loading_ellipsis') : t('table.load_more')}
-                </button>
-              </div>
-            )}
           </div>
+          {hasNextPage && onLoadMore && <LoadMore busy={isFetchingFindings} onClick={onLoadMore} />}
         </div>
       )}
     </div>

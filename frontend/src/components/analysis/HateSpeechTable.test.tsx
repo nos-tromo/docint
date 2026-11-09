@@ -66,6 +66,31 @@ describe('HateSpeechTable', () => {
     expect(downloads.saved()[0].download).toBe('alpha-hate-speech.csv')
   })
 
+  it('puts its caption and actions on one shared header row', () => {
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
+    const exportCsv = screen.getByRole('button', { name: 'Export CSV' })
+    expect(exportCsv.closest('.ml-auto')).not.toBeNull()
+    const row = exportCsv.closest('.flex-wrap')!
+    expect(row).toHaveTextContent(/flagged chunk/)
+    // The count ends like the other tables' captions, without a stray full stop.
+    expect(row.textContent).not.toMatch(/chunks?\+?\./)
+  })
+
+  it('offers the next page below the list, not inside its scroll area', () => {
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" hasNextPage onLoadMore={vi.fn()} />)
+    const more = screen.getByRole('button', { name: 'Load more' })
+    expect(screen.getByTestId('hate-speech-scroll')).not.toContainElement(more)
+    expect(more.parentElement).toHaveClass('border-t')
+  })
+
+  it('keeps a status line under its header for the section-wide controls', () => {
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
+    const line = screen.getByTestId('section-status')
+    const header = screen.getByRole('button', { name: 'Export CSV' }).closest('.flex-wrap')!
+    expect(header.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(header).not.toContainElement(line)
+  })
+
   it('renders one row per finding with category, source and chunk text inline', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
     const row = screen.getByTestId('hate-speech-row')

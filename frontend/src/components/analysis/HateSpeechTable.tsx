@@ -1,5 +1,6 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { SectionHeader } from '@infra/ui'
 import { csvExportPath, getHateSpeechPage } from '@/api/collections'
 import { downloadFile } from '@/api/files'
 import { FileDownloadButton } from '@/components/common/FileDownloadButton'
@@ -21,6 +22,7 @@ import { chunkTextOf, hasImageParts, hateSpeechSnapshot, translatableTextOf } fr
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
+import { LoadMore } from '@/components/common/LoadMore'
 
 export type { HateSpeechRow }
 
@@ -160,6 +162,8 @@ export function HateSpeechTable({
   reportDedupeKeys
 }: Props) {
   const t = useT()
+  // The section-wide controls report here, under the header, rather than widen it.
+  const [statusLine, setStatusLine] = useState<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -185,29 +189,39 @@ export function HateSpeechTable({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {t(rows.length === 1 ? 'hate.count_one' : 'hate.count_other', { count: rows.length })}
-          {hasNextPage ? '+' : ''}.
-        </p>
-        <div className="flex items-center gap-1">
-          {/* Every flagged chunk, not just the rows paged in. */}
-          <TranslateAllButton fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
-          {/* Adds every flagged chunk in the collection, not only the rows
-              paged in — see AddAllToReportButton. */}
-          <AddAllToReportButton
-            fetchAll={fetchAllRows}
-            toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(translatableTextOf(row)))}
-            hasRows={rows.length > 0}
-          />
-          {collection && (
-            <FileDownloadButton
-              label={t('table.export_csv')}
-              download={() => downloadFile(csvExportPath(collection, 'hate-speech'), `${collection}-hate-speech.csv`)}
+      <SectionHeader
+        caption={
+          <>
+            {t(rows.length === 1 ? 'hate.count_one' : 'hate.count_other', { count: rows.length })}
+            {hasNextPage ? '+' : ''}
+          </>
+        }
+        actions={
+          <>
+            {/* Every flagged chunk, not just the rows paged in. */}
+            <TranslateAllButton messageTarget={statusLine} fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
+            {/* Adds every flagged chunk in the collection, not only the rows
+                paged in — see AddAllToReportButton. */}
+            <AddAllToReportButton
+              messageTarget={statusLine}
+              fetchAll={fetchAllRows}
+              toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(translatableTextOf(row)))}
+              hasRows={rows.length > 0}
             />
-          )}
-        </div>
-      </div>
+            {collection && (
+              <FileDownloadButton
+                label={t('table.export_csv')}
+                download={() => downloadFile(csvExportPath(collection, 'hate-speech'), `${collection}-hate-speech.csv`)}
+              />
+            )}
+          </>
+        }
+      />
+      <div
+        ref={setStatusLine}
+        data-testid="section-status"
+        className="flex flex-wrap justify-end gap-x-3 gap-y-1 empty:hidden"
+      />
       <div className="rounded-md border border-border overflow-hidden">
         <div
           className="grid gap-3 px-3 py-2 bg-muted border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"
@@ -245,19 +259,8 @@ export function HateSpeechTable({
               )
             })}
           </div>
-          {hasNextPage && onLoadMore && (
-            <div className="flex justify-center py-2">
-              <button
-                type="button"
-                onClick={onLoadMore}
-                disabled={isFetching}
-                className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
-              >
-                {isFetching ? t('common.loading_ellipsis') : t('table.load_more')}
-              </button>
-            </div>
-          )}
         </div>
+        {hasNextPage && onLoadMore && <LoadMore busy={isFetching} onClick={onLoadMore} />}
       </div>
     </div>
   )

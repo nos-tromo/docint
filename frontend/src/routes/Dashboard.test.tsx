@@ -72,6 +72,18 @@ describe('Dashboard entity merge mode is fixed to resolved', () => {
 })
 
 describe('Dashboard sessions panel scoping', () => {
+  it('puts the top-entities controls on its card header row', async () => {
+    vi.stubGlobal('fetch', mockFetch(true))
+    renderDashboard()
+    const heading = await screen.findByRole('heading', { level: 2, name: 'Top entities' })
+    const topK = screen.getByRole('spinbutton', { name: 'top-k' })
+    expect(heading.closest('.flex-wrap')).toContainElement(topK)
+    expect(heading.closest('.flex-wrap')).toContainElement(screen.getByRole('spinbutton', { name: 'min mentions' }))
+    // A field the height of the header's other controls, on the card's own surface.
+    expect(topK).toHaveClass('h-8')
+    expect(topK).not.toHaveClass('bg-muted')
+  })
+
   it('prompts to select a collection in the recent-sessions panel when none is active', async () => {
     vi.stubGlobal('fetch', mockFetch(true))
     renderDashboard()

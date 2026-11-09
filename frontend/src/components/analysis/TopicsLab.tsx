@@ -273,26 +273,29 @@ function OutlierSection({
           <p className="text-xs tabular-nums text-muted-foreground">{preview}</p>
         </div>
       )}
-      <ActionBar>
-        {(!histogram || relax.stale) && (
-          <Button
-            variant="secondary"
-            // Measuring undoes an applied relax, so a stale one is applied again at its own bar instead.
-            onClick={() => relaxAt(relax.applied > 0 ? relax.threshold : null)}
-          >
-            {t(relax.applied > 0 ? 'topics.lab_outliers_reapply' : 'topics.lab_outliers_measure')}
-          </Button>
-        )}
-        {histogram && !relax.stale && top !== null && (
-          <Button
-            variant="primary"
-            disabled={placed === 0 || value === relax.threshold}
-            onClick={() => relaxAt(value)}
-          >
-            {t('topics.lab_outliers_apply')}
-          </Button>
-        )}
-      </ActionBar>
+      {/* Measured, current, and nothing near enough: there is nothing to do here. */}
+      {(!histogram || relax.stale || top !== null) && (
+        <ActionBar>
+          {(!histogram || relax.stale) && (
+            <Button
+              variant="secondary"
+              // Measuring undoes an applied relax, so a stale one is applied again at its own bar instead.
+              onClick={() => relaxAt(relax.applied > 0 ? relax.threshold : null)}
+            >
+              {t(relax.applied > 0 ? 'topics.lab_outliers_reapply' : 'topics.lab_outliers_measure')}
+            </Button>
+          )}
+          {histogram && !relax.stale && top !== null && (
+            <Button
+              variant="primary"
+              disabled={placed === 0 || value === relax.threshold}
+              onClick={() => relaxAt(value)}
+            >
+              {t('topics.lab_outliers_apply')}
+            </Button>
+          )}
+        </ActionBar>
+      )}
     </Section>
   )
 }

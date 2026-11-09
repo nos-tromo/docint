@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TopicsPanel } from './TopicsPanel'
@@ -305,6 +305,15 @@ describe('TopicsLab', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Undo placement' }))
 
     await waitFor(() => expect(posted(fetchMock)).toEqual([{ action: 'relax', run_id: RUN_ID, threshold: null }]))
+  })
+
+  it('leaves no empty bar when the measured distribution places nothing', async () => {
+    stubApi({ ...TUNING, relax: { threshold: null, histogram: Array(100).fill(0), applied: 0, stale: false } })
+    await openLab()
+
+    const section = screen.getByRole('heading', { level: 3, name: 'Unassigned chunks' }).closest('section')!
+    expect(within(section).getByText('No unassigned chunk is near enough to a topic.')).toBeInTheDocument()
+    expect(section.querySelector('[class*="flex-[1_1_8rem]"]')).toBeNull()
   })
 
   it('applies a relax again at its own bar once the pool has moved on', async () => {

@@ -19,7 +19,8 @@ import {
   ChevronUpIcon,
   ChevronsUpDownIcon,
   CopyButton,
-  EmptyState
+  EmptyState,
+  SectionHeader
 } from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
 import type { TopicSummary } from '@/api/topics'
@@ -31,6 +32,7 @@ import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { SourceExtractAction } from '@/components/inspector/SourceExtractAction'
+import { LoadMore } from '@/components/common/LoadMore'
 
 /**
  * The table's feature set, stitched statically so only what this grid uses is
@@ -330,19 +332,23 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {t(docs.length === 1 ? 'table.documents_one' : 'table.documents_other', { count: docs.length })}
-          {hasNextPage ? '+' : ''}
-          {isFetching ? ` ${t('table.loading_suffix')}` : ''}
-        </p>
-        {collection && (
-          <FileDownloadButton
-            label={t('table.export_csv')}
-            download={() => downloadFile(csvExportPath(collection, 'documents'), `${collection}-documents.csv`)}
-          />
-        )}
-      </div>
+      <SectionHeader
+        caption={
+          <>
+            {t(docs.length === 1 ? 'table.documents_one' : 'table.documents_other', { count: docs.length })}
+            {hasNextPage ? '+' : ''}
+            {isFetching ? ` ${t('table.loading_suffix')}` : ''}
+          </>
+        }
+        actions={
+          collection && (
+            <FileDownloadButton
+              label={t('table.export_csv')}
+              download={() => downloadFile(csvExportPath(collection, 'documents'), `${collection}-documents.csv`)}
+            />
+          )
+        }
+      />
 
       {docs.length === 0 && !isFetching ? (
         <EmptyState>
@@ -412,18 +418,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
             </div>
           </div>
 
-          {hasNextPage && onLoadMore && (
-            <div className="flex justify-center border-t border-border p-2">
-              <button
-                type="button"
-                onClick={onLoadMore}
-                disabled={isFetching}
-                className="rounded-md border border-border px-3 py-1 text-sm hover:bg-white/5 disabled:opacity-50"
-              >
-                {isFetching ? t('common.loading_ellipsis') : t('table.load_more')}
-              </button>
-            </div>
-          )}
+          {hasNextPage && onLoadMore && <LoadMore busy={isFetching} onClick={onLoadMore} />}
         </div>
       )}
     </div>

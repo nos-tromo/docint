@@ -73,6 +73,30 @@ describe('EntityFindingsTable', () => {
     expect(downloads.saved()[0].download).toBe('alpha-ner-sources.csv')
   })
 
+  it('puts its caption and actions on one shared header row', () => {
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+    const exportCsv = screen.getByRole('button', { name: 'Export CSV' })
+    expect(exportCsv.closest('.ml-auto')).not.toBeNull()
+    expect(exportCsv.closest('.flex-wrap')).toHaveTextContent(/findings for/i)
+  })
+
+  it('offers the next page below the list, not inside its scroll area', () => {
+    renderWithClient(
+      <EntityFindingsTable selected={selected} findings={findings} collection="alpha" hasNextPage onLoadMore={vi.fn()} />
+    )
+    const more = screen.getByRole('button', { name: 'Load more' })
+    expect(screen.getByTestId('ner-findings-scroll')).not.toContainElement(more)
+    expect(more.parentElement).toHaveClass('border-t')
+  })
+
+  it('keeps a status line under its header for the section-wide controls', () => {
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+    const line = screen.getByTestId('section-status')
+    const header = screen.getByRole('button', { name: 'Export CSV' }).closest('.flex-wrap')!
+    expect(header.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(header).not.toContainElement(line)
+  })
+
   it('shows the findings count and a table header for the selected entity', () => {
     renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     const heading = screen.getByText(/findings for/i).parentElement!

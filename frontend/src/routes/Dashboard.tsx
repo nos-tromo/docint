@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { PageHeader, Card } from '@infra/ui'
+import { Card, Input, PageHeader } from '@infra/ui'
 import { useCollections } from '@/hooks/useCollections'
 import { useDocumentsCount } from '@/hooks/useDocuments'
 import { useNerStats } from '@/hooks/useNer'
@@ -65,33 +65,34 @@ export function Dashboard() {
 
       <RetentionCard />
 
-      <Card>
-        <header className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-primary">{t('dashboard.top_entities')}</h2>
-          <div className="flex items-center gap-3 text-sm">
+      <Card
+        title={t('dashboard.top_entities')}
+        actions={
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <label className="flex items-center gap-2">
               {t('dashboard.top_k_label')}
-              <input
+              <Input
                 type="number"
                 min={1}
                 max={100}
                 value={topK}
                 onChange={(e) => setTopK(Number(e.target.value))}
-                className="w-16 bg-muted border border-border rounded-md px-2 py-1"
+                className="h-8 w-16 px-2 text-foreground"
               />
             </label>
             <label className="flex items-center gap-2">
               {t('dashboard.min_mentions_label')}
-              <input
+              <Input
                 type="number"
                 min={1}
                 value={minMentions}
                 onChange={(e) => setMinMentions(Number(e.target.value))}
-                className="w-16 bg-muted border border-border rounded-md px-2 py-1"
+                className="h-8 w-16 px-2 text-foreground"
               />
             </label>
           </div>
-        </header>
+        }
+      >
         {!collection ? (
           <div className="text-sm text-muted-foreground">{t('dashboard.select_collection_entities')}</div>
         ) : (
@@ -100,17 +101,15 @@ export function Dashboard() {
       </Card>
 
       <Card title={t('dashboard.recent_sessions')}>
-        <div className="mt-3">
-          {!collection ? (
-            <div className="text-sm text-muted-foreground">{t('common.select_collection_to_see_chats')}</div>
-          ) : (
-            <ul className="space-y-1 text-sm">
-              {sessionsData?.sessions.slice(0, 10).map((s) => (
-                <li key={s.id}>{s.title?.trim() || s.id.slice(0, 8)}</li>
-              ))}
-            </ul>
-          )}
-        </div>
+        {!collection ? (
+          <div className="text-sm text-muted-foreground">{t('common.select_collection_to_see_chats')}</div>
+        ) : (
+          <ul className="space-y-1 text-sm">
+            {sessionsData?.sessions.slice(0, 10).map((s) => (
+              <li key={s.id}>{s.title?.trim() || s.id.slice(0, 8)}</li>
+            ))}
+          </ul>
+        )}
       </Card>
     </div>
   )

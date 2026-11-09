@@ -86,12 +86,23 @@ describe('FilterBuilder disclosure', () => {
     expect(useChatFiltersStore.getState().hateSpeechOnly).toBe(true)
   })
 
+  it('adds a rule from an icon action in the custom-rules header', () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.getState().setFilterEnabled(true)
+    render(<FilterBuilder />)
+    const add = screen.getByRole('button', { name: /^add rule$/i })
+    expect(add).toHaveTextContent('')
+    expect(add.closest('.flex-wrap')).toHaveTextContent('Custom rules')
+    // The panel's other labels are small; the caption matches them.
+    expect(screen.getByText('Custom rules')).toHaveClass('text-xs')
+  })
+
   it('edits a custom rule through the shared primitives', async () => {
     useSearchUiStore.getState().setFiltersOpen(true)
     useChatFiltersStore.getState().setFilterEnabled(true)
     render(<FilterBuilder />)
 
-    await userEvent.click(screen.getByRole('button', { name: /^rule$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^add rule$/i }))
     await userEvent.type(screen.getByPlaceholderText(/field/i), 'mimetype')
 
     expect(useChatFiltersStore.getState().customRules[0].field).toBe('mimetype')
@@ -111,7 +122,7 @@ describe('FilterBuilder disclosure', () => {
     useChatFiltersStore.getState().setFilterEnabled(true)
     const { container } = render(<FilterBuilder />)
 
-    await userEvent.click(screen.getByRole('button', { name: /^rule$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^add rule$/i }))
 
     const datalist = container.querySelector('datalist')
     expect(datalist).not.toBeNull()
@@ -142,7 +153,7 @@ describe('FilterBuilder custom rules', () => {
     useChatFiltersStore.setState({ filterEnabled: true })
     render(<FilterBuilder />)
 
-    await userEvent.click(screen.getByRole('button', { name: 'Rule' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Add rule' }))
     // As a bare <select> in a four-column grid with no visible caption, this
     // had no accessible name at all.
     const operator = screen.getByRole('combobox', { name: 'Operator' })

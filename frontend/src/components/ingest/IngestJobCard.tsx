@@ -178,9 +178,8 @@ export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobC
   // mutation's own pending state covers the gap before the snapshot refreshes.
   const cancelMutation = useMutation({
     mutationFn: () => cancelIngestJob(jobId, owner),
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
-    }
+    // Returned, so the mutation stays pending until the refreshed snapshot says the stop was asked.
+    onSettled: () => qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
   })
 
   const abortable = status.phase === 'queued' || status.phase === 'processing'
@@ -239,6 +238,11 @@ export function IngestJobCard({ jobId, collection, owner, listItem }: IngestJobC
   return <IngestionStatus status={preprocess ? { ...status, preprocess } : status} actions={action} />
 }
 
+/**
+ * The collection a run was queued for, as the interrupted card names it.
+ *
+ * @param collection - The collection name; nothing renders without one.
+ */
 function CollectionLabel({ collection }: { collection: string }) {
   if (!collection) return null
   return <p className="truncate text-sm text-foreground">{collection}</p>

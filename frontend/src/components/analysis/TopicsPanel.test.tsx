@@ -268,6 +268,14 @@ describe('TopicsPanel', () => {
     expect(screen.getByText(sizeShare)).toBeInTheDocument()
   })
 
+  it('puts its caption and actions on one shared header row', async () => {
+    stubApi()
+    renderPanel()
+    const caption = await screen.findByText(/3 topics/)
+    expect(header.rebuild().parentElement).toHaveClass('ml-auto')
+    expect(caption.closest('.flex-wrap')).toContainElement(header.rebuild())
+  })
+
   it('orders the header actions rebuild, find new, align, download, fine-tuning', async () => {
     stubApi()
     renderPanel()

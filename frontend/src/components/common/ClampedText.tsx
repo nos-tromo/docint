@@ -37,7 +37,7 @@ export function ClampedText({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-xs text-blue-400 hover:text-blue-300"
+          className="mt-1 text-xs text-primary hover:underline"
         >
           {expanded ? t('common.show_less') : t('common.show_more')}
         </button>

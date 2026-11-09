@@ -7,7 +7,8 @@ import {
   EmptyState,
   NewButton,
   PlayButton,
-  RefreshButton
+  RefreshButton,
+  SectionHeader
 } from '@infra/ui'
 import { topicValue, type TopicSummary, type TopicsAction } from '@/api/topics'
 import { describeError } from '@/api/errorMessage'
@@ -213,50 +214,52 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
   return (
     <div className="space-y-3">
       {data && coverage && (
-        // The caption's basis drops the actions below it on a narrow screen rather than
-        // squeezing four counts into a column beside them.
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-          <p className="min-w-0 grow basis-72 text-sm text-muted-foreground">
-            {t(data.topics.length === 1 ? 'topics.caption_topics_one' : 'topics.caption_topics_other', {
-              count: data.topics.length
-            })}
-            {' · '}
-            {t(coverage.total === 1 ? 'topics.caption_coverage_one' : 'topics.caption_coverage_other', {
-              assigned: coverage.assigned,
-              total: coverage.total,
-              unassigned: coverage.unassigned,
-              pending: coverage.pending
-            })}
-          </p>
-          <div className="ml-auto flex shrink-0 items-center gap-1">
-            <RefreshButton
-              label={t('topics.rebuild')}
-              busy={busyAction === 'build'}
-              disabled={busy}
-              onClick={rebuild}
-            />
-            <NewButton
-              label={t('topics.discover')}
-              busy={busyAction === 'discover'}
-              disabled={busy || coverage.unassigned === 0}
-              onClick={() => start.mutate({ action: 'discover' })}
-            />
-            <PlayButton
-              label={t('topics.align')}
-              busy={busyAction === 'align'}
-              disabled={busy || coverage.pending === 0}
-              onClick={() => start.mutate({ action: 'align' })}
-            />
-            {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
-            <DownloadButton label={t('topics.download_csv')} onClick={download} />
-            <DisclosureButton
-              expanded={labOpen}
-              controls={labId}
-              label={t(labOpen ? 'topics.lab_hide' : 'topics.lab_show')}
-              onClick={() => setLabOpen((open) => !open)}
-            />
-          </div>
-        </div>
+        <SectionHeader
+          caption={
+            <>
+              {t(data.topics.length === 1 ? 'topics.caption_topics_one' : 'topics.caption_topics_other', {
+                count: data.topics.length
+              })}
+              {' · '}
+              {t(coverage.total === 1 ? 'topics.caption_coverage_one' : 'topics.caption_coverage_other', {
+                assigned: coverage.assigned,
+                total: coverage.total,
+                unassigned: coverage.unassigned,
+                pending: coverage.pending
+              })}
+            </>
+          }
+          actions={
+            <>
+              <RefreshButton
+                label={t('topics.rebuild')}
+                busy={busyAction === 'build'}
+                disabled={busy}
+                onClick={rebuild}
+              />
+              <NewButton
+                label={t('topics.discover')}
+                busy={busyAction === 'discover'}
+                disabled={busy || coverage.unassigned === 0}
+                onClick={() => start.mutate({ action: 'discover' })}
+              />
+              <PlayButton
+                label={t('topics.align')}
+                busy={busyAction === 'align'}
+                disabled={busy || coverage.pending === 0}
+                onClick={() => start.mutate({ action: 'align' })}
+              />
+              {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+              <DownloadButton label={t('topics.download_csv')} onClick={download} />
+              <DisclosureButton
+                expanded={labOpen}
+                controls={labId}
+                label={t(labOpen ? 'topics.lab_hide' : 'topics.lab_show')}
+                onClick={() => setLabOpen((open) => !open)}
+              />
+            </>
+          }
+        />
       )}
 
       {overview.isPending && <p className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</p>}

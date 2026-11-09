@@ -565,108 +565,105 @@ export function Report() {
           <p className="text-sm text-muted-foreground">{t('report.loading')}</p>
         ) : (
           <>
-            <div className="flex items-start justify-between gap-3 mb-4">
-              <div className="min-w-0 flex-1 space-y-1.5">
-                <div className="flex flex-wrap gap-x-6 gap-y-1.5">
-                  {/* Renaming lives here rather than on the title line, which
-                      is now the selector. It joins the two fields that already
-                      carry report identity, directly under a control showing
-                      the same value. */}
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="uppercase tracking-wide">{t('report.title_label')}</span>
-                    <input
-                      key={`title-${report.id}`}
-                      defaultValue={report.title}
-                      placeholder={t('report.title_label')}
-                      onBlur={(e) => {
-                        const title = e.target.value.trim()
-                        if (title && title !== report.title) {
-                          updateReport.mutate({ id: report.id, title })
-                        }
-                      }}
-                      className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
-                      aria-label={t('report.title_aria')}
-                    />
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="uppercase tracking-wide">{t('report.operator_label')}</span>
-                    <input
-                      key={`op-${report.id}`}
-                      defaultValue={report.operator ?? ''}
-                      placeholder={t('report.operator_label')}
-                      onBlur={(e) => {
-                        const operator = e.target.value
-                        if (operator !== (report.operator ?? '')) {
-                          updateReport.mutate({ id: report.id, operator })
-                        }
-                      }}
-                      className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
-                      aria-label={t('report.operator_label')}
-                    />
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="uppercase tracking-wide">{t('report.reference_label')}</span>
-                    <input
-                      key={`ref-${report.id}`}
-                      defaultValue={report.reference_number ?? ''}
-                      placeholder={t('report.reference_label')}
-                      onBlur={(e) => {
-                        const reference_number = e.target.value
-                        if (reference_number !== (report.reference_number ?? '')) {
-                          updateReport.mutate({ id: report.id, reference_number })
-                        }
-                      }}
-                      className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
-                      aria-label={t('report.reference_label')}
-                    />
-                  </label>
-                </div>
-                {/* A row of their own, so the two options never part across a wrap. */}
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={report.show_toc ?? true}
-                      onChange={(e) => updateReport.mutate({ id: report.id, show_toc: e.target.checked })}
-                      className="accent-primary"
-                      aria-label={t('report.toc_label')}
-                    />
-                    <span className="uppercase tracking-wide">{t('report.toc_label')}</span>
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={report.show_collection_overview ?? true}
-                      onChange={(e) =>
-                        updateReport.mutate({ id: report.id, show_collection_overview: e.target.checked })
+            <div className="mb-4 space-y-1.5">
+              <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+                {/* Renaming lives here rather than on the title line, which
+                    is now the selector. It joins the two fields that already
+                    carry report identity, directly under a control showing
+                    the same value. */}
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="uppercase tracking-wide">{t('report.title_label')}</span>
+                  <input
+                    key={`title-${report.id}`}
+                    defaultValue={report.title}
+                    placeholder={t('report.title_label')}
+                    onBlur={(e) => {
+                      const title = e.target.value.trim()
+                      if (title && title !== report.title) {
+                        updateReport.mutate({ id: report.id, title })
                       }
-                      className="accent-primary"
-                      aria-label={t('report.document_overview')}
-                    />
-                    <span className="uppercase tracking-wide">{t('report.document_overview')}</span>
-                  </label>
-                  {(report.show_collection_overview ?? true) && (
-                    // The refresh icon, not a dotted-underline text link: an
-                    // underline in a row of form fields reads as a link to
-                    // somewhere else, and this rebuilds what is on screen. The
-                    // label keeps carrying the captured date, so the tooltip
-                    // and the accessible name still say when the snapshot is
-                    // from — an icon alone would drop that.
-                    <RefreshButton
-                      label={
-                        report.collection_overview?.captured_at
-                          ? t('report.refresh_overview_captured', {
-                              date: report.collection_overview.captured_at.slice(0, 10)
-                            })
-                          : t('report.capture_overview')
+                    }}
+                    className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
+                    aria-label={t('report.title_aria')}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="uppercase tracking-wide">{t('report.operator_label')}</span>
+                  <input
+                    key={`op-${report.id}`}
+                    defaultValue={report.operator ?? ''}
+                    placeholder={t('report.operator_label')}
+                    onBlur={(e) => {
+                      const operator = e.target.value
+                      if (operator !== (report.operator ?? '')) {
+                        updateReport.mutate({ id: report.id, operator })
                       }
-                      busy={refreshOverview.isPending}
-                      onClick={() => refreshOverview.mutate(report.id)}
-                    />
-                  )}
-                </div>
+                    }}
+                    className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
+                    aria-label={t('report.operator_label')}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="uppercase tracking-wide">{t('report.reference_label')}</span>
+                  <input
+                    key={`ref-${report.id}`}
+                    defaultValue={report.reference_number ?? ''}
+                    placeholder={t('report.reference_label')}
+                    onBlur={(e) => {
+                      const reference_number = e.target.value
+                      if (reference_number !== (report.reference_number ?? '')) {
+                        updateReport.mutate({ id: report.id, reference_number })
+                      }
+                    }}
+                    className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
+                    aria-label={t('report.reference_label')}
+                  />
+                </label>
               </div>
-
+              {/* A row of their own, so the two options never part across a wrap. */}
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={report.show_toc ?? true}
+                    onChange={(e) => updateReport.mutate({ id: report.id, show_toc: e.target.checked })}
+                    className="accent-primary"
+                    aria-label={t('report.toc_label')}
+                  />
+                  <span className="uppercase tracking-wide">{t('report.toc_label')}</span>
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={report.show_collection_overview ?? true}
+                    onChange={(e) =>
+                      updateReport.mutate({ id: report.id, show_collection_overview: e.target.checked })
+                    }
+                    className="accent-primary"
+                    aria-label={t('report.document_overview')}
+                  />
+                  <span className="uppercase tracking-wide">{t('report.document_overview')}</span>
+                </label>
+                {(report.show_collection_overview ?? true) && (
+                  // The refresh icon, not a dotted-underline text link: an
+                  // underline in a row of form fields reads as a link to
+                  // somewhere else, and this rebuilds what is on screen. The
+                  // label keeps carrying the captured date, so the tooltip
+                  // and the accessible name still say when the snapshot is
+                  // from — an icon alone would drop that.
+                  <RefreshButton
+                    label={
+                      report.collection_overview?.captured_at
+                        ? t('report.refresh_overview_captured', {
+                            date: report.collection_overview.captured_at.slice(0, 10)
+                          })
+                        : t('report.capture_overview')
+                    }
+                    busy={refreshOverview.isPending}
+                    onClick={() => refreshOverview.mutate(report.id)}
+                  />
+                )}
+              </div>
             </div>
 
             {items.length === 0 && overviewToShow === null ? (

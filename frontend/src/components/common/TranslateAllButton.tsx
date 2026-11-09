@@ -1,4 +1,5 @@
-import { IconButton, WarningIcon, XIcon } from '@infra/ui'
+import { createPortal } from 'react-dom'
+import { IconButton, StopIcon, WarningIcon } from '@infra/ui'
 import { TranslateIcon } from '@/components/common/icons'
 import { useTranslateAll } from '@/hooks/useTranslateAll'
 import { useT } from '@/i18n/LanguageContext'
@@ -11,6 +12,11 @@ interface Props<Row> {
   /** Whether the section currently has anything to translate. */
   hasRows: boolean
   className?: string
+  /**
+   * Where the progress or outcome line goes. A section header passes the status
+   * line under it, since a long message beside the icon would widen the row.
+   */
+  messageTarget?: HTMLElement | null
 }
 
 /**
@@ -18,7 +24,7 @@ interface Props<Row> {
  * counterpart of the per-row Translate toggle. It knows nothing about entities
  * vs. hate speech: the section hands it the walk and text derivation.
  */
-export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }: Props<Row>) {
+export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className, messageTarget }: Props<Row>) {
   const t = useT()
   const { run, stop, status, cap, total, done, failed, skipped, same, processed } = useTranslateAll<Row>({
     fetchAll,
@@ -40,21 +46,23 @@ export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }
     else message = t('common.translate_all_done', { done, same, skipped })
   }
 
+  const statusLine = message && (
+    <span
+      className={`text-xs ${isFailed || status === 'too_many' ? 'text-danger' : 'text-muted-foreground'}`}
+      role="status"
+      data-testid="translate-all-message"
+    >
+      {message}
+    </span>
+  )
+
   // `IconButton`'s `busy` disables the control: right for the page walk, wrong
   // once translating starts, which is when it has to stay clickable to stop.
   return (
     <div className={`flex items-center gap-2 ${className ?? ''}`}>
-      {message && (
-        <span
-          className={`text-xs ${isFailed || status === 'too_many' ? 'text-destructive' : 'text-muted-foreground'}`}
-          role="status"
-          data-testid="translate-all-message"
-        >
-          {message}
-        </span>
-      )}
+      {messageTarget === undefined ? statusLine : messageTarget && statusLine && createPortal(statusLine, messageTarget)}
       <IconButton
-        icon={isFailed ? <WarningIcon /> : translating ? <XIcon /> : <TranslateIcon />}
+        icon={isFailed ? <WarningIcon /> : translating ? <StopIcon /> : <TranslateIcon />}
         label={
           translating
             ? t('common.translate_all_stop')

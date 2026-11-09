@@ -193,7 +193,7 @@ export const en = {
   'chat.date_from': 'Date from',
   'chat.date_to': 'Date to',
   'chat.custom_rules': 'Custom rules',
-  'chat.add_rule': 'Rule',
+  'chat.add_rule': 'Add rule',
   'chat.field_placeholder': 'field (or pick)',
   'chat.value_placeholder': 'value',
   'chat.operator_aria': 'Operator',
@@ -410,7 +410,6 @@ export const en = {
   'entities.graph_node_count_aria': 'Graph node count',
   'entities.reset_node_count_aria': 'Reset node count',
   'entities.reset_node_count_title': 'Reset the node count to the deploy default',
-  'entities.reset_count_button': 'Reset count',
   // Accessible names for the graph's three download buttons; the visible chip
   // beside each icon is the bare format below.
   'entities.export_json': 'Export JSON',

@@ -168,21 +168,17 @@ export function PreviewDialog() {
       >
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2">
           <h2 className="truncate text-sm font-medium">{modal.filename}</h2>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1">
             {/* No new tab for frozen evidence: browsers block top-level
                 navigation to a data: URL, so the control would promise
                 something it cannot do. */}
             {!frozen && (
-              <button
-                type="button"
+              <IconButton
+                icon={<ExternalLinkIcon />}
+                label={t('common.preview_new_tab')}
+                busy={newTab.busy}
                 onClick={openInNewTab}
-                disabled={newTab.busy}
-                aria-busy={newTab.busy || undefined}
-                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 disabled:opacity-60"
-              >
-                {t('common.preview_new_tab')}
-                <ExternalLinkIcon className="h-3.5 w-3.5" />
-              </button>
+              />
             )}
             {/* The base `IconButton` rather than `RemoveButton`: closing a
                 preview takes nothing away, so it must not warn in red. */}

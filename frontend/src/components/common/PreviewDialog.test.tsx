@@ -88,7 +88,11 @@ describe('PreviewDialog', () => {
     expect(screen.queryByTitle('report.docx')).not.toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
 
-    await userEvent.click(screen.getByRole('button', { name: /new tab/i }))
+    const newTab = screen.getByRole('button', { name: /new tab/i })
+    // An icon action beside the close button, not a blue text link.
+    expect(newTab).toHaveTextContent('')
+    expect(newTab.parentElement).toContainElement(screen.getByRole('button', { name: /close/i }))
+    await userEvent.click(newTab)
 
     // No tab can show a docx: it is saved under its own name instead.
     await waitFor(() => expect(downloads.saved()).toHaveLength(1))

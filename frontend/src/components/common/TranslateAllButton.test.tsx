@@ -193,7 +193,28 @@ describe('TranslateAllButton', () => {
     await clickTranslateAll()
 
     await waitFor(() => expect(screen.getByTestId('translate-all-message')).toHaveTextContent(/too many findings/i))
+    expect(screen.getByTestId('translate-all-message')).toHaveClass('text-danger')
     expect(calls).toEqual([])
+  })
+
+  it('writes its message into the status line it is given', async () => {
+    const calls: string[] = []
+    stubFetch({ calls })
+    const qc = client()
+    qc.setQueryData(['app-config'], { report_batch_max_items: 2, language: 'en' })
+    const line = document.body.appendChild(document.createElement('div'))
+    render(
+      <QueryClientProvider client={qc}>
+        <TranslateAllButton fetchAll={async () => [{ chunk_text: 'a' }, { chunk_text: 'b' }, { chunk_text: 'c' }]} textOf={textOf} hasRows messageTarget={line} />
+      </QueryClientProvider>
+    )
+    await clickTranslateAll()
+
+    await waitFor(() => expect(line).toHaveTextContent(/too many findings/i))
+    // Not beside the icon, where a long message would push the header row wide.
+    const button = screen.getByRole('button', { name: /translate all findings/i })
+    expect(button.parentElement).not.toHaveTextContent(/too many findings/i)
+    line.remove()
   })
 
   it('stops after three consecutive failures instead of grinding through the section', async () => {
@@ -235,6 +256,8 @@ describe('TranslateAllButton', () => {
     // Concurrency 3: three calls are in flight and the button now stops the run.
     await waitFor(() => expect(calls).toHaveLength(3))
     const stopButton = await screen.findByRole('button', { name: /stop translating/i })
+    // The stop control draws the filled stop square, not a cross.
+    expect(stopButton.querySelector('path[fill="currentColor"]')).not.toBeNull()
     expect(screen.getByTestId('translate-all-message')).toHaveTextContent('0 of 8 processed')
 
     await userEvent.click(stopButton)

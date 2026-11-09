@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { IconButton, WarningIcon } from '@infra/ui'
 import type { ReportItemInput } from '@/api/types'
 import { CheckAllIcon } from '@/components/common/icons'
@@ -12,6 +13,11 @@ interface Props<Row> {
   /** Whether the section currently has anything to add. */
   hasRows: boolean
   className?: string
+  /**
+   * Where the progress or outcome line goes. A section header passes the status
+   * line under it, since a long message beside the icon would widen the row.
+   */
+  messageTarget?: HTMLElement | null
 }
 
 /**
@@ -26,7 +32,7 @@ interface Props<Row> {
  * The button knows nothing about entities vs. hate speech: the section hands
  * it the page walk and the snapshot builder its own rows use.
  */
-export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className }: Props<Row>) {
+export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className, messageTarget }: Props<Row>) {
   const t = useT()
   const { run, status, added, skipped, updated, cap } = useAddAllToReport<Row>({ fetchAll, toItem })
   const busy = status === 'fetching' || status === 'adding'
@@ -47,17 +53,19 @@ export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className
     else message = t('report.add_all_done', { added, skipped })
   }
 
+  const statusLine = message && (
+    <span
+      className={`text-xs ${failed || refused ? 'text-danger' : 'text-muted-foreground'}`}
+      role="status"
+      data-testid="add-all-message"
+    >
+      {message}
+    </span>
+  )
+
   return (
     <div className={`flex items-center gap-2 ${className ?? ''}`}>
-      {message && (
-        <span
-          className={`text-xs ${failed || refused ? 'text-destructive' : 'text-muted-foreground'}`}
-          role="status"
-          data-testid="add-all-message"
-        >
-          {message}
-        </span>
-      )}
+      {messageTarget === undefined ? statusLine : messageTarget && statusLine && createPortal(statusLine, messageTarget)}
       <IconButton
         icon={failed ? <WarningIcon /> : <CheckAllIcon />}
         label={failed ? t('report.retry') : t('report.add_all')}
