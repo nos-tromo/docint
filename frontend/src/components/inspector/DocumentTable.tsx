@@ -32,6 +32,7 @@ import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { SourceExtractAction } from '@/components/inspector/SourceExtractAction'
+import { LoadMore } from '@/components/common/LoadMore'
 
 /**
  * The table's feature set, stitched statically so only what this grid uses is
@@ -417,18 +418,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
             </div>
           </div>
 
-          {hasNextPage && onLoadMore && (
-            <div className="flex justify-center border-t border-border p-2">
-              <button
-                type="button"
-                onClick={onLoadMore}
-                disabled={isFetching}
-                className="rounded-md border border-border px-3 py-1 text-sm hover:bg-white/5 disabled:opacity-50"
-              >
-                {isFetching ? t('common.loading_ellipsis') : t('table.load_more')}
-              </button>
-            </div>
-          )}
+          {hasNextPage && onLoadMore && <LoadMore busy={isFetching} onClick={onLoadMore} />}
         </div>
       )}
     </div>

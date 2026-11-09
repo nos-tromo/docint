@@ -80,6 +80,15 @@ describe('EntityFindingsTable', () => {
     expect(exportCsv.closest('.flex-wrap')).toHaveTextContent(/findings for/i)
   })
 
+  it('offers the next page below the list, not inside its scroll area', () => {
+    renderWithClient(
+      <EntityFindingsTable selected={selected} findings={findings} collection="alpha" hasNextPage onLoadMore={vi.fn()} />
+    )
+    const more = screen.getByRole('button', { name: 'Load more' })
+    expect(screen.getByTestId('ner-findings-scroll')).not.toContainElement(more)
+    expect(more.parentElement).toHaveClass('border-t')
+  })
+
   it('shows the findings count and a table header for the selected entity', () => {
     renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     const heading = screen.getByText(/findings for/i).parentElement!

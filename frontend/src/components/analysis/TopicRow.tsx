@@ -9,6 +9,7 @@ import { formatDate } from '@/lib/formatDate'
 import { sourceLabel } from '@/lib/sourceLabel'
 import { useLang, useT } from '@/i18n/LanguageContext'
 import type { Lang, Strings } from '@/i18n'
+import { LoadMore } from '@/components/common/LoadMore'
 
 /** Keywords a row shows; the CSV carries them all. */
 const ROW_KEYWORDS = 5
@@ -241,14 +242,7 @@ export function TopicRow({ topic, runId, expanded, onToggle, onAsk }: TopicRowPr
               {/* A later page failing keeps the passages already read. */}
               {chunks.isError && <ReadError error={chunks.error} />}
               {chunks.hasNextPage && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={chunks.isFetchingNextPage}
-                  onClick={() => void chunks.fetchNextPage()}
-                >
-                  {chunks.isFetchingNextPage ? t('common.loading_ellipsis') : t('table.load_more')}
-                </Button>
+                <LoadMore busy={chunks.isFetchingNextPage} onClick={() => void chunks.fetchNextPage()} />
               )}
             </Section>
           </div>

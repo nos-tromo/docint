@@ -22,6 +22,7 @@ import { chunkTextOf, hasImageParts, hateSpeechSnapshot, translatableTextOf } fr
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
+import { LoadMore } from '@/components/common/LoadMore'
 
 export type { HateSpeechRow }
 
@@ -250,19 +251,8 @@ export function HateSpeechTable({
               )
             })}
           </div>
-          {hasNextPage && onLoadMore && (
-            <div className="flex justify-center py-2">
-              <button
-                type="button"
-                onClick={onLoadMore}
-                disabled={isFetching}
-                className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
-              >
-                {isFetching ? t('common.loading_ellipsis') : t('table.load_more')}
-              </button>
-            </div>
-          )}
         </div>
+        {hasNextPage && onLoadMore && <LoadMore busy={isFetching} onClick={onLoadMore} />}
       </div>
     </div>
   )

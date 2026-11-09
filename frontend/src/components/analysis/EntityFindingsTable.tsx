@@ -12,6 +12,7 @@ import { fetchAllPages } from '@/lib/fetchAllPages'
 import { entityFindingSnapshot, translatableTextOf } from '@/lib/reportSnapshots'
 import { storedTranslation } from '@/stores/translations'
 import { useT } from '@/i18n/LanguageContext'
+import { LoadMore } from '@/components/common/LoadMore'
 
 // Single source of truth for the table's column widths; the header row and
 // every body row share it so columns line up. Metadata is one flexible column.
@@ -188,19 +189,8 @@ export function EntityFindingsTable({
                 )
               })}
             </div>
-            {hasNextPage && onLoadMore && (
-              <div className="flex justify-center py-2">
-                <button
-                  type="button"
-                  onClick={onLoadMore}
-                  disabled={isFetchingFindings}
-                  className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
-                >
-                  {isFetchingFindings ? t('common.loading_ellipsis') : t('table.load_more')}
-                </button>
-              </div>
-            )}
           </div>
+          {hasNextPage && onLoadMore && <LoadMore busy={isFetchingFindings} onClick={onLoadMore} />}
         </div>
       )}
     </div>

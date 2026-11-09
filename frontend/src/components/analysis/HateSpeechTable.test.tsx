@@ -76,6 +76,13 @@ describe('HateSpeechTable', () => {
     expect(row.textContent).not.toMatch(/chunks?\+?\./)
   })
 
+  it('offers the next page below the list, not inside its scroll area', () => {
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" hasNextPage onLoadMore={vi.fn()} />)
+    const more = screen.getByRole('button', { name: 'Load more' })
+    expect(screen.getByTestId('hate-speech-scroll')).not.toContainElement(more)
+    expect(more.parentElement).toHaveClass('border-t')
+  })
+
   it('renders one row per finding with category, source and chunk text inline', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
     const row = screen.getByTestId('hate-speech-row')
