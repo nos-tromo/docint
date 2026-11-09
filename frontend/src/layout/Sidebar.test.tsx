@@ -654,6 +654,32 @@ describe('Sidebar layout', () => {
     // repeated the row beneath, which the nav above manages without.
     expect(screen.queryByText(/^collection$/i)).not.toBeInTheDocument()
   })
+
+  it("keeps the picker's panel inside the sidebar, so opening it cannot scroll the sidebar sideways", async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': {
+        mine: [],
+        others: [{ owner: 'admin', collections: ['alpha'] }]
+      },
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: 'admin' })
+
+    renderSidebar()
+
+    const picker = await screen.findByRole('combobox', { name: /select collection/i })
+    await waitFor(() => expect(picker).not.toHaveAttribute('aria-disabled'))
+    await userEvent.click(picker)
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+
+    // Anchored behind the badges, the panel overran the sidebar's edge and the
+    // picker's scrollIntoView scrolled the sidebar to reveal it. jsdom has no
+    // layout, so the anchoring itself is what is checked.
+    expect(screen.getByTestId('active-collection')).toHaveClass('relative')
+    expect(picker.parentElement).toHaveClass('static', '[&_[role=listbox]]:max-w-full')
+    expect(picker.parentElement).not.toHaveClass('relative')
+  })
 })
 
 describe('Sidebar navigation', () => {
