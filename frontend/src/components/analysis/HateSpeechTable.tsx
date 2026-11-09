@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { SectionHeader } from '@infra/ui'
 import { csvExportPath, getHateSpeechPage } from '@/api/collections'
@@ -162,6 +162,8 @@ export function HateSpeechTable({
   reportDedupeKeys
 }: Props) {
   const t = useT()
+  // The section-wide controls report here, under the header, rather than widen it.
+  const [statusLine, setStatusLine] = useState<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -197,10 +199,11 @@ export function HateSpeechTable({
         actions={
           <>
             {/* Every flagged chunk, not just the rows paged in. */}
-            <TranslateAllButton fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
+            <TranslateAllButton messageTarget={statusLine} fetchAll={fetchAllRows} textOf={translatableTextOf} hasRows={rows.length > 0} />
             {/* Adds every flagged chunk in the collection, not only the rows
                 paged in — see AddAllToReportButton. */}
             <AddAllToReportButton
+              messageTarget={statusLine}
               fetchAll={fetchAllRows}
               toItem={(row: HateSpeechRow) => hateSpeechSnapshot(row, storedTranslation(translatableTextOf(row)))}
               hasRows={rows.length > 0}
@@ -213,6 +216,11 @@ export function HateSpeechTable({
             )}
           </>
         }
+      />
+      <div
+        ref={setStatusLine}
+        data-testid="section-status"
+        className="flex flex-wrap justify-end gap-x-3 gap-y-1 empty:hidden"
       />
       <div className="rounded-md border border-border overflow-hidden">
         <div

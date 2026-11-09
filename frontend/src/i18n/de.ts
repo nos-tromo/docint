@@ -200,7 +200,7 @@ export const de: Strings = {
   'chat.date_from': 'Datum von',
   'chat.date_to': 'Datum bis',
   'chat.custom_rules': 'Benutzerdefinierte Regeln',
-  'chat.add_rule': 'Regel',
+  'chat.add_rule': 'Regel hinzufügen',
   'chat.field_placeholder': 'Feld (oder wählen)',
   'chat.value_placeholder': 'Wert',
   'chat.operator_aria': 'Operator',

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { SectionHeader } from '@infra/ui'
 import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
@@ -57,6 +57,8 @@ export function EntityFindingsTable({
   reportDedupeKeys
 }: Props) {
   const t = useT()
+  // The section-wide controls report here, under the header, rather than widen it.
+  const [statusLine, setStatusLine] = useState<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: findings.length,
@@ -122,10 +124,11 @@ export function EntityFindingsTable({
         actions={
           <>
             {/* Every matching finding, not just the rows paged in. */}
-            <TranslateAllButton fetchAll={fetchAllFindings} textOf={translatableTextOf} hasRows={findings.length > 0} />
+            <TranslateAllButton messageTarget={statusLine} fetchAll={fetchAllFindings} textOf={translatableTextOf} hasRows={findings.length > 0} />
             {/* Adds every finding the entity filter matches, not only the rows
                 paged in — see AddAllToReportButton. */}
             <AddAllToReportButton
+              messageTarget={statusLine}
               fetchAll={fetchAllFindings}
               toItem={(row: NerSourceRow) =>
                 entityFindingSnapshot(row, entityLabel, storedTranslation(translatableTextOf(row)))
@@ -142,6 +145,11 @@ export function EntityFindingsTable({
             )}
           </>
         }
+      />
+      <div
+        ref={setStatusLine}
+        data-testid="section-status"
+        className="flex flex-wrap justify-end gap-x-3 gap-y-1 empty:hidden"
       />
 
       {findings.length === 0 ? (

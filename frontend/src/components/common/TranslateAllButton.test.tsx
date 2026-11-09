@@ -197,6 +197,26 @@ describe('TranslateAllButton', () => {
     expect(calls).toEqual([])
   })
 
+  it('writes its message into the status line it is given', async () => {
+    const calls: string[] = []
+    stubFetch({ calls })
+    const qc = client()
+    qc.setQueryData(['app-config'], { report_batch_max_items: 2, language: 'en' })
+    const line = document.body.appendChild(document.createElement('div'))
+    render(
+      <QueryClientProvider client={qc}>
+        <TranslateAllButton fetchAll={async () => [{ chunk_text: 'a' }, { chunk_text: 'b' }, { chunk_text: 'c' }]} textOf={textOf} hasRows messageTarget={line} />
+      </QueryClientProvider>
+    )
+    await clickTranslateAll()
+
+    await waitFor(() => expect(line).toHaveTextContent(/too many findings/i))
+    // Not beside the icon, where a long message would push the header row wide.
+    const button = screen.getByRole('button', { name: /translate all findings/i })
+    expect(button.parentElement).not.toHaveTextContent(/too many findings/i)
+    line.remove()
+  })
+
   it('stops after three consecutive failures instead of grinding through the section', async () => {
     // The point of the breaker: a dead model must not cost one call per finding.
     const calls: string[] = []

@@ -202,6 +202,7 @@ export function FilterBuilder() {
               <div>
                 <SectionHeader
                   className="mb-2"
+                  level={3}
                   caption={t('chat.custom_rules')}
                   actions={<NewButton label={t('chat.add_rule')} onClick={() => s.addRule()} />}
                 />

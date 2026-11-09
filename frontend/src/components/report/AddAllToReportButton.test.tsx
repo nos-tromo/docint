@@ -309,6 +309,26 @@ describe('AddAllToReportButton', () => {
     expect(confirmSpy).not.toHaveBeenCalled()
   })
 
+  it('writes its message into the status line it is given', async () => {
+    const captured: Captured[] = []
+    stubFetch(captured)
+    useReportStore.setState({ activeReportId: 1 })
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const rows = Array.from({ length: 2001 }, (_, i) => ({ chunk_id: `c${i}` }))
+    const line = document.body.appendChild(document.createElement('div'))
+    render(
+      <QueryClientProvider client={client()}>
+        <AddAllToReportButton fetchAll={async () => rows} toItem={toItem} hasRows messageTarget={line} />
+      </QueryClientProvider>
+    )
+    await clickAddAll()
+
+    await waitFor(() => expect(line).toHaveTextContent(/too many findings/i))
+    const button = screen.getByRole('button', { name: /add all findings to report/i })
+    expect(button.parentElement).not.toHaveTextContent(/too many findings/i)
+    line.remove()
+  })
+
   it('walks one row past the cap so an overflowing section is detectable', async () => {
     // fetchAllPages truncates silently, so asking for cap + 1 is what makes an
     // oversize section observable rather than a quiet sample.

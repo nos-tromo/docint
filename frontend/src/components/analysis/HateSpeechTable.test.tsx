@@ -83,6 +83,14 @@ describe('HateSpeechTable', () => {
     expect(more.parentElement).toHaveClass('border-t')
   })
 
+  it('keeps a status line under its header for the section-wide controls', () => {
+    renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
+    const line = screen.getByTestId('section-status')
+    const header = screen.getByRole('button', { name: 'Export CSV' }).closest('.flex-wrap')!
+    expect(header.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(header).not.toContainElement(line)
+  })
+
   it('renders one row per finding with category, source and chunk text inline', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
     const row = screen.getByTestId('hate-speech-row')

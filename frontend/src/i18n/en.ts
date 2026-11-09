@@ -193,7 +193,7 @@ export const en = {
   'chat.date_from': 'Date from',
   'chat.date_to': 'Date to',
   'chat.custom_rules': 'Custom rules',
-  'chat.add_rule': 'Rule',
+  'chat.add_rule': 'Add rule',
   'chat.field_placeholder': 'field (or pick)',
   'chat.value_placeholder': 'value',
   'chat.operator_aria': 'Operator',
