@@ -185,7 +185,7 @@ export function Sidebar() {
       <section>
         <div
           data-testid={selected ? 'active-collection' : undefined}
-          className="group flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent"
+          className="group relative flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent"
         >
           <span
             aria-hidden="true"
@@ -208,7 +208,12 @@ export function Sidebar() {
           )}
           {/* Keyed by owner-and-name rather than by list position: the index
               was recomputed per option against the same array it indexed, and
-              two owners may name a collection the same thing. */}
+              two owners may name a collection the same thing.
+
+              The panel hangs off the whole row (`static` here, `relative` on
+              the row) and is capped to it. Anchored behind the badges it ran
+              past the sidebar's edge, and the sidebar is a scroll container:
+              the picker's scrollIntoView then scrolled it sideways. */}
           <SelectMenu
             label={t('common.select_collection_aria')}
             options={entries.map((entry) => ({
@@ -223,7 +228,7 @@ export function Sidebar() {
             }}
             placeholder={t('common.choose_collection')}
             emptyLabel={t('common.no_collections')}
-            className="min-w-0 flex-1"
+            className="static min-w-0 flex-1 [&_[role=listbox]]:max-w-full"
             triggerClassName="text-sm font-medium"
           />
           {/* Trash, not ×: deleting a collection destroys every ingested
