@@ -103,7 +103,7 @@ describe('DocumentTable', () => {
 
   it('renders an empty state instead of a bare table when there are no documents', () => {
     render(<DocumentTable docs={[]} collection="mydocs" isFetching={false} />, { wrapper })
-    expect(screen.getByText('No documents in this collection yet.')).toBeInTheDocument()
+    expect(screen.getByText('No documents in this collection yet.').closest('.border-dashed')).toHaveClass('items-center')
     expect(screen.queryByText('Filename')).not.toBeInTheDocument()
   })
 })

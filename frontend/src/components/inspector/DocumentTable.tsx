@@ -18,7 +18,8 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   ChevronsUpDownIcon,
-  CopyButton
+  CopyButton,
+  EmptyState
 } from '@infra/ui'
 import type { DocumentRecord } from '@/api/types'
 import type { TopicSummary } from '@/api/topics'
@@ -344,10 +345,10 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
       </div>
 
       {docs.length === 0 && !isFetching ? (
-        <div className="rounded-lg border border-dashed border-border bg-muted/50 p-10 text-center">
-          <p className="text-sm text-muted-foreground">{t('table.empty_title')}</p>
-          <p className="mt-1 text-xs text-muted-foreground">{t('table.empty_hint')}</p>
-        </div>
+        <EmptyState>
+          <p>{t('table.empty_title')}</p>
+          <p className="mt-1 text-xs">{t('table.empty_hint')}</p>
+        </EmptyState>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-muted">
           <div

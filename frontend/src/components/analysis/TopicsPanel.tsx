@@ -1,5 +1,14 @@
 import { memo, useCallback, useId, useMemo, useState } from 'react'
-import { Banner, Button, DisclosureButton, DownloadButton, NewButton, PlayButton, RefreshButton } from '@infra/ui'
+import {
+  Banner,
+  Button,
+  DisclosureButton,
+  DownloadButton,
+  EmptyState,
+  NewButton,
+  PlayButton,
+  RefreshButton
+} from '@infra/ui'
 import { topicValue, type TopicSummary, type TopicsAction } from '@/api/topics'
 import { describeError } from '@/api/errorMessage'
 import { useActiveCollection } from '@/hooks/useActiveCollection'
@@ -254,12 +263,15 @@ function TopicsPanelBody({ onAsk, reportDedupeKeys }: TopicsPanelProps) {
       {overview.isError && <Banner variant="danger">{errorText(overview.error)}</Banner>}
 
       {data === null && (
-        <div className="flex flex-col items-start gap-3 rounded-md border border-border border-dashed p-6">
-          <p className="text-sm text-muted-foreground">{t('topics.empty')}</p>
-          <Button variant="primary" disabled={busy} onClick={() => start.mutate({ action: 'build' })}>
-            {t('topics.build')}
-          </Button>
-        </div>
+        <EmptyState
+          action={
+            <Button variant="primary" disabled={busy} onClick={() => start.mutate({ action: 'build' })}>
+              {t('topics.build')}
+            </Button>
+          }
+        >
+          {t('topics.empty')}
+        </EmptyState>
       )}
 
       {progress && stageText && (

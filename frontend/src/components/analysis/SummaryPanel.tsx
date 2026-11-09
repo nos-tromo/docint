@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef } from 'react'
-import { Button, DownloadButton, RefreshButton } from '@infra/ui'
+import { Button, DownloadButton, EmptyState, RefreshButton } from '@infra/ui'
 import { MarkdownProse } from '@/components/common/MarkdownProse'
 import { cachedSummary, summarize } from '@/api/analysis'
 import { streamSseGet } from '@/api/sse'
@@ -327,12 +327,15 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
         // An empty state explains itself and then offers the one thing to do,
         // with a text label: a drawing cannot introduce something that is not
         // on screen yet.
-        <div className="flex flex-col items-start gap-3 rounded-md border border-border border-dashed p-6">
-          <p className="text-sm text-muted-foreground">{t('analysis.summary_empty')}</p>
-          <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
-            {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
-          </Button>
-        </div>
+        <EmptyState
+          action={
+            <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
+              {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
+            </Button>
+          }
+        >
+          {t('analysis.summary_empty')}
+        </EmptyState>
       )}
 
       {state.building && (
