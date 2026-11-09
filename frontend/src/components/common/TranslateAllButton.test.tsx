@@ -193,6 +193,7 @@ describe('TranslateAllButton', () => {
     await clickTranslateAll()
 
     await waitFor(() => expect(screen.getByTestId('translate-all-message')).toHaveTextContent(/too many findings/i))
+    expect(screen.getByTestId('translate-all-message')).toHaveClass('text-danger')
     expect(calls).toEqual([])
   })
 
@@ -235,6 +236,8 @@ describe('TranslateAllButton', () => {
     // Concurrency 3: three calls are in flight and the button now stops the run.
     await waitFor(() => expect(calls).toHaveLength(3))
     const stopButton = await screen.findByRole('button', { name: /stop translating/i })
+    // The stop control draws the filled stop square, not a cross.
+    expect(stopButton.querySelector('path[fill="currentColor"]')).not.toBeNull()
     expect(screen.getByTestId('translate-all-message')).toHaveTextContent('0 of 8 processed')
 
     await userEvent.click(stopButton)

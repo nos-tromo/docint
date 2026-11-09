@@ -51,7 +51,7 @@ export function AddAllToReportButton<Row>({ fetchAll, toItem, hasRows, className
     <div className={`flex items-center gap-2 ${className ?? ''}`}>
       {message && (
         <span
-          className={`text-xs ${failed || refused ? 'text-destructive' : 'text-muted-foreground'}`}
+          className={`text-xs ${failed || refused ? 'text-danger' : 'text-muted-foreground'}`}
           role="status"
           data-testid="add-all-message"
         >

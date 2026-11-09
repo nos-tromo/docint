@@ -410,7 +410,6 @@ export const en = {
   'entities.graph_node_count_aria': 'Graph node count',
   'entities.reset_node_count_aria': 'Reset node count',
   'entities.reset_node_count_title': 'Reset the node count to the deploy default',
-  'entities.reset_count_button': 'Reset count',
   // Accessible names for the graph's three download buttons; the visible chip
   // beside each icon is the bare format below.
   'entities.export_json': 'Export JSON',

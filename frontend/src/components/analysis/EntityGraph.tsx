@@ -6,6 +6,7 @@ import {
   toGraphHtml,
   toGraphJson,
   toGraphML,
+  UndoButton,
   type ForceGraphHandle
 } from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
@@ -204,15 +205,11 @@ export function EntityGraph({
                 onChange={onNodeCountChange}
               />
               {onResetNodeCount && (
-                <button
-                  type="button"
+                <UndoButton
+                  label={t('entities.reset_node_count_aria')}
+                  hint={t('entities.reset_node_count_title')}
                   onClick={onResetNodeCount}
-                  aria-label={t('entities.reset_node_count_aria')}
-                  title={t('entities.reset_node_count_title')}
-                  className="h-7 px-2 rounded-md border border-border text-xs"
-                >
-                  {t('entities.reset_count_button')}
-                </button>
+                />
               )}
             </>
           )}

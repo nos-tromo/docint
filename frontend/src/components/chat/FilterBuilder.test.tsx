@@ -86,6 +86,15 @@ describe('FilterBuilder disclosure', () => {
     expect(useChatFiltersStore.getState().hateSpeechOnly).toBe(true)
   })
 
+  it('adds a rule from an icon action in the custom-rules header', () => {
+    useSearchUiStore.getState().setFiltersOpen(true)
+    useChatFiltersStore.getState().setFilterEnabled(true)
+    render(<FilterBuilder />)
+    const add = screen.getByRole('button', { name: /^rule$/i })
+    expect(add).toHaveTextContent('')
+    expect(add.closest('.flex-wrap')).toHaveTextContent('Custom rules')
+  })
+
   it('edits a custom rule through the shared primitives', async () => {
     useSearchUiStore.getState().setFiltersOpen(true)
     useChatFiltersStore.getState().setFilterEnabled(true)

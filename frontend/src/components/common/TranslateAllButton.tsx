@@ -1,4 +1,4 @@
-import { IconButton, WarningIcon, XIcon } from '@infra/ui'
+import { IconButton, StopIcon, WarningIcon } from '@infra/ui'
 import { TranslateIcon } from '@/components/common/icons'
 import { useTranslateAll } from '@/hooks/useTranslateAll'
 import { useT } from '@/i18n/LanguageContext'
@@ -46,7 +46,7 @@ export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }
     <div className={`flex items-center gap-2 ${className ?? ''}`}>
       {message && (
         <span
-          className={`text-xs ${isFailed || status === 'too_many' ? 'text-destructive' : 'text-muted-foreground'}`}
+          className={`text-xs ${isFailed || status === 'too_many' ? 'text-danger' : 'text-muted-foreground'}`}
           role="status"
           data-testid="translate-all-message"
         >
@@ -54,7 +54,7 @@ export function TranslateAllButton<Row>({ fetchAll, textOf, hasRows, className }
         </span>
       )}
       <IconButton
-        icon={isFailed ? <WarningIcon /> : translating ? <XIcon /> : <TranslateIcon />}
+        icon={isFailed ? <WarningIcon /> : translating ? <StopIcon /> : <TranslateIcon />}
         label={
           translating
             ? t('common.translate_all_stop')

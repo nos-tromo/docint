@@ -426,7 +426,6 @@ export const de: Strings = {
   'entities.graph_node_count_aria': 'Anzahl der Graphknoten',
   'entities.reset_node_count_aria': 'Knotenanzahl zurücksetzen',
   'entities.reset_node_count_title': 'Die Knotenanzahl auf den Standardwert zurücksetzen',
-  'entities.reset_count_button': 'Anzahl zurücksetzen',
   // Barrierefreie Namen der drei Download-Buttons im Graphen; sichtbar steht
   // neben dem Icon nur das Format darunter.
   'entities.export_json': 'JSON exportieren',

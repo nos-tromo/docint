@@ -304,6 +304,7 @@ describe('AddAllToReportButton', () => {
     await clickAddAll()
 
     await waitFor(() => expect(screen.getByTestId('add-all-message')).toHaveTextContent(/too many findings/i))
+    expect(screen.getByTestId('add-all-message')).toHaveClass('text-danger')
     expect(captured.some((c) => c.url.includes('/items/batch'))).toBe(false)
     expect(confirmSpy).not.toHaveBeenCalled()
   })
