@@ -206,8 +206,9 @@ export function IngestionStatus({ status, actions }: { status: IngestStatus; act
 }
 
 /**
- * A run's warnings, in amber. No `role="alert"`: they sit inside a status box
- * that is already a live region, and a nested one is read out twice.
+ * A run's warnings, in amber. No `role="alert"`: in a status box they sit in
+ * the phase body's live region, and a nested one is read out twice; on an
+ * interrupted card they are static from the moment the card appears.
  *
  * @param warnings - The messages, in arrival order.
  * @param className - Spacing from the content above.
