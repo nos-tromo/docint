@@ -693,6 +693,7 @@ def test_a_topics_item_is_added_once_and_exported_after_the_summary(
 
     Like a summary it carries no visual evidence, and re-adding it is a no-op.
     """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     fake = _wire_images(monkeypatch, {})
     rid = _create(client)["id"]
     item = {
