@@ -507,7 +507,10 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     filtered_response.source_nodes = cast(list[Any], [])
     engine.synthesize.return_value = filtered_response
 
-    session_manager.rag.query_engine = engine
+    # A bound prior turn gets an engine of its own; the cached one stays untouched.
+    shared = MagicMock()
+    session_manager.rag.query_engine = shared
+    session_manager.rag.build_query_engine.return_value = engine  # type: ignore[attr-defined]
     session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
         "expanded",
         {"applied": False},
@@ -532,6 +535,8 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
         "Please elaborate."
     )
     assert _asked(engine) == ("expanded", "Please elaborate.")
+    shared.retrieve.assert_not_called()
+    shared.update_prompts.assert_not_called()
 
 
 def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(

@@ -684,7 +684,9 @@ class SessionManager:
                 When provided, the ``prior_turn_context`` placeholder is
                 bound on the engine's generation templates so the
                 synthesizer can quote and elaborate on the prior assistant
-                answer.
+                answer. The binding goes on an engine built for this turn,
+                never on the collection's cached one, which every request
+                shares and nothing resets.
             skip_query_rewrite (bool | None): Whether to skip the internal
                 ``rewrite_retrieval_query``. Defaults to ``None``, which
                 skips the rewrite exactly when ``prior_turn`` is supplied
@@ -720,6 +722,15 @@ class SessionManager:
             raise ValueError("Chat prompt cannot be empty.")
 
         turn_started_at = time.monotonic()
+        # A scope must never reuse the cached engine: that one retrieves.
+        # Neither may a non-default target: the cached engine is the
+        # ``all`` one, and reusing it would answer a visual turn from text.
+        own_engine = bool(
+            scoped_node_ids
+            or metadata_filters is not None
+            or vector_store_kwargs
+            or retrieval_target != DEFAULT_RETRIEVAL_TARGET
+        )
         engine = (
             self.rag.build_query_engine(
                 metadata_filters=metadata_filters,
@@ -729,15 +740,7 @@ class SessionManager:
                 scoped_node_ids=scoped_node_ids,
                 retrieval_target=retrieval_target,
             )
-            # A scope must never reuse the cached engine: that one retrieves.
-            # Neither may a non-default target: the cached engine is the
-            # ``all`` one, and reusing it would answer a visual turn from text.
-            if (
-                scoped_node_ids
-                or metadata_filters is not None
-                or vector_store_kwargs
-                or retrieval_target != DEFAULT_RETRIEVAL_TARGET
-            )
+            if own_engine
             else self.rag.query_engine
         )
         if engine is None:
@@ -811,6 +814,9 @@ class SessionManager:
             expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
 
+        if not own_engine and prior_turn is not None and prior_turn.evidence_only() is not None:
+            # The cached engine serves every request on the collection; a bound turn would stay on it.
+            engine = self.rag.build_query_engine()
         self._bind_prior_turn_context(engine, prior_turn)
         resp = _answer_plain(engine, user_msg, retrieval_query=retrieval_query, expanded_query=expanded_query)
         response = self.rag._normalize_response_data(
