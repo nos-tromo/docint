@@ -168,9 +168,47 @@ def resolve_principal(request: Request) -> Principal:
         HTTPException: With status 401 when neither a trusted header nor
             a configured default identity is available.
     """
+    return _resolve(request, warn=True)
+
+
+def principal_name(request: Request) -> str | None:
+    """Return the name ``resolve_principal`` would resolve, without refusing or logging.
+
+    For code that only needs to know who a request is for, ahead of the
+    route that authenticates it: the route still resolves, refuses and
+    warns itself, so this neither raises the 401 nor logs the ignored
+    identity headers a second time.
+
+    Args:
+        request (Request): The incoming request.
+
+    Returns:
+        str | None: The principal's name, ``None`` where ``resolve_principal``
+            answers 401.
+    """
+    try:
+        return _resolve(request, warn=False).name
+    except HTTPException:
+        return None
+
+
+def _resolve(request: Request, *, warn: bool) -> Principal:
+    """Resolve the calling principal (see :func:`resolve_principal`).
+
+    Args:
+        request (Request): The incoming request.
+        warn (bool): Whether to log identity headers the request was not
+            trusted to send.
+
+    Returns:
+        Principal: The resolved calling identity.
+
+    Raises:
+        HTTPException: With status 401 when no identity is available.
+    """
     cfg = load_principal_env()
     trusted = cfg.edge_secret is None or _carries_edge_secret(request, cfg.edge_secret)
-    if not trusted:
+    if not trusted and warn:
         _warn_ignored_identity_headers(request, cfg)
     # The dev fallbacks hold only while no edge secret is enforced: with one, a
     # request either proves it came through the gateway or is anonymous.

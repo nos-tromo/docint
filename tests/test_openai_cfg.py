@@ -1227,3 +1227,62 @@ def test_unrelated_embedding_failures_propagate_unchanged(
         _embedding_client().get_query_embedding("frage")
 
     assert not issubclass(TypeError, EmbeddingEndpointError)
+
+
+def test_call_chat_carries_the_cache_scope_on_vllm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A chat call made for a user carries that user's ``X-Cache-Scope``, a real ``create`` parameter.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+    """
+    from docint.utils import cache_scope
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    with cache_scope.bind("alice"):
+        expected = cache_scope.headers()
+        request = _chat_request(monkeypatch, tmp_path, provider="vllm", thinking_enabled=False)
+
+    assert expected
+    assert request["extra_headers"] == expected
+    assert set(request) <= set(inspect.signature(Completions.create).parameters)
+
+
+def test_call_chat_without_a_user_sends_no_cache_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Work bound to no user sends the request unchanged.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary prompt root.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    request = _chat_request(monkeypatch, tmp_path, provider="vllm", thinking_enabled=False)
+
+    assert "extra_headers" not in request
+
+
+def test_call_vision_carries_the_cache_scope_on_vllm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A vision call made for a user carries that user's ``X-Cache-Scope``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary cache root.
+    """
+    from docint.utils import cache_scope
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    captured: dict[str, Any] = {}
+    pipeline = _install_vision_pipeline(
+        monkeypatch,
+        tmp_path,
+        inference_provider="vllm",
+        thinking_enabled=False,
+        response_content="a synthetic description",
+        captured=captured,
+    )
+    with cache_scope.bind("alice"):
+        expected = cache_scope.headers()
+        pipeline.call_vision(prompt="describe", img_base64="AA==")
+
+    assert expected
+    assert captured["extra_headers"] == expected

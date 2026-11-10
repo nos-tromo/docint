@@ -577,6 +577,23 @@ Nextext — a 428 included — skips that clip like any other failure at that st
 the run goes on. In docint's own log the round trip is the run's
 `ingest.transcribe` transfer ([Model calls](#model-calls)).
 
+## Calls to the inference router
+
+Nothing that names the user goes to vllm-service's router. The one per-user
+value docint sends it is **`X-Cache-Scope`**, on chat and completion calls
+only (the LlamaIndex lane, `OpenAIPipeline.call_chat`/`call_vision`, the OCR
+engine) and only while `INFERENCE_PROVIDER=vllm`. It is a pseudonym of the
+user the call runs for: an HMAC of the principal's name under a key drawn when
+the process starts and never stored or sent (`docint/utils/cache_scope.py`),
+so nothing outside the process can map it back to a user. The router uses it
+to partition the shared chat backend's prompt-prefix cache, so that no user
+can tell by timing whether another user's prompt is cached; it records nothing
+of it. A request binds its principal's name (`CacheScopeMiddleware`,
+`docint/core/auth/cache_scope.py`), a job its audit actor's, and work with no
+user behind it (the retention sweep, CLI commands) binds nothing and shares
+one partition. A restart draws a new key, which costs each user one cold
+cache.
+
 ## Streaming routes
 
 - **`POST /stream_query`, `POST /agent/chat/stream`** — the answer streams
@@ -713,8 +730,10 @@ The identity settings that decide the actor are in
 - A new thread pool or thread whose work calls a model runs that work
   through `audit_meter.in_context(fn)`, once per submission or thread
   (`threading.Thread` and `ThreadPoolExecutor` do not copy the caller's
-  context, so the calls would go uncounted); a new inference client reports
-  each call with `count_transfer`.
+  context, so the calls would go uncounted, and a chat call would lose its
+  user's `X-Cache-Scope`); a new inference client reports each call with
+  `count_transfer`, and a new chat or completion client sends
+  `cache_scope.headers()` on each call.
 - Tests: the autouse `audit_stream` fixture (`tests/conftest.py`) gives every
   test a chain on a `StringIO` — the lifespan's and the commands' chains land
   on it too — and runs `verify_chain` over everything written at teardown.

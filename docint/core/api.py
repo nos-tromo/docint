@@ -76,6 +76,7 @@ from docint.core.audit_targets import (
     topic_target,
     unit_target,
 )
+from docint.core.auth.cache_scope import CacheScopeMiddleware
 from docint.core.auth.principal import Principal, check_principal_config, resolve_principal
 from docint.core.errors import install_error_handlers
 from docint.core.extract.bundle import build_bundle, build_single
@@ -113,8 +114,9 @@ from docint.core.state.report_render import PdfEngineUnavailableError, html_to_p
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
 from docint.core.topics.store import RUN_ID_PATTERN, TopicStore
+from docint.utils import cache_scope
 from docint.utils.audit_event import AiCall, Target, sha256_text
-from docint.utils.audit_meter import TransferMeter, metering, staged_meter, take_staged
+from docint.utils.audit_meter import TransferMeter, in_context, metering, staged_meter, take_staged
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.duration import format_elapsed
 from docint.utils.env_cfg import (
@@ -840,6 +842,9 @@ app.add_middleware(
     # read only when it is exposed.
     expose_headers=["Content-Disposition"],
 )
+# Each request's model calls carry its user's X-Cache-Scope, so the shared
+# chat backend never serves one user's cached prompt prefixes to another.
+app.add_middleware(CacheScopeMiddleware)
 install_error_handlers(app)
 
 # Prometheus metrics for the obs-plane scrape target. Aggregate request
@@ -6692,7 +6697,9 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
         push(event, payload)
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="ingest-topics") as pool:
-        topics_stage = pool.submit(_ingest_topics_stage, state, topics_push, mode) if mode is not None else None
+        topics_stage = (
+            pool.submit(in_context(_ingest_topics_stage), state, topics_push, mode) if mode is not None else None
+        )
         try:
             resolution = _resolve_after_ingest(state, push)
             _summarize_after_ingest(state, push)
@@ -7401,6 +7408,25 @@ def _run_topics_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
 
 
 def _run_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Run a job with the cache scope of the user who started it.
+
+    The job's model calls carry the scope of its audit actor (the request's
+    principal name, as the request middleware binds it), and none for work
+    the system started, whatever context the worker inherited.
+
+    Args:
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
+
+    Returns:
+        dict[str, Any]: The kind-specific runner's result.
+    """
+    actor = getattr(state.audit, "actor", None)
+    with cache_scope.bind(getattr(actor, "user", None)):
+        return _dispatch_job(state, push)
+
+
+def _dispatch_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
     """Dispatch a job to its kind-specific runner.
 
     Args:

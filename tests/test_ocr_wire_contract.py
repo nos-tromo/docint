@@ -51,6 +51,7 @@ class _Recorder(BaseHTTPRequestHandler):
             {
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
+                "cache_scope": self.headers.get("X-Cache-Scope"),
                 "body": body,
             }
         )
@@ -158,3 +159,17 @@ def test_a_text_only_model_gets_the_plain_reading_prompt(endpoint: str) -> None:
     assert content[1]["text"] == "Read the text."
     assert len(blocks) == 1
     assert blocks[0].text.startswith("Prüfbericht")
+
+
+def test_a_read_for_a_user_sends_their_cache_scope_on_the_wire(endpoint: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OCR read made for a user carries that user's ``X-Cache-Scope`` header; one for nobody does not."""
+    from docint.utils import cache_scope
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    engine = _engine(endpoint)
+    with cache_scope.bind("alice"):
+        expected = cache_scope.headers()[cache_scope.SCOPE_HEADER]
+        engine.read_image(PILImage.new("RGB", (400, 200), color="white"))
+    engine.read_image(PILImage.new("RGB", (400, 200), color="white"))
+
+    assert [r["cache_scope"] for r in _Recorder.requests] == [expected, None]

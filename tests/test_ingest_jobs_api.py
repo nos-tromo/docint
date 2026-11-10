@@ -1407,3 +1407,55 @@ def test_a_cancel_on_the_job_thread_stops_the_topics_stage_before_the_job_ends(
     assert not service.threads[0].is_alive()
     assert pushes_after[0] == pushes_after[1]
     assert "finished" not in _topics_frames(pushed)
+
+
+@pytest.mark.parametrize("user", ["alice", None], ids=["user", "system"])
+def test_a_job_runs_with_its_actors_cache_scope(monkeypatch: pytest.MonkeyPatch, user: str | None) -> None:
+    """A job's model calls carry the scope of the user who started it, and none for the system.
+
+    The job binds its own actor rather than whatever context the worker
+    happens to run in, so a scope bound outside never leaks into it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        user (str | None): The job's actor, ``None`` for system work.
+    """
+    from docint.core.audit import AuditContext
+    from docint.utils import cache_scope
+    from docint.utils.audit_event import Actor
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    seen: list[dict[str, str]] = []
+
+    def summary_job(state: Any, push: Any) -> dict[str, Any]:
+        seen.append(cache_scope.headers())
+        return {}
+
+    monkeypatch.setattr(api_module, "_run_summary_job", summary_job)
+    state = _make_state(kind="summary")
+    state.audit = AuditContext(actor=Actor(user, "edge" if user else "system"))
+    with cache_scope.bind(user):
+        expected = cache_scope.headers()
+    with cache_scope.bind("someone-else"):
+        api_module._run_job(state, lambda event, payload: None)
+
+    assert seen == [expected]
+
+
+def test_the_topics_stage_runs_in_the_jobs_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ingest's topics thread sees the job's context, so its model calls carry the job's scope.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    from docint.utils import cache_scope
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    seen: list[dict[str, str]] = []
+    service = _RunService(before=lambda: seen.append(cache_scope.headers()))
+    with cache_scope.bind("alice"):
+        expected = cache_scope.headers()
+        _run_with_topics(monkeypatch, service)
+
+    assert expected
+    assert seen == [expected]
