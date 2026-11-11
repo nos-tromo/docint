@@ -594,6 +594,16 @@ user behind it (the retention sweep, CLI commands) binds nothing and shares
 one partition. A restart draws a new key, which costs each user one cold
 cache.
 
+docint's own process-wide caches over user content key on the same scope
+(`cache_scope.current()`, on every provider): the snippet translations
+(`_translate_cached`) and the image re-score descriptions
+(`_describe_cached`). A hit answers far faster than a model call, so a shared
+entry would tell one user that another had sent the same text. One shared
+cache remains: a PDF's layout/OCR artifacts are reused by content hash across
+users ([ingestion.md](ingestion.md#per-file-preprocessing)), so a user who
+uploads a PDF another user already ingested sees its OCR finish at once. That
+reveals only that someone holds the same file, never who or anything from it.
+
 ## Streaming routes
 
 - **`POST /stream_query`, `POST /agent/chat/stream`** — the answer streams

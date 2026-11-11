@@ -19,6 +19,11 @@ It rides a :class:`contextvars.ContextVar`, like the purpose forwarding
 the job runner for a job's actor, and it follows the work into anyio worker
 threads and into pool tasks submitted through ``audit_meter.in_context``. Work
 with no user behind it binds nothing.
+
+docint's own process-wide caches over user content (translations, image
+re-score descriptions) key on the same scope (:func:`current`), on every
+provider: a hit is much faster than a model call, so a shared entry would tell
+one user that another had sent the same text.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from contextlib import contextmanager
 
 from docint.utils.env_cfg import load_openai_env
 
-__all__ = ["SCOPE_HEADER", "bind", "headers"]
+__all__ = ["SCOPE_HEADER", "bind", "current", "headers"]
 
 #: The header vllm-service's router partitions the prefix cache by.
 SCOPE_HEADER = "X-Cache-Scope"
@@ -59,6 +64,19 @@ def bind(name: str | None) -> Iterator[None]:
         yield
     finally:
         _CURRENT.reset(token)
+
+
+def current() -> str | None:
+    """Return the bound scope, whatever the inference provider.
+
+    For process-wide caches over user content: put it in the cache key, so
+    one user's entries are never another's hits.
+
+    Returns:
+        str | None: The bound user's scope (64 hex), or ``None`` for work with
+            no user behind it.
+    """
+    return _CURRENT.get()
 
 
 def headers() -> dict[str, str]:

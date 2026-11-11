@@ -101,6 +101,12 @@ model call), and a clip's Nextext transcript (cached in the ingest manifest).
 Because each checks its own cache first, the work can start the moment a file
 lands on disk, and the job later finds it done.
 
+The PDF artifacts are shared across collections and users, because two
+collections holding the same PDF share its hash. A user who uploads a PDF that
+another user already ingested therefore sees its OCR finish at once: this
+reveals that someone holds the same file, never who or anything from it. The
+image points and transcripts are kept per collection, and so per owner.
+
 `docint/core/ingest/preprocess.py` holds the one pool that runs them, keyed by
 `kind#collection#hash` so a file is never processed twice at once. The `#` is
 what makes a key parseable back into its collection: a collection name may

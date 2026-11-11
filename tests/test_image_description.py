@@ -17,6 +17,7 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 
 import docint.utils.image_description as image_description
+from docint.utils import cache_scope
 from docint.utils.env_cfg import load_path_env
 
 QUESTION = "Wie ist das Wetter am Hafen?"
@@ -137,6 +138,23 @@ def test_a_description_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert first == second == DESCRIPTION
     assert len(pipe.calls) == 1
+
+
+def test_the_cache_is_kept_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One user's question is never another's cache hit, which would tell them someone asked it.
+
+    Args:
+        monkeypatch: Fixture used to patch the pipeline.
+    """
+    pipe = _use(monkeypatch, _FakePipe(DESCRIPTION))
+
+    with cache_scope.bind("alice"):
+        image_description.describe_for_image_match(QUESTION)
+        image_description.describe_for_image_match(QUESTION)
+    assert len(pipe.calls) == 1
+    with cache_scope.bind("bob"):
+        image_description.describe_for_image_match(QUESTION)
+    assert len(pipe.calls) == 2
 
 
 def test_a_failure_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:

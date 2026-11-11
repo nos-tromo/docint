@@ -116,6 +116,26 @@ def test_nothing_is_sent_off_vllm(monkeypatch: pytest.MonkeyPatch, provider: str
     assert _scope_of("alice") is None
 
 
+@pytest.mark.parametrize("provider", ["vllm", "ollama", "openai"])
+def test_the_bound_scope_is_read_on_every_provider(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    """In-process caches key on the scope whatever the provider: they would leak on any of them.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        provider (str): The inference provider.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", provider)
+    assert cache_scope.current() is None
+    with cache_scope.bind("alice"):
+        alice = cache_scope.current()
+    with cache_scope.bind("bob"):
+        bob = cache_scope.current()
+    assert alice is not None
+    assert bob is not None
+    assert alice != bob
+    assert cache_scope.current() is None
+
+
 @pytest.mark.parametrize(
     ("env", "headers"),
     [

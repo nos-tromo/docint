@@ -17,6 +17,7 @@ from functools import lru_cache
 
 from loguru import logger
 
+from docint.utils import cache_scope
 from docint.utils.env_cfg import load_image_ingestion_config, load_language_env, load_model_env
 from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.openai_cfg import OpenAIPipeline
@@ -43,7 +44,7 @@ def _pipeline() -> OpenAIPipeline:
 
 
 @lru_cache(maxsize=1024)
-def _describe_cached(query: str, lang: str, model: str) -> str:
+def _describe_cached(query: str, lang: str, model: str, scope: str | None) -> str:
     """List the visible cues ``query`` needs (cached).
 
     Raises on failure, so only successful descriptions are cached: an outage
@@ -57,6 +58,10 @@ def _describe_cached(query: str, lang: str, model: str) -> str:
         query (str): The query the images are scored for.
         lang (str): Locale of the prompt, and so of the description.
         model (str): Chat model to ask.
+        scope (str | None): The asking user's cache scope
+            (``cache_scope.current()``), so a user only ever hits their own
+            entries: a hit skips the model call, and would otherwise tell one
+            user that another had asked the same question.
 
     Returns:
         str: The description on one line, reasoning removed.
@@ -82,7 +87,8 @@ def describe_for_image_match(query: str) -> str | None:
 
     The stored captions are written in ``RESPONSE_LANGUAGE``, so the
     description is too; the locale and the chat model are part of the cache
-    key, so switching either asks again. The call runs before the answer's
+    key, so switching either asks again, and so is the asking user's cache
+    scope, so no user's question is another's hit. The call runs before the answer's
     first token, so it never inherits the chat client's timeout and retries:
     one attempt within ``IMAGE_RESCORE_TIMEOUT``, and a miss only costs the
     image its second look.
@@ -97,7 +103,7 @@ def describe_for_image_match(query: str) -> str | None:
     if not query or not query.strip():
         return None
     try:
-        return _describe_cached(query, load_language_env().code, load_model_env().text_model)
+        return _describe_cached(query, load_language_env().code, load_model_env().text_model, cache_scope.current())
     except Exception as exc:  # fail-soft: the image only loses its second look
         logger.warning("Image re-score description unavailable ({}).", type(exc).__name__)
         return None

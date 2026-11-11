@@ -8896,7 +8896,9 @@ def translate_text(
     """Translate a client-supplied snippet into the operator's locale.
 
     Authenticated for consistency, but not collection-scoped: it translates text
-    the caller already holds, so there is nothing to leak and no store re-fetch.
+    the caller already holds, so there is no store re-fetch. Its cache is kept
+    per user (``cache_scope``), so a fast cached answer never tells the caller
+    that another user sent the same text.
     Fail-soft — a transport error returns ``ok: false`` with the original shape.
     Text already in the operator's locale returns ``ok: true`` with
     ``same_language: true`` and no translation.

@@ -326,8 +326,9 @@ the chat client's timeout and retries. It also asks for no reasoning whatever
 Like the rest of the lane it fails soft: no description, a failed rerank
 (counted as described under [Reranking](#reranking)) or any other error drops
 the sub-floor images exactly as the floor alone would, and never fails the
-turn. Successful descriptions are cached per query, language and model, so an
-identical query costs only the second rerank. At `LOG_LEVEL=DEBUG` each
+turn. Successful descriptions are cached per query, language, model and user,
+so an identical query from the same user costs only the second rerank; no
+user's question is another's cache hit. At `LOG_LEVEL=DEBUG` each
 re-score that completes logs one counts-only line, `Image re-score |
 candidates=… rescued=… elapsed_ms=…`, never the query or the description.
 
