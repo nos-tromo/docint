@@ -255,7 +255,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             answer (str): Generated answer.
             sources (list[dict[str, Any]]): Retrieved chunks/sources.
             summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics for coverage context.
-            retrieval_query (str | None): The query string actually used for retrieval (after any rewrite/expansion).
+            retrieval_query (str | None): The query string actually used for retrieval (after any rewrite).
             rewritten_query (str | None): The rewritten query produced by the understanding agent, if any.
             intent (str | None): Detected intent label.
             tool_used (str | None): Retrieval tool that produced the sources.

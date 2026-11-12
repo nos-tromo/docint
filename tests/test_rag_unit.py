@@ -1380,11 +1380,6 @@ def test_session_manager_chat_lazy_inits_query_engine(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(
         RAG,
-        "expand_query_with_graph_with_debug",
-        lambda self, query: (query, {"applied": False}),
-    )
-    monkeypatch.setattr(
-        RAG,
         "_infer_collection_profile",
         lambda self: {"coverage_unit": "documents"},
     )
@@ -1435,7 +1430,6 @@ def test_session_manager_chat_lazy_inits_query_engine(monkeypatch: pytest.Monkey
     # retry can overwrite that turn rather than append a second one.
     assert response == {
         "response": "ok",
-        "graph_debug": {"applied": False},
         "retrieval_target": "all",
         "turn_idx": 0,
     }
@@ -1792,8 +1786,8 @@ def test_collection_ner_search_matches_entity_acronyms() -> None:
     assert results[0]["mentions"] == 2
 
 
-def test_collection_ner_graph_and_neighbors() -> None:
-    """Graph endpoints should expose relation and co-occurrence edges."""
+def test_collection_ner_graph_exposes_relation_and_cooccurrence_edges() -> None:
+    """The entity graph should expose relation and co-occurrence edges."""
     rag = RAG(qdrant_collection="test")
     sources = [
         {
@@ -1817,11 +1811,6 @@ def test_collection_ner_graph_and_neighbors() -> None:
     graph = rag.get_collection_ner_graph(top_k_nodes=10, min_edge_weight=1)
     assert graph["meta"]["node_count"] >= 3
     assert graph["meta"]["edge_count"] >= 2
-
-    neighbors = rag.get_collection_ner_graph_neighbors(entity="Acme", hops=1)
-    assert neighbors["center"] is not None
-    assert neighbors["center"]["text"] == "Acme"
-    assert neighbors["neighbors"]
 
 
 def test_collection_ner_graph_merges_orthographic_relation_nodes() -> None:
@@ -1852,127 +1841,6 @@ def test_collection_ner_graph_merges_orthographic_relation_nodes() -> None:
     relation_edges = [edge for edge in graph["edges"] if edge["kind"] == "relation"]
     assert len(relation_edges) == 1
     assert relation_edges[0]["weight"] == 2
-
-
-def test_expand_query_with_graph_with_debug_applies_neighbors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Graph expansion should return expanded query plus debug anchor/neighbor metadata.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    rag = RAG(qdrant_collection="test")
-    rag.graphrag_enabled = True
-    rag.graphrag_max_neighbors = 3
-    rag.graphrag_neighbor_hops = 1
-    rag.graphrag_top_k_nodes = 100
-    rag.graphrag_min_edge_weight = 1
-
-    monkeypatch.setattr(
-        RAG,
-        "_get_collection_ner_aggregate",
-        lambda self, refresh=False, entity_merge_mode="orthographic": {
-            "entities": [
-                {"text": "Acme", "mentions": 10},
-                {"text": "Widget", "mentions": 3},
-            ]
-        },
-    )
-    monkeypatch.setattr(
-        RAG,
-        "get_collection_ner_graph_neighbors",
-        lambda self, *, entity, hops, top_k_nodes, min_edge_weight, refresh=False, entity_merge_mode="orthographic": {
-            "neighbors": [{"text": "Widget"}, {"text": "Rivertown"}]
-        },
-    )
-
-    query = "What changed for Acme this quarter?"
-    expanded, debug = rag.expand_query_with_graph_with_debug(query)
-
-    assert expanded.endswith("Related entities for retrieval: Widget, Rivertown")
-    assert debug["enabled"] is True
-    assert debug["applied"] is True
-    assert debug["original_query"] == query
-    assert debug["expanded_query"] == expanded
-    assert debug["anchor_entities"] == ["Acme"]
-    assert debug["neighbor_entities"] == ["Widget", "Rivertown"]
-
-
-def test_graph_debug_skipped_reports_the_unexpanded_query() -> None:
-    """A turn that skips expansion still reports the same debug shape.
-
-    The panel reads one shape; a skip that returned something else (or nothing)
-    would read as "expansion ran and found nothing" rather than "expansion was
-    not applicable here".
-    """
-    rag = RAG(qdrant_collection="test")
-    rag.graphrag_enabled = True
-
-    debug = rag.graph_debug_skipped("Who is Acme?", "scoped")
-
-    assert debug["enabled"] is True
-    assert debug["applied"] is False
-    assert debug["reason"] == "scoped"
-    assert debug["original_query"] == "Who is Acme?"
-    assert debug["expanded_query"] == "Who is Acme?"
-    assert debug["anchor_entities"] == []
-    assert debug["neighbor_entities"] == []
-
-
-def test_expand_query_with_graph_with_debug_matches_acronym_anchors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Graph expansion should anchor acronym mentions to the canonical entity.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    rag = RAG(qdrant_collection="test")
-    rag.graphrag_enabled = True
-    rag.graphrag_max_neighbors = 3
-    rag.graphrag_neighbor_hops = 1
-    rag.graphrag_top_k_nodes = 100
-    rag.graphrag_min_edge_weight = 1
-
-    monkeypatch.setattr(
-        RAG,
-        "_get_collection_ner_aggregate",
-        lambda self, refresh=False, entity_merge_mode="orthographic": {
-            "entities": [
-                {"text": "European Union", "mentions": 10},
-                {"text": "Brussels", "mentions": 4},
-            ]
-        },
-    )
-    monkeypatch.setattr(
-        RAG,
-        "get_collection_ner_graph_neighbors",
-        lambda self, *, entity, hops, top_k_nodes, min_edge_weight, refresh=False, entity_merge_mode="orthographic": {
-            "neighbors": [{"text": "Brussels"}]
-        },
-    )
-
-    query = "What is said about the EU?"
-    expanded, debug = rag.expand_query_with_graph_with_debug(query)
-
-    assert expanded.endswith("Related entities for retrieval: Brussels")
-    assert debug["applied"] is True
-    assert debug["anchor_entities"] == ["European Union"]
-    assert debug["neighbor_entities"] == ["Brussels"]
-
-
-def test_expand_query_with_graph_with_debug_reports_disabled_state() -> None:
-    """Graph debug payload should report no-op reason when GraphRAG is disabled."""
-    rag = RAG(qdrant_collection="test")
-    rag.graphrag_enabled = False
-
-    query = "Acme outlook?"
-    expanded, debug = rag.expand_query_with_graph_with_debug(query)
-
-    assert expanded == query
-    assert debug["applied"] is False
-    assert debug["reason"] == "graphrag_disabled"
 
 
 def test_start_session_is_pure_and_persists_conversation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

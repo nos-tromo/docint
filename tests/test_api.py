@@ -430,8 +430,6 @@ class DummyRAG:
         # tests can assert /query and /stream_query thread the resolved name in.
         self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
-        # What each stateless query retrieved with: the prompt, graph-expanded when the API expands it.
-        self.stateless_expansions: list[str | None] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
         self.stateless_agent_turns: list[dict[str, Any]] = []
         self.chat_filters: list[Any] = []
@@ -623,18 +621,10 @@ class DummyRAG:
             "sources": [{"id": 1}],
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
-            "retrieval_mode": "rewrite_compact_graph",
+            "retrieval_mode": "rewrite_compact",
             # Mirror SessionManager: the engine reports whether the sources
             # were re-ranked, so endpoint tests can assert it reaches the wire.
             "rerank": {"applied": False, "error": "upstream down"},
-            "graph_debug": {
-                "enabled": True,
-                "applied": True,
-                "original_query": question,
-                "expanded_query": f"{question}\n\nRelated entities for retrieval: Acme",
-                "anchor_entities": ["Acme"],
-                "neighbor_entities": ["Widget"],
-            },
         }
 
     def stream_chat(
@@ -707,23 +697,14 @@ class DummyRAG:
             "turn_idx": 0,
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
-            "retrieval_mode": "rewrite_compact_graph",
+            "retrieval_mode": "rewrite_compact",
             "rerank": {"applied": False, "error": "upstream down"},
-            "graph_debug": {
-                "enabled": True,
-                "applied": True,
-                "original_query": question,
-                "expanded_query": f"{question}\n\nRelated entities for retrieval: Acme",
-                "anchor_entities": ["Acme"],
-                "neighbor_entities": ["Widget"],
-            },
         }
 
     def run_query(
         self,
         prompt: str,
         *,
-        expanded_query: str | None = None,
         metadata_filters: Any = None,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
@@ -734,7 +715,6 @@ class DummyRAG:
 
         Args:
             prompt: The user's question.
-            expanded_query: What retrieval runs on, the question graph-expanded; recorded by the stub.
             metadata_filters: Optional compiled metadata filters.
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
@@ -750,7 +730,6 @@ class DummyRAG:
         self.seen_collections.append(self.qdrant_collection)
         self.scoped_ids.append([str(entry) for entry in scoped_node_ids] if scoped_node_ids else None)
         self.stateless_queries.append(prompt)
-        self.stateless_expansions.append(expanded_query)
         return {
             "response": "answer",
             "sources": [{"id": 1}],
@@ -760,7 +739,6 @@ class DummyRAG:
         self,
         prompt: str,
         *,
-        expanded_query: str | None = None,
         metadata_filters: Any = None,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
@@ -772,7 +750,6 @@ class DummyRAG:
 
         Args:
             prompt: The user's question.
-            expanded_query: What retrieval runs on, the question graph-expanded.
             metadata_filters: Optional compiled metadata filters.
             metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
@@ -793,7 +770,6 @@ class DummyRAG:
         )
         return self.run_query(
             prompt,
-            expanded_query=expanded_query,
             metadata_filters=metadata_filters,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
@@ -803,8 +779,6 @@ class DummyRAG:
     def stream_stateless_agent_turn(self, question: str, **kwargs: Any) -> Generator[Any, None, None]:
         """Stream a canned stateless agent turn that answers as an assessment, and record the call.
 
-        Like the real entry point, it reports the turn-level expansion as skipped for the agent.
-
         Args:
             question (str): The user's question.
             **kwargs (Any): The forwarded request settings.
@@ -813,7 +787,6 @@ class DummyRAG:
             Any: One step, one token, then the final payload.
         """
         self.stateless_agent_turns.append({"question": question, **kwargs})
-        graph_debug = {"applied": False, "reason": "agent"}
         yield AgentProgress(step=0, action="seed", detail="", found=1)
         yield "Fact [1]."
         yield {
@@ -823,30 +796,8 @@ class DummyRAG:
             "turn_idx": None,
             "retrieval_mode": "agent",
             "answer_mode": "assessment",
-            "graph_debug": graph_debug,
             "agent": {**SPLIT_AGENT, "steps": 0},
         }
-
-    def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
-        """Return deterministic GraphRAG expansion metadata for tests.
-
-        Args:
-            query: Input query.
-
-        Returns:
-            tuple[str, dict[str, Any]]: Expanded query and debug metadata.
-        """
-        return (
-            f"{query}\n\nRelated entities for retrieval: Acme",
-            {
-                "enabled": True,
-                "applied": True,
-                "original_query": query,
-                "expanded_query": f"{query}\n\nRelated entities for retrieval: Acme",
-                "anchor_entities": ["Acme"],
-                "neighbor_entities": ["Widget"],
-            },
-        )
 
     def cached_collection_summary(self) -> dict[str, Any] | None:
         """Return the canned cached summary payload, mirroring RAG.cached_collection_summary.
@@ -1622,7 +1573,7 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
         text = "".join([chunk.decode() for chunk in resp.iter_raw()])
     assert '"validation_checked"' in text
     assert '"validation_mismatch"' in text
-    assert '"graph_debug"' in text
+    assert '"graph_debug"' not in text
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
     assert '"response": "answer"' in text
@@ -1650,7 +1601,7 @@ def _arm_corrective_retry(
     answers: list[str],
     reformulation: str | None = "reformulated query",
     mismatch: bool = True,
-    retrieval_mode: str = "rewrite_compact_graph",
+    retrieval_mode: str = "rewrite_compact",
 ) -> list[dict[str, Any]]:
     """Wire the streaming path so the corrective retry can be exercised.
 
@@ -1943,7 +1894,7 @@ def test_stream_query_keeps_the_first_answer_when_the_retry_fails(
             "session_id": "generated-session",
             "turn_idx": 0,
             "retrieval_query": question,
-            "retrieval_mode": "rewrite_compact_graph",
+            "retrieval_mode": "rewrite_compact",
         }
 
     _arm_corrective_retry(monkeypatch, answers=["unused"])
@@ -2271,30 +2222,7 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     assert body["session_id"] is None
     assert len(rag.chats) == before_chats
     assert rag.stateless_queries[-1] == "What?"
-    assert rag.stateless_expansions[-1] == "What?\n\nRelated entities for retrieval: Acme"
-    assert body["graph_debug"]["applied"] is True
-
-
-def test_stateless_visual_query_is_not_expanded_with_the_graph(client: TestClient) -> None:
-    """Session mode skips graph expansion for the visual target; stateless must too.
-
-    The graph's terms are mined from text chunks, so they would widen a lane
-    the visual target does not use.
-
-    Args:
-        client (TestClient): The TestClient instance.
-    """
-    rag = cast(DummyRAG, api_module.rag)
-
-    response = client.post(
-        "/query",
-        json={"question": "What?", "retrieval_mode": "stateless", "retrieval_target": "visual"},
-    )
-
-    assert response.status_code == 200
-    assert rag.stateless_queries[-1] == "What?"
-    assert rag.stateless_expansions[-1] == "What?"
-    assert not (response.json().get("graph_debug") or {}).get("applied")
+    assert "graph_debug" not in body
 
 
 def test_query_collection_field_resolves_and_scopes_physical(
@@ -2374,9 +2302,8 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
 
     assert '"token"' in text
     assert '"session_id": null' in text
-    assert '"graph_debug"' in text
+    assert '"graph_debug"' not in text
     assert rag.stateless_queries[-1] == "hello"
-    assert rag.stateless_expansions[-1] == "hello\n\nRelated entities for retrieval: Acme"
     # The async query path was exercised and carried the filter kwargs.
     assert len(rag.stateless_query_filters) == before + 1
     recorded = rag.stateless_query_filters[-1]
@@ -3001,8 +2928,7 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
     assert body["answer"] == "answer"
     assert body["sources"] == [{"id": 1}]
     assert body["session_id"] == "abc"
-    assert body["graph_debug"]["applied"] is True
-    assert body["graph_debug"]["anchor_entities"] == ["Acme"]
+    assert "graph_debug" not in body
 
 
 def test_query_builds_and_passes_metadata_filters(client: TestClient) -> None:
@@ -4091,7 +4017,7 @@ def test_query_forwards_retrieval_query_to_validation_payload(
     response = client.post("/query", json={"question": "What?"})
 
     assert response.status_code == 200
-    # DummyRAG.chat returns retrieval_query="rewritten::What?" and retrieval_mode="rewrite_compact_graph".
+    # DummyRAG.chat returns retrieval_query="rewritten::What?" and retrieval_mode="rewrite_compact".
     assert captured.get("retrieval_query") == "rewritten::What?"
     # retrieval_mode is the session-routing mode and must not be passed as tool_used.
     assert captured.get("tool_used") is None
@@ -6080,7 +6006,6 @@ def _agent_final(**overrides: Any) -> dict[str, Any]:
         "sources": [{"id": "programme", "citation_index": 1}],
         "session_id": "generated-session",
         "reasoning": None,
-        "graph_debug": {"applied": False, "reason": "agent"},
         "retrieval_query": None,
         "coverage_unit": "documents",
         "retrieval_mode": "agent",
@@ -6507,7 +6432,7 @@ def test_query_drains_an_agent_turn(monkeypatch: pytest.MonkeyPatch, client: Tes
     assert len(asked) == 1
     assert (body["answer"], body["sources"]) == (AGENT_ANSWER, [{"id": "programme", "citation_index": 1}])
     assert (body["retrieval_mode"], body["answer_mode"], body["agent"]) == ("agent", "lookup", LOOKUP_TRAIL)
-    assert body["graph_debug"] == {"applied": False, "reason": "agent"}
+    assert "graph_debug" not in body
     assert rag.stateless_queries == []
 
 
@@ -6554,11 +6479,9 @@ def _real_stateless_turn(monkeypatch: pytest.MonkeyPatch, llm: Any, keyword: Key
     rag = MagicMock()
     rag.reasoning_requested = False
     rag.agent_char_token_ratio = 3.5
-    rag.graphrag_enabled = False
     rag.qdrant_collection = "alpha"
     rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     rag._normalize_response_data.side_effect = _normalized
-    rag.graph_debug_skipped.side_effect = lambda query, reason: {"applied": False, "reason": reason}
     rag.agent_turn.side_effect = lambda _engine, **kwargs: AgentTurn(
         loop=scripted_loop(llm, target=kwargs["retrieval_target"], keyword=keyword),
         ledger=EvidenceLedger(cap=AGENT_LEDGER_CAP),
@@ -8030,7 +7953,7 @@ def test_stateless_stream_query_answers_an_assessment(monkeypatch: pytest.Monkey
     assert frames[-1]["answer_mode"] == "assessment"
     assert frames[-1]["session_id"] is None
     assert rag.stateless_queries == []
-    assert rag.stateless_agent_turns[0]["expanded_query"].startswith("What could be improved?")
+    assert rag.stateless_agent_turns[0]["question"] == "What could be improved?"
 
 
 def test_a_stateless_stream_query_assessment_is_validated_as_one_and_never_retried(
@@ -8124,10 +8047,9 @@ def test_a_stateless_assessment_carries_the_scope_target_and_filters_of_its_requ
     assert response.status_code == 200
     assert asked == ["documents"]
     assert (call["scoped_node_ids"], call["retrieval_target"]) == (["c1"], "documents")
-    assert call["expanded_query"] == "What could be improved?"
+    assert "expanded_query" not in call
     assert [rule.field for rule in call["metadata_filter_rules"]] == ["mimetype"]
     assert call["metadata_filters"] is not None
     assert "qdrant_filters" in call["vector_store_kwargs"]
-    assert call["graph_debug"] is None
-    assert isinstance(final["graph_debug"], dict)
-    assert final["graph_debug"]["reason"] == "agent"
+    assert "graph_debug" not in call
+    assert "graph_debug" not in final

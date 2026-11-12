@@ -18,7 +18,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from time import time
-from typing import Any, cast
+from typing import Any
 
 from loguru import logger
 
@@ -260,7 +260,7 @@ def _get_validation_payload(
         answer (str | None): Generated answer text.
         sources (list[dict[str, Any]]): Retrieved or summary sources.
         summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics payload.
-        retrieval_query (str | None): Query actually used for retrieval (after any rewrite/expansion).
+        retrieval_query (str | None): Query actually used for retrieval (after any rewrite).
         rewritten_query (str | None): Rewritten query from the understanding agent, if any.
         intent (str | None): Detected intent label, if any.
         tool_used (str | None): Retrieval tool that produced the sources, if any.
@@ -404,16 +404,6 @@ def _build_query_result_txt(query: str, result: dict[str, Any]) -> str:
             "",
         ]
     )
-
-    graph_debug = result.get("graph_debug")
-    if isinstance(graph_debug, dict):
-        lines.extend(
-            [
-                "Graph debug:",
-                json.dumps(graph_debug, ensure_ascii=False, indent=2),
-                "",
-            ]
-        )
 
     lines.extend(["Sources:", _build_sources_txt(list(result.get("sources") or []))])
     return "\n".join(lines).strip() + "\n"
@@ -594,22 +584,7 @@ def _run_query(rag: RAG, query: str, index: int, output_path: str | Path, op: Op
     """
     logger.info("Running query {}: {}", index, query)
 
-    retrieval_query = query
-    graph_debug: dict[str, Any] | None = None
-    expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-    if callable(expand_with_debug):
-        try:
-            # getattr-dispatched method returns a (str, dict) tuple at runtime.
-            expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(query))
-            retrieval_query = str(expanded)
-            if isinstance(debug_payload, dict):
-                graph_debug = debug_payload
-        except Exception as exc:
-            logger.warning("Graph debug expansion failed in query CLI: {}", exc)
-
-    result = rag.run_query(query, expanded_query=retrieval_query)
-    if graph_debug is not None:
-        result["graph_debug"] = graph_debug
+    result = rag.run_query(query)
 
     raw_sources = result.get("sources")
     sources: list[dict[str, Any]] = []
@@ -626,7 +601,6 @@ def _run_query(rag: RAG, query: str, index: int, output_path: str | Path, op: Op
             answer=str(result.get("response") or result.get("answer") or ""),
             sources=sources,
             summary_diagnostics=result_summary_diagnostics,
-            retrieval_query=retrieval_query if retrieval_query != query else None,
         )
     )
 

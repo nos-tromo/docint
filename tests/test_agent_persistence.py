@@ -102,13 +102,11 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag_mock.retrieve_similarity_top_k = 20
     rag_mock.rerank_top_n = 5
     rag_mock.rewrite_retrieval_query.return_value = "rewritten question"
-    rag_mock.expand_query_with_graph_with_debug.return_value = ("expanded question", {"applied": False})
     rag_mock._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     rag_mock._normalize_response_data.side_effect = _normalize
     cast(Any, rag_mock.get_source_by_node_id).return_value = None
     rag_mock.reasoning_requested = False
     rag_mock.agent_char_token_ratio = 3.5
-    rag_mock.graphrag_enabled = False
     sm = SessionManager(rag=rag_mock)
     sm._SessionMaker = sessionmaker(bind=engine)
     yield sm

@@ -39,7 +39,6 @@ def _response(**overrides: Any) -> dict[str, Any]:
         "retrieval_query": SECRET_QUERY,
         "retrieval_mode": "rewrite",
         "rerank": {"applied": True, "error": None},
-        "graph_debug": {"applied": True, "reason": None},
         "sources": [{"chunk_id": "c1"}, {"chunk_id": "c2"}],
     }
     payload.update(overrides)
@@ -66,7 +65,7 @@ def test_turn_line_reports_the_shape_of_a_turn(loguru_caplog_info: LogCaptureFix
     assert "mode=rewrite" in line
     assert "sources=2 images=0" in line
     assert "rerank=applied" in line
-    assert "graphrag=applied" in line
+    assert "graphrag" not in line
     assert "duration=4.2s" in line
 
 
@@ -119,7 +118,7 @@ def test_rerank_none_is_not_the_same_as_not_applied(loguru_caplog_info: LogCaptu
     assert "rerank=failed" in lines[1]
 
 
-def test_a_scoped_turn_reports_its_scope_and_why_graphrag_was_skipped(
+def test_a_scoped_turn_reports_its_scope(
     loguru_caplog_info: LogCaptureFixture,
 ) -> None:
     """A scoped turn is a different kind of answer and must read as one.
@@ -134,7 +133,6 @@ def test_a_scoped_turn_reports_its_scope_and_why_graphrag_was_skipped(
         response=_response(
             retrieval_mode="scoped",
             scoped_chunk_count=6,
-            graph_debug={"applied": False, "reason": "scoped"},
         ),
         elapsed_s=2.0,
     )
@@ -142,7 +140,6 @@ def test_a_scoped_turn_reports_its_scope_and_why_graphrag_was_skipped(
     line = next(m for m in loguru_caplog_info.messages if "Turn complete" in m)
     assert "mode=scoped" in line
     assert "scoped_chunks=6" in line
-    assert "graphrag=skipped:scoped" in line
 
 
 def test_image_sources_are_counted_separately(loguru_caplog_info: LogCaptureFixture) -> None:
@@ -170,7 +167,7 @@ def test_a_malformed_payload_never_breaks_an_answered_turn() -> None:
         collection="c",
         session_id="s",
         turn_idx=0,
-        response={"sources": "not-a-list", "rerank": 7, "graph_debug": "nope"},
+        response={"sources": "not-a-list", "rerank": 7},
         elapsed_s=1.0,
     )
 

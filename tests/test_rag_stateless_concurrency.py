@@ -263,7 +263,6 @@ def test_concurrent_query_requests_isolated_per_owner(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(RAG, "build_query_engine", _fake_build)
     monkeypatch.setattr(RAG, "create_index", lambda self: None)
-    monkeypatch.setattr(RAG, "expand_query_with_graph_with_debug", lambda self, q: (q, {}))
     monkeypatch.setattr(
         RAG,
         "_normalize_response_data",

@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 from docint.utils.env_cfg import (
     load_document_retention_env,
     EmbeddingConfig,
-    GraphRAGConfig,
     EmbedClientConfig,
     HostConfig,
     IngestionConfig,
@@ -57,7 +56,6 @@ from docint.utils.env_cfg import (
     load_assessment_env,
     load_embed_client_env,
     load_embedding_env,
-    load_graphrag_env,
     load_hate_speech_env,
     load_host_env,
     load_image_ingestion_config,
@@ -181,8 +179,6 @@ from docint.core.ner import (
     aggregate_ner_sources,
     build_entity_graph,
     build_ner_stats,
-    graph_neighbors,
-    match_entity_text,
     normalize_entities,
     normalize_entity_merge_mode,
     search_entities,
@@ -3423,7 +3419,6 @@ class RAG:
     openai_config: OpenAIConfig = field(default_factory=load_openai_env, init=False, repr=False)
     embedding_config: EmbeddingConfig = field(default_factory=load_embedding_env, init=False, repr=False)
     path_config: PathConfig = field(default_factory=load_path_env, init=False, repr=False)
-    graphrag_config: GraphRAGConfig = field(default_factory=load_graphrag_env, init=False, repr=False)
     retrieval_config: RetrievalConfig = field(default_factory=load_retrieval_env, init=False, repr=False)
     summary_config: SummaryConfig = field(default_factory=load_summary_env, init=False, repr=False)
     session_config: SessionConfig = field(default_factory=load_session_env, init=False, repr=False)
@@ -3493,11 +3488,6 @@ class RAG:
     parent_context_enabled: bool = field(default=True, init=False)
     parent_context_safety_margin: float = field(default=0.95, init=False)
     social_diversity_limit: int = field(default=2, init=False)
-    graphrag_enabled: bool = field(default=False, init=False)
-    graphrag_neighbor_hops: int = field(default=1, init=False)
-    graphrag_top_k_nodes: int = field(default=100, init=False)
-    graphrag_min_edge_weight: int = field(default=1, init=False)
-    graphrag_max_neighbors: int = field(default=6, init=False)
     summary_coverage_target: float = field(default=0.70, init=False)
     summary_final_source_cap: int = field(default=24, init=False)
 
@@ -3786,11 +3776,6 @@ class RAG:
         self.parent_context_safety_margin = self.retrieval_config.parent_context_safety_margin
         self.social_diversity_limit = self.retrieval_config.social_diversity_limit
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
-        self.graphrag_enabled = self.graphrag_config.enabled
-        self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
-        self.graphrag_top_k_nodes = self.graphrag_config.top_k_nodes
-        self.graphrag_min_edge_weight = self.graphrag_config.min_edge_weight
-        self.graphrag_max_neighbors = self.graphrag_config.max_neighbors
 
         # --- Session config ---
         self.session_store = self.session_config.session_store
@@ -8352,7 +8337,6 @@ class RAG:
         self,
         prompt: str,
         *,
-        expanded_query: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8362,14 +8346,8 @@ class RAG:
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
-        Retrieval runs on ``expanded_query`` and the answer is asked ``prompt``, so
-        the terms the entity graph appends widen the search and never reach the
-        synthesis prompt.
-
         Args:
-            prompt (str): The user's question, which the answer is asked as it stands.
-            expanded_query (str | None): What retrieval runs on, the question with the
-                graph's terms appended. ``None`` retrieves with ``prompt``.
+            prompt (str): The user's question, which retrieval runs on and the answer is asked.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
@@ -8427,7 +8405,7 @@ class RAG:
             engine = self.build_query_engine()
             self.query_engine = engine
         try:
-            nodes = engine.retrieve(QueryBundle(expanded_query or prompt))
+            nodes = engine.retrieve(QueryBundle(prompt))
             result = engine.synthesize(QueryBundle(question_block(prompt, None)), nodes)
         except ValueError as exc:
             if "context size" in str(exc):
@@ -8476,7 +8454,6 @@ class RAG:
         self,
         prompt: str,
         *,
-        expanded_query: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -8489,9 +8466,7 @@ class RAG:
         Retrieves and answers as :meth:`run_query` does.
 
         Args:
-            prompt (str): The user's question, which the answer is asked as it stands.
-            expanded_query (str | None): What retrieval runs on, the question with the
-                graph's terms appended. ``None`` retrieves with ``prompt``.
+            prompt (str): The user's question, which retrieval runs on and the answer is asked.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
@@ -8547,7 +8522,7 @@ class RAG:
             engine = self.build_query_engine()
             self.query_engine = engine
         try:
-            nodes = await engine.aretrieve(QueryBundle(expanded_query or prompt))
+            nodes = await engine.aretrieve(QueryBundle(prompt))
             result = await engine.asynthesize(QueryBundle(question_block(prompt, None)), nodes)
         except ValueError as exc:
             if "context size" in str(exc):
@@ -10322,7 +10297,7 @@ class RAG:
             """
             registry = toolset_for(
                 retrieval_target,
-                search=lambda query: list(engine.retrieve(AgentSearchQuery(self.expand_query_with_graph(query)))),
+                search=lambda query: list(engine.retrieve(AgentSearchQuery(query))),
                 search_images=functools.partial(self._agent_search_images, qdrant_filter=companion_filter),
                 list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
                 keyword=keyword,
@@ -10407,8 +10382,6 @@ class RAG:
         self,
         question: str,
         *,
-        expanded_query: str,
-        graph_debug: dict[str, Any] | None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -10421,14 +10394,10 @@ class RAG:
         Otherwise it is the session path exactly, with the same loop and frames.
         A turn the plain path answers instead (see
         :meth:`~docint.core.state.session_manager.SessionManager.stream_agent_turn`)
-        is answered through :meth:`run_query`, its expansion reported as the
-        plain stateless path reports it.
+        is answered through :meth:`run_query`.
 
         Args:
             question (str): The user's message, verbatim.
-            expanded_query (str): The graph-expanded query a fallback retrieves with.
-            graph_debug (dict[str, Any] | None): That expansion's debug payload;
-                ``None`` when expansion did not run.
             metadata_filters (MetadataFilters | None): Compiled request filters.
             metadata_filter_rules (Sequence[Any] | None): Raw request filter rules.
             vector_store_kwargs (dict[str, Any] | None): Native vector-store kwargs.
@@ -10470,155 +10439,16 @@ class RAG:
             return
         data = self.run_query(
             question,
-            expanded_query=expanded_query,
             metadata_filters=metadata_filters,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
             scoped_node_ids=scoped_node_ids,
             retrieval_target=retrieval_target,
         )
-        if graph_debug is not None:
-            data["graph_debug"] = graph_debug
         if started.trail is not None:
             data["agent"] = started.trail
         yield str(data.get("response") or "")
         yield data
-
-    def _graph_debug_base(self, query: str) -> dict[str, Any]:
-        """Build the not-yet-applied GraphRAG debug payload for a query.
-
-        Args:
-            query (str): The retrieval query the payload describes.
-
-        Returns:
-            dict[str, Any]: Debug payload describing "expansion has not (yet)
-                changed this query".
-        """
-        return {
-            "enabled": bool(self.graphrag_enabled),
-            "applied": False,
-            "original_query": query,
-            "expanded_query": query,
-            "anchor_entities": [],
-            "neighbor_entities": [],
-        }
-
-    def graph_debug_skipped(self, query: str, reason: str) -> dict[str, Any]:
-        """Report that graph expansion was deliberately not run.
-
-        Callers that bypass expansion still owe the panel the same shape as
-        :meth:`expand_query_with_graph_with_debug`; returning nothing would read
-        as "expansion ran and found nothing" instead of "expansion did not
-        apply here".
-
-        Args:
-            query (str): The unexpanded retrieval query.
-            reason (str): Why expansion was skipped (e.g. ``"scoped"``).
-
-        Returns:
-            dict[str, Any]: Debug payload carrying the reason.
-        """
-        return {**self._graph_debug_base(query), "reason": reason}
-
-    def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
-        """Optionally expand a query and return GraphRAG debug metadata.
-
-        Args:
-            query (str): Original retrieval query.
-
-        Returns:
-            tuple[str, dict[str, Any]]: A tuple of ``(expanded_query, debug_payload)``.
-        """
-        debug: dict[str, Any] = self._graph_debug_base(query)
-
-        if not query.strip():
-            debug["reason"] = "empty_query"
-            return query, debug
-        if not self.qdrant_collection:
-            debug["reason"] = "no_collection_selected"
-            return query, debug
-        if not self.graphrag_enabled:
-            debug["reason"] = "graphrag_disabled"
-            return query, debug
-
-        try:
-            aggregate = self._get_collection_ner_aggregate(refresh=False)
-            entities = list(aggregate.get("entities") or [])
-            anchors = []
-            for ent in entities:
-                text = str(ent.get("text") or "").strip()
-                if not text:
-                    continue
-                match = match_entity_text(text, query)
-                if match is None:
-                    continue
-                anchors.append((match[0], ent))
-            anchors.sort(
-                key=lambda item: (
-                    int(item[0]),
-                    -int(item[1].get("mentions", 0) or 0),
-                    str(item[1].get("text") or "").lower(),
-                )
-            )
-            if not anchors:
-                debug["reason"] = "no_anchor_entities"
-                return query, debug
-
-            selected_anchors = [ent for _, ent in anchors[:2]]
-            anchor_texts = [str(ent.get("text") or "").strip() for ent in selected_anchors]
-            debug["anchor_entities"] = [txt for txt in anchor_texts if txt]
-            anchor_text_set = set(debug["anchor_entities"])
-            neighbor_texts: list[str] = []
-            seen: set[str] = set()
-            for ent in selected_anchors:
-                neighborhood = self.get_collection_ner_graph_neighbors(
-                    entity=str(ent.get("text") or ""),
-                    hops=self.graphrag_neighbor_hops,
-                    top_k_nodes=self.graphrag_top_k_nodes,
-                    min_edge_weight=self.graphrag_min_edge_weight,
-                    refresh=False,
-                )
-                for nbr in neighborhood.get("neighbors") or []:
-                    text = str(nbr.get("text") or "").strip()
-                    if (
-                        not text
-                        or text in anchor_text_set
-                        or text.lower() in seen
-                        or len(neighbor_texts) >= self.graphrag_max_neighbors
-                    ):
-                        continue
-                    seen.add(text.lower())
-                    neighbor_texts.append(text)
-                if len(neighbor_texts) >= self.graphrag_max_neighbors:
-                    break
-
-            debug["neighbor_entities"] = neighbor_texts
-            if not neighbor_texts:
-                debug["reason"] = "no_neighbors_found"
-                return query, debug
-
-            related = ", ".join(neighbor_texts)
-            expanded = f"{query}\n\nRelated entities for retrieval: {related}"
-            debug["applied"] = True
-            debug["expanded_query"] = expanded
-            return expanded, debug
-        except Exception as exc:
-            logger.warning("Graph query expansion skipped: {}", exc)
-            debug["reason"] = f"error:{type(exc).__name__}"
-            return query, debug
-
-    def expand_query_with_graph(self, query: str) -> str:
-        """Optionally expand a query using graph-neighbor entities.
-
-        Args:
-            query (str): Original retrieval query.
-
-        Returns:
-            str: Expanded query when graph expansion is enabled and applicable,
-            otherwise the original query.
-        """
-        expanded_query, _ = self.expand_query_with_graph_with_debug(query)
-        return expanded_query
 
     def _summary_image_nodes_for_document(self, *, file_hash: str | None, top_k: int) -> list[NodeWithScore]:
         """Collect a document's stored images as summary evidence.
@@ -13008,37 +12838,6 @@ class RAG:
         )
         self.ner_graph_cache[cache_key] = graph
         return graph
-
-    def get_collection_ner_graph_neighbors(
-        self,
-        *,
-        entity: str,
-        hops: int = 1,
-        top_k_nodes: int = 100,
-        min_edge_weight: int = 1,
-        refresh: bool = False,
-        entity_merge_mode: EntityMergeMode = "orthographic",
-    ) -> dict[str, Any]:
-        """Return a local graph neighborhood around a specific entity.
-
-        Args:
-            entity (str): Entity text or canonical node id.
-            hops (int): Number of graph hops to traverse.
-            top_k_nodes (int): Graph node cap used to build the base graph.
-            min_edge_weight (int): Graph edge threshold used to build the base graph.
-            refresh (bool): If ``True``, recompute graph from fresh collection data.
-            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
-
-        Returns:
-            dict[str, Any]: Neighborhood payload with ``center`` and ``neighbors``.
-        """
-        graph = self.get_collection_ner_graph(
-            top_k_nodes=top_k_nodes,
-            min_edge_weight=min_edge_weight,
-            refresh=refresh,
-            entity_merge_mode=entity_merge_mode,
-        )
-        return graph_neighbors(graph, entity=entity, hops=max(1, int(hops)))
 
     def unload_models(self) -> None:
         """Unload models to free up memory.
