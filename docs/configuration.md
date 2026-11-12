@@ -570,7 +570,7 @@ not rescued. The measurements and the mechanics are in
 Because the deployed CLIP checkpoint (`openai/clip-vit-base-patch32`) has an
 English-only text tower, queries are translated to English before embedding whenever
 `RESPONSE_LANGUAGE` is not English. The translation reuses the chat model via
-`TRANSLATE_MODEL` and is cached; an outage degrades to embedding the untranslated
+`TRANSLATE_MODEL` and is cached per user; an outage degrades to embedding the untranslated
 query. Note this keys off the configured locale, not the language actually typed — a
 German query in an English-locale deployment is not translated.
 

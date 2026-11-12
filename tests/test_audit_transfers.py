@@ -75,8 +75,8 @@ def test_a_translation_counts_only_a_cache_miss(monkeypatch: pytest.MonkeyPatch)
     tc._translate_cached.cache_clear()
     try:
         with metering() as meter:
-            assert tc._translate_cached("Hallo", "en", "chat-model") == "Hello"
-            assert tc._translate_cached("Hallo", "en", "chat-model") == "Hello"
+            assert tc._translate_cached("Hallo", "en", "chat-model", None) == "Hello"
+            assert tc._translate_cached("Hallo", "en", "chat-model", None) == "Hello"
     finally:
         tc._translate_cached.cache_clear()
 

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 import docint.utils.translate_client as tc
+from docint.utils import cache_scope
 from docint.utils.env_cfg import load_model_env
 from docint.utils.openai_cfg import OpenAIPipeline
 
@@ -178,6 +179,41 @@ def test_translate_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     tc.translate("same text")
     tc.translate("same text")
     assert n["count"] == 1  # second call served from cache
+
+
+def test_translate_cache_is_kept_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One user's translation is never another's cache hit, which would tell them someone sent the text.
+
+    Args:
+        monkeypatch: Fixture used to patch the module-level pipeline factory.
+    """
+    calls: list[str] = []
+
+    class _FakePipe:
+        """Fake chat pipeline recording each ``call_chat`` invocation."""
+
+        def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+            """Record the call and return a canned translation.
+
+            Args:
+                prompt: The user prompt (the source text to translate).
+                system_prompt: Optional system prompt (unused by the fake).
+                model: Optional model override (unused by the fake).
+
+            Returns:
+                str: A canned translation.
+            """
+            calls.append(prompt)
+            return "x"
+
+    monkeypatch.setattr(tc, "_pipeline", lambda: _FakePipe())
+    with cache_scope.bind("alice"):
+        tc.translate("same text")
+        tc.translate("same text")
+    assert len(calls) == 1  # the same user hits her own entry
+    with cache_scope.bind("bob"):
+        tc.translate("same text")
+    assert len(calls) == 2  # another user asks the model again
 
 
 def test_translate_failsoft(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1546,8 +1546,7 @@ repeats the source word for word counts the same. The route never returns a
 copy of the source as a translation.
 
 Principal-authenticated but deliberately **not** collection-scoped: it
-translates text the caller already holds, so there is nothing to leak and no
-store re-fetch. Fail-soft — a transport or model failure returns `ok: false`
+translates text the caller already holds, so there is no store re-fetch. Fail-soft — a transport or model failure returns `ok: false`
 with the same shape rather than an error status, so the client keeps showing
 the original. Nothing ingested or stored is ever translated.
 
@@ -1556,7 +1555,9 @@ drives this route directly, three calls in flight at a time: translation is
 one model round-trip per snippet either way, and a single request running for
 the length of a whole section would be a background job without any of the
 machinery one needs. Successful translations are cached server-side by
-`(text, target_lang, model)`, so a repeated run is cheap.
+`(text, target_lang, model)` and the caller's cache scope, so a repeated run
+is cheap. Because each user hits only their own entries, a fast cached answer
+never tells a caller that another user sent the same text.
 
 ## Request-model reference
 

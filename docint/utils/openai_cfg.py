@@ -21,6 +21,7 @@ from openai import (
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
 from typing_extensions import override
 
+from docint.utils import cache_scope
 from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import (
     OpenAIConfig,
@@ -65,6 +66,28 @@ class LocalOpenAI(LlamaIndexOpenAI):
         super().__init__(**kwargs)
         self._context_window = context_window
         self._num_output = num_output
+
+    @override
+    def _get_model_kwargs(self, **kwargs: Any) -> dict[str, Any]:
+        """Build a request's keywords, adding the bound user's ``X-Cache-Scope``.
+
+        Every chat and completion request, streaming or not, is built here, so
+        this is the one place the LlamaIndex lane can carry the scope of the
+        call it is making; a client-level header would be fixed to whichever
+        user built the shared instance.
+
+        Args:
+            **kwargs: The call's own keywords, forwarded upstream.
+
+        Returns:
+            dict[str, Any]: The request keywords, with the scope among
+                ``extra_headers`` while one is bound.
+        """
+        model_kwargs = super()._get_model_kwargs(**kwargs)
+        scope = cache_scope.headers()
+        if scope:
+            model_kwargs["extra_headers"] = {**(model_kwargs.get("extra_headers") or {}), **scope}
+        return model_kwargs
 
     @override
     @property
@@ -589,6 +612,9 @@ class OpenAIPipeline:
             if reasoning is not None and self.openai_config.inference_provider == "vllm":
                 # vLLM-only, as in RAG._create_text_model: OpenAI proper rejects unknown body fields.
                 request_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": reasoning}}
+            scope = cache_scope.headers()
+            if scope:
+                request_kwargs["extra_headers"] = scope
 
             options: dict[str, Any] = {}
             if timeout is not None:
@@ -638,6 +664,9 @@ class OpenAIPipeline:
             request_kwargs: dict[str, Any] = {}
             if self.reasoning_effort is not None:
                 request_kwargs["reasoning_effort"] = self.reasoning_effort
+            scope = cache_scope.headers()
+            if scope:
+                request_kwargs["extra_headers"] = scope
 
             count_transfer("caption", "inference:vision", self.vision_model_id, kind="image")
             response = self.vision_client.chat.completions.create(

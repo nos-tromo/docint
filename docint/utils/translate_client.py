@@ -15,6 +15,7 @@ from functools import lru_cache
 
 from loguru import logger
 
+from docint.utils import cache_scope
 from docint.utils.audit_meter import count_transfer
 from docint.utils.env_cfg import load_language_env, load_model_env
 from docint.utils.openai_cfg import OpenAIPipeline
@@ -63,13 +64,16 @@ def _pipeline() -> OpenAIPipeline:
 
 
 @lru_cache(maxsize=4096)
-def _translate_cached(text: str, target_lang: str, model: str) -> str:
+def _translate_cached(text: str, target_lang: str, model: str, scope: str | None) -> str:
     """Translate ``text`` (cached).
 
     Raises on transport/model failure so failures are *not* cached (only
     successful translations are). Sized for a whole Analysis section, since
     "Translate all" walks thousands of findings and its browser-side store is
-    session-lifetime — a reload re-asks for every one.
+    session-lifetime — a reload re-asks for every one. ``scope`` is the
+    caller's cache scope (``cache_scope.current()``), so each user hits only
+    their own entries: a hit answers far faster than the model, and would
+    otherwise tell one user that another had sent the same text.
     """
     system_prompt = load_localized_prompt("translate", default=_DEFAULT_TRANSLATE_PROMPT, lang=target_lang)
     # Counted only on a miss: a cached translation sends nothing.
@@ -114,7 +118,7 @@ def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
     if not text or not text.strip():
         return TranslateResult(ok=True, translation="", model=model, target_lang=target_lang)
     try:
-        translated = _translate_cached(text, target_lang, model)
+        translated = _translate_cached(text, target_lang, model, cache_scope.current())
     except Exception as exc:  # fail-soft: degrade, never crash the caller
         logger.warning("Translation unavailable: {}", exc)
         return TranslateResult(ok=False, translation=None, model=model, target_lang=target_lang, error="unavailable")
