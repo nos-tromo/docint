@@ -254,8 +254,7 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
   report back what they did (`retrieval_mode: "scoped"` + `scoped_chunk_count`,
   in `/query`'s body and the final SSE frame), and the SPA flags any turn that
   asked for a scope and did not get one, so a dropped scope can never again
-  pass as hand-picked evidence. A scoped turn also skips GraphRAG expansion
-  (`RAG.graph_debug_skipped`): it widens retrieval that is not happening. An
+  pass as hand-picked evidence. An
   oversize selection is refused (422) before the stream opens, never truncated. This
   **replaced the two entity-occurrence chat query modes**, which searched the
   NER aggregate and silently returned whichever entity was most frequent rather

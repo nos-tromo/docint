@@ -141,7 +141,7 @@ The [`docs/`](docs/README.md) directory is the in-repo reference manual:
 - [API reference](docs/api-reference.md) — every FastAPI route
 - [CLI reference](docs/cli-reference.md) — the console scripts and their flags
 - [Ingestion pipeline](docs/ingestion.md) — readers, chunking, NER, media, social exports
-- [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator, hybrid retrieval, graph-RAG, citations
+- [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator, hybrid retrieval, citations
 - [UI guide](docs/ui-guide.md) — React SPA screens and localization
 - [Reports](docs/reports.md) — the Report Builder and its export formats
 - [Data extracts](docs/extracts.md) — full transcripts, keyframe descriptions and document text as files
