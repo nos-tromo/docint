@@ -122,12 +122,6 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag_mock.index = object()
     rag_mock.qdrant_collection = PHYSICAL
     rag_mock.rewrite_retrieval_query.return_value = "rewritten question"
-    rag_mock.expand_query_with_graph_with_debug.return_value = ("expanded question", {"applied": False})
-    rag_mock.graph_debug_skipped.side_effect = lambda query, reason: {
-        "applied": False,
-        "reason": reason,
-        "original_query": query,
-    }
     rag_mock._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     mode = MagicMock()
     mode.value = "compact"
@@ -136,7 +130,6 @@ def session_manager() -> Generator[SessionManager, None, None]:
     cast(Any, rag_mock.get_source_by_node_id).return_value = None
     rag_mock.reasoning_requested = False
     rag_mock.agent_char_token_ratio = 3.5
-    rag_mock.graphrag_enabled = False
     rag_mock.agent_carried_evidence.return_value = cast(list[NodeWithScore], [])
     sm = SessionManager(rag=rag_mock)
     sm._SessionMaker = sessionmaker(bind=engine)
@@ -423,7 +416,7 @@ def test_tools_unavailable_falls_back_to_the_plain_lookup_with_the_reason(
     assert (final["agent"], final["retrieval_mode"], final["response"]) == (trail, "rewrite_compact", PLAIN_ANSWER)
     assert "answer_mode" not in final
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_called_once()
-    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
+    assert _plain_asked(armed.engine) == ("rewritten question", question_block(QUESTION, "rewritten question"))
     assert (assistant["answer_mode"], assistant["agent"]) == ("lookup", trail)
     refusals = [record for record in loguru_caplog_info.records if "offering tools" in record.getMessage()]
     assert [(record.levelname, record.getMessage()) for record in refusals] == [
@@ -452,8 +445,7 @@ def test_a_retry_pass_retrieves_with_its_query_and_answers_the_users_words(sessi
     final = _final(list(session_manager.stream_chat(QUESTION, session_id="s1", retrieval_query=RETRY_QUERY)))
 
     rag.rewrite_retrieval_query.assert_not_called()
-    rag.expand_query_with_graph_with_debug.assert_called_once_with(RETRY_QUERY)
-    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, RETRY_QUERY))
+    assert _plain_asked(armed.engine) == (RETRY_QUERY, question_block(QUESTION, RETRY_QUERY))
     assert (final["response"], final["retrieval_query"]) == (PLAIN_ANSWER, RETRY_QUERY)
     assert session_manager.get_session_history("s1", owner=None)[0]["content"] == QUESTION
     assert _rows(session_manager) == [("lookup", RETRY_QUERY)]
@@ -569,7 +561,7 @@ def test_a_stateless_agent_turn_persists_nothing(session_manager: SessionManager
     rag.ensure_session_manager.return_value = session_manager
     armed = _arm(session_manager, [answer_round(LOOKUP)])
 
-    final = _final(list(RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug=None)))
+    final = _final(list(RAG.stream_stateless_agent_turn(rag, QUESTION)))
 
     assert (final["answer_mode"], final["session_id"], final["turn_idx"]) == ("lookup", None, None)
     assert armed.loops[0].runs[0]["window"] == ConversationWindow()
@@ -605,10 +597,8 @@ def test_sources_persist_contiguously_in_number_order(session_manager: SessionMa
 
 
 @pytest.mark.parametrize("entry", ["chat", "stream_chat"])
-def test_an_agent_turn_makes_no_rewrite_call_and_records_why_graph_expansion_did_not_run(
-    session_manager: SessionManager, entry: str
-) -> None:
-    """The model reads the user's own words and writes its own searches: no rewrite, no turn-level expansion.
+def test_an_agent_turn_makes_no_rewrite_call(session_manager: SessionManager, entry: str) -> None:
+    """The model reads the user's own words and writes its own searches: no rewrite.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
@@ -620,8 +610,7 @@ def test_an_agent_turn_makes_no_rewrite_call_and_records_why_graph_expansion_did
 
     rag = cast(Any, session_manager.rag)
     rag.rewrite_retrieval_query.assert_not_called()
-    rag.expand_query_with_graph_with_debug.assert_not_called()
-    assert final["graph_debug"] == {"applied": False, "reason": "agent", "original_query": QUESTION}
+    assert "graph_debug" not in final
     assert final["retrieval_query"] is None
     assert _rows(session_manager) == [("lookup", None)]
     assert _sent(armed.llm)[-1].content == QUESTION
@@ -629,10 +618,10 @@ def test_an_agent_turn_makes_no_rewrite_call_and_records_why_graph_expansion_did
 
 @pytest.mark.parametrize("cause", ["no-room", "overflow"])
 @pytest.mark.parametrize("entry", ["chat", "stream_chat"])
-def test_a_fallback_runs_the_rewrite_and_the_expansion(
+def test_a_fallback_runs_the_rewrite(
     session_manager: SessionManager, loguru_caplog: LogCaptureFixture, entry: str, cause: str
 ) -> None:
-    """A turn that cannot start is answered the plain way, which pays for the rewrite and the expansion.
+    """A turn that cannot start is answered the plain way, which pays for the rewrite.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
@@ -650,8 +639,7 @@ def test_a_fallback_runs_the_rewrite_and_the_expansion(
 
     rag.rewrite_retrieval_query.assert_called_once()
     assert rag.rewrite_retrieval_query.call_args.kwargs["user_msg"] == QUESTION
-    rag.expand_query_with_graph_with_debug.assert_called_once_with("rewritten question")
-    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
+    assert _plain_asked(armed.engine) == ("rewritten question", question_block(QUESTION, "rewritten question"))
     assert "agent" not in final
     assert "answer_mode" not in final
     assert (final["retrieval_mode"], final["response"]) == ("rewrite_compact", PLAIN_ANSWER)
@@ -711,7 +699,7 @@ def test_no_slot_before_any_yield_falls_back(
 
     assert (final["response"], final["retrieval_mode"]) == (PLAIN_ANSWER, "rewrite_compact")
     assert "agent" not in final
-    assert _plain_asked(armed.engine) == ("expanded question", question_block(QUESTION, "rewritten question"))
+    assert _plain_asked(armed.engine) == ("rewritten question", question_block(QUESTION, "rewritten question"))
     assert armed.llm.stream_chat.call_count == model_calls
     assert _rows(session_manager) == [("lookup", "rewritten question")]
     assert "agent" not in session_manager.get_session_history("s1", owner=None)[1]
@@ -818,7 +806,7 @@ def test_a_turn_closed_after_its_first_text_frees_its_model_slot_while_still_ref
         "Generator[Any, None, None]",
         session_manager.stream_chat(QUESTION, session_id="s1", agent=True)
         if entry == "stream_chat"
-        else RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug=None),
+        else RAG.stream_stateless_agent_turn(rag, QUESTION),
     )
 
     first = next(item for item in outer if isinstance(item, str))
@@ -984,35 +972,22 @@ def test_a_scoped_turn_passes_its_pinned_nodes_and_an_unscoped_turn_none(
 
 
 @pytest.mark.parametrize(
-    ("target", "scope", "graphrag", "warmed"),
-    [
-        ("all", None, True, True),
-        ("documents", None, True, True),
-        ("visual", None, True, False),
-        ("all", ["n1"], True, False),
-        ("all", None, False, False),
-    ],
-    ids=["all", "documents", "visual", "scoped", "graphrag-off"],
+    ("target", "scope"),
+    [("all", None), ("documents", None), ("visual", None), ("all", ["n1"])],
+    ids=["all", "documents", "visual", "scoped"],
 )
-def test_the_entity_graph_is_warmed_once_before_an_agent_turns_searches(
-    session_manager: SessionManager, target: str, scope: list[str] | None, graphrag: bool, warmed: bool
+def test_an_agent_turn_never_loads_the_entity_aggregate(
+    session_manager: SessionManager, target: str, scope: list[str] | None
 ) -> None:
-    """Each search expands its own query, so a cold aggregate is built once, before the first round, not per search.
+    """The model writes its own searches, so a turn has no use for the collection's entities.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
         target (str): The turn's retrieval target.
         scope (list[str] | None): The pinned chunk ids, if any; a scoped turn runs no search.
-        graphrag (bool): Whether GraphRAG is enabled.
-        warmed (bool): Whether the aggregate must be warmed.
     """
     rag = cast(Any, session_manager.rag)
-    rag.graphrag_enabled = graphrag
-    armed = _arm(session_manager, [answer_round(LOOKUP)], retrieved=[programme_passage()] if scope else ())
-    order: list[str] = []
-    rag._get_collection_ner_aggregate.side_effect = lambda **_kwargs: order.append("warm")
-    stream = armed.llm.stream_chat.side_effect
-    armed.llm.stream_chat.side_effect = lambda *args, **kwargs: (order.append("model"), stream(*args, **kwargs))[1]
+    _arm(session_manager, [answer_round(LOOKUP)], retrieved=[programme_passage()] if scope else ())
 
     _final(
         list(
@@ -1022,32 +997,7 @@ def test_the_entity_graph_is_warmed_once_before_an_agent_turns_searches(
         )
     )
 
-    if warmed:
-        assert rag._get_collection_ner_aggregate.call_args_list == [call(refresh=False)]
-        assert order == ["warm", "model"]
-    else:
-        rag._get_collection_ner_aggregate.assert_not_called()
-
-
-def test_a_failed_warm_up_never_fails_the_turn(
-    session_manager: SessionManager, loguru_caplog: LogCaptureFixture
-) -> None:
-    """Expansion is best effort: the turn answers, and the log names the failure's type, never its text.
-
-    Args:
-        session_manager (SessionManager): The session manager fixture.
-        loguru_caplog (LogCaptureFixture): Bridged WARNING capture.
-    """
-    rag = cast(Any, session_manager.rag)
-    rag.graphrag_enabled = True
-    rag._get_collection_ner_aggregate.side_effect = RuntimeError(f"{SECRET} invented scroll failure")
-    _arm(session_manager, [answer_round(LOOKUP)])
-
-    final = _final(list(session_manager.stream_chat(QUESTION, session_id="s1", agent=True)))
-
-    assert (final["answer_mode"], final["response"]) == ("lookup", LOOKUP)
-    assert "RuntimeError" in loguru_caplog.text
-    assert SECRET not in loguru_caplog.text
+    rag._get_collection_ner_aggregate.assert_not_called()
 
 
 def _earlier_turns(sm: SessionManager) -> None:
@@ -1317,7 +1267,7 @@ def test_a_stateless_turn_carries_nothing(session_manager: SessionManager) -> No
     rag.ensure_session_manager.return_value = session_manager
     armed = _arm(session_manager, [answer_round(LOOKUP)])
 
-    _final(list(RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug=None)))
+    _final(list(RAG.stream_stateless_agent_turn(rag, QUESTION)))
 
     rag.agent_carried_evidence.assert_not_called()
     assert list(armed.loops[0].runs[0]["carried"]) == []
@@ -1541,7 +1491,7 @@ def test_a_stateless_agent_turn_runs_without_a_session() -> None:
     manager = rag.ensure_session_manager.return_value
     manager.stream_agent_turn.return_value = iter(["text", {"answer_mode": "lookup"}])
 
-    items = list(RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug={}))
+    items = list(RAG.stream_stateless_agent_turn(rag, QUESTION))
 
     kwargs = manager.stream_agent_turn.call_args.kwargs
     assert items == ["text", {"answer_mode": "lookup"}]
@@ -1572,16 +1522,12 @@ def test_a_stateless_agent_turn_streams_through_the_real_manager(session_manager
     )
     store_kwargs = {"qdrant_filters": object()}
 
-    items = list(
-        RAG.stream_stateless_agent_turn(
-            rag, QUESTION, expanded_query="expanded", graph_debug=None, vector_store_kwargs=store_kwargs
-        )
-    )
+    items = list(RAG.stream_stateless_agent_turn(rag, QUESTION, vector_store_kwargs=store_kwargs))
 
     final = _final(items)
     assert [item.action for item in items if isinstance(item, AgentProgress)] == ["search"]
     assert (final["answer_mode"], final["session_id"], final["turn_idx"]) == ("lookup", None, None)
-    assert final["graph_debug"] == {"applied": False, "reason": "agent", "original_query": QUESTION}
+    assert "graph_debug" not in final
     assert rag.build_query_engine.call_args.kwargs["metadata_filters_active"] is True
     assert rag.agent_turn.call_args.kwargs["metadata_filters_active"] is True
     assert rag.agent_turn.call_args.kwargs["vector_store_kwargs"] is store_kwargs
@@ -1617,15 +1563,12 @@ def test_a_stateless_agent_turn_falls_back_to_run_query(
     )
     rag.run_query.return_value = {"response": PLAIN_ANSWER, "sources": [{"id": "post-1"}]}
     filters, store_kwargs = object(), {"qdrant_filters": object()}
-    expansion = {"applied": True, "reason": None}
     scope = PINNED if scoped else None
 
     items = list(
         RAG.stream_stateless_agent_turn(
             rag,
             QUESTION,
-            expanded_query="expanded question",
-            graph_debug=expansion,
             metadata_filters=cast(Any, filters),
             metadata_filter_rules=["rule"],
             vector_store_kwargs=store_kwargs,
@@ -1638,7 +1581,6 @@ def test_a_stateless_agent_turn_falls_back_to_run_query(
     assert items[:-1] == [PLAIN_ANSWER]
     rag.run_query.assert_called_once_with(
         QUESTION,
-        expanded_query="expanded question",
         metadata_filters=filters,
         metadata_filter_rules=["rule"],
         vector_store_kwargs=store_kwargs,
@@ -1646,7 +1588,7 @@ def test_a_stateless_agent_turn_falls_back_to_run_query(
         retrieval_target="documents",
     )
     assert data.get("agent") == trail
-    assert data["graph_debug"] is expansion
+    assert "graph_debug" not in data
 
 
 def test_a_stateless_agent_turn_starts_its_clock_before_the_engine_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1676,7 +1618,7 @@ def test_a_stateless_agent_turn_starts_its_clock_before_the_engine_is_built(monk
 
     rag.build_query_engine.side_effect = _build_engine
 
-    list(RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug={}))
+    list(RAG.stream_stateless_agent_turn(rag, QUESTION))
 
     assert manager.stream_agent_turn.call_args.kwargs["turn_started_at"] == 100.0
 
@@ -1687,7 +1629,7 @@ def test_an_empty_stateless_agent_stream_ends_quietly() -> None:
     rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     rag.ensure_session_manager.return_value.stream_agent_turn.return_value = iter([])
 
-    assert list(RAG.stream_stateless_agent_turn(rag, QUESTION, expanded_query="expanded", graph_debug={})) == []
+    assert list(RAG.stream_stateless_agent_turn(rag, QUESTION)) == []
 
 
 #: A grounded template whose rendering shows which prior turn, if any, was bound.

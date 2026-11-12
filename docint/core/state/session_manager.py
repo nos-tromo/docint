@@ -69,8 +69,8 @@ def _log_turn_summary(
     a slow turn left nothing to attribute the time to.
 
     Everything below already exists on the response and was discarded —
-    retrieval mode, scope size, the three-state rerank stamp, the GraphRAG
-    skip reason, the source counts.
+    retrieval mode, scope size, the three-state rerank stamp, the source
+    counts.
 
     **The query and the answer are never logged**, only their shapes. That
     is the whole reason this takes a response dict rather than the text:
@@ -98,14 +98,6 @@ def _log_turn_summary(
         else:
             rerank_state = "failed"
 
-        graph_debug = response.get("graph_debug")
-        if not isinstance(graph_debug, dict):
-            graph_state = "none"
-        elif graph_debug.get("applied"):
-            graph_state = "applied"
-        else:
-            graph_state = f"skipped:{graph_debug.get('reason') or 'unknown'}"
-
         fields = [
             f"collection={collection!r}",
             f"session={session_id}",
@@ -115,7 +107,6 @@ def _log_turn_summary(
             f"sources={len(sources)}",
             f"images={images}",
             f"rerank={rerank_state}",
-            f"graphrag={graph_state}",
             f"duration={elapsed_s:.1f}s",
         ]
         scoped = response.get("scoped_chunk_count")
@@ -386,24 +377,22 @@ def _first_item(
         raise AgentTurnFallback from exc
 
 
-def _answer_plain(engine: Any, user_msg: str, *, retrieval_query: str, expanded_query: str) -> Any:
-    """Retrieve with the expanded query, then answer the user's own words.
+def _answer_plain(engine: Any, user_msg: str, *, retrieval_query: str) -> Any:
+    """Retrieve with the rewritten query, then answer the user's own words.
 
-    The rewrite and the graph's terms exist to find evidence. The answer is asked the message as
-    typed, with the rewrite labelled beside it (:func:`question_block`), so a follow-up such as
-    "Are those all?" is answered as asked, and the terms, which only widen the search, never
-    reach the synthesis prompt.
+    The rewrite exists to find evidence. The answer is asked the message as typed, with the
+    rewrite labelled beside it (:func:`question_block`), so a follow-up such as "Are those all?"
+    is answered as asked.
 
     Args:
         engine (Any): The turn's query engine: its ``retrieve`` finds and ranks, its ``synthesize`` answers.
         user_msg (str): The user's message, verbatim.
-        retrieval_query (str): The history-resolved rewrite, before the graph expands it.
-        expanded_query (str): The rewrite with the graph's terms, what retrieval runs on.
+        retrieval_query (str): The history-resolved rewrite, what retrieval runs on.
 
     Returns:
         Any: The engine's response, which streams when the engine does.
     """
-    nodes = engine.retrieve(QueryBundle(expanded_query))
+    nodes = engine.retrieve(QueryBundle(retrieval_query))
     return engine.synthesize(QueryBundle(question_block(user_msg, retrieval_query)), nodes)
 
 
@@ -618,7 +607,7 @@ class SessionManager:
                 exc,
             )
 
-    def _retrieval_mode(self, scoped_node_ids: Sequence[str] | None, graph_debug: dict[str, Any]) -> str:
+    def _retrieval_mode(self, scoped_node_ids: Sequence[str] | None) -> str:
         """Name how this turn found its evidence.
 
         A scoped turn ran no retrieval at all, so it reports ``"scoped"``
@@ -629,15 +618,13 @@ class SessionManager:
 
         Args:
             scoped_node_ids (Sequence[str] | None): The turn's pinned scope, if any.
-            graph_debug (dict[str, Any]): Debug payload from graph expansion.
 
         Returns:
             str: The retrieval mode reported to the caller.
         """
         if scoped_node_ids:
             return "scoped"
-        mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
-        return f"{mode}_graph" if bool(graph_debug.get("applied")) else mode
+        return f"rewrite_{self.rag._resolve_chat_response_mode().value}"
 
     def chat(
         self,
@@ -658,7 +645,7 @@ class SessionManager:
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
-        The grounded pipeline retrieves with the rewritten, graph-expanded query and answers
+        The grounded pipeline retrieves with the rewritten query and answers
         the message itself, the rewrite labelled beside it (see :func:`_answer_plain`).
 
         Args:
@@ -704,7 +691,7 @@ class SessionManager:
                 it. See :mod:`docint.core.retrieval.visual`.
             agent (bool): Answer as an agent turn (see
                 :meth:`stream_agent_turn`). It runs ahead of the history
-                rewrite and the graph expansion, which only a turn that falls
+                rewrite, which only a turn that falls
                 back to the grounded pipeline pays for; that fallback binds no
                 prior turn, since the engine may be the shared one. ``False``
                 (default) runs the grounded pipeline unchanged.
@@ -800,25 +787,13 @@ class SessionManager:
                 user_msg=user_msg,
                 conversation_context=session_context,
             )
-        if scoped_node_ids:
-            # Expansion widens *retrieval*, and a scope retrieves by id: it
-            # would only pay for loading the NER aggregate.
-            expanded_query = retrieval_query
-            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
-        elif retrieval_target == "visual":
-            # The entity graph is built from text chunks, so its terms would
-            # widen a lane the visual target does not use.
-            expanded_query = retrieval_query
-            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
-        else:
-            expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
-        retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
+        retrieval_mode = self._retrieval_mode(scoped_node_ids)
 
         if not own_engine and prior_turn is not None and prior_turn.evidence_only() is not None:
             # The cached engine serves every request on the collection; a bound turn would stay on it.
             engine = self.rag.build_query_engine()
         self._bind_prior_turn_context(engine, prior_turn)
-        resp = _answer_plain(engine, user_msg, retrieval_query=retrieval_query, expanded_query=expanded_query)
+        resp = _answer_plain(engine, user_msg, retrieval_query=retrieval_query)
         response = self.rag._normalize_response_data(
             user_msg,
             resp,
@@ -828,7 +803,6 @@ class SessionManager:
             coverage_unit=coverage_unit,
             retrieval_mode=retrieval_mode,
         )
-        response["graph_debug"] = graph_debug
         response["retrieval_target"] = retrieval_target
         if retrieval_target == "visual" and not scoped_node_ids and response.get("visual") is None:
             # See RAG.run_query: zero is a degraded visual turn, absent is a
@@ -997,24 +971,10 @@ class SessionManager:
                 user_msg=user_msg,
                 conversation_context=session_context,
             )
-        if scoped_node_ids:
-            # Expansion widens *retrieval*, and a scope retrieves by id: it
-            # would only pay for loading the NER aggregate.
-            expanded_query = retrieval_query
-            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "scoped")
-        elif retrieval_target == "visual":
-            # The entity graph is built from text chunks, so its terms would
-            # widen a lane the visual target does not use.
-            expanded_query = retrieval_query
-            graph_debug = self.rag.graph_debug_skipped(retrieval_query, "visual")
-        else:
-            expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
-        retrieval_mode = self._retrieval_mode(scoped_node_ids, graph_debug)
+        retrieval_mode = self._retrieval_mode(scoped_node_ids)
 
         self._bind_prior_turn_context(streaming_engine, prior_turn)
-        response = _answer_plain(
-            streaming_engine, user_msg, retrieval_query=retrieval_query, expanded_query=expanded_query
-        )
+        response = _answer_plain(streaming_engine, user_msg, retrieval_query=retrieval_query)
         response_gen = getattr(response, "response_gen", None)
         if response_gen is None:
             logger.error("RuntimeError: Streaming response generator is unavailable.")
@@ -1045,7 +1005,6 @@ class SessionManager:
             coverage_unit=coverage_unit,
             retrieval_mode=retrieval_mode,
         )
-        normalized["graph_debug"] = graph_debug
         normalized["retrieval_target"] = retrieval_target
         if retrieval_target == "visual" and not scoped_node_ids and normalized.get("visual") is None:
             normalized["visual"] = {"images_attached": 0}
@@ -1070,7 +1029,6 @@ class SessionManager:
             "sources": normalized.get("sources", []),
             "session_id": session_id,
             "reasoning": normalized.get("reasoning"),
-            "graph_debug": normalized.get("graph_debug"),
             "retrieval_query": normalized.get("retrieval_query"),
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),
@@ -1117,7 +1075,7 @@ class SessionManager:
         this turn is stored and built for the request's reasoning, as the turn's budget is;
         a stateless turn has none. The turn starts out holding the passages the window's
         answers cite, loaded under its target and filters (see :meth:`_agent_window`). It
-        writes its own searches, so there is no rewrite and no turn-level graph expansion. A
+        writes its own searches, so there is no rewrite. A
         pinned scope is what the scoped engine retrieves, answered in one round without tools;
         an empty one is still a scope. Its reply is an assessment when it carries the sentinel,
         labelled and stored with its boundary; otherwise a lookup, whose trail answers
@@ -1178,8 +1136,6 @@ class SessionManager:
         if turn is None:
             # The factory has logged the numbers.
             raise AgentTurnFallback
-        if self.rag.graphrag_enabled and not scoped and retrieval_target != "visual":
-            self._warm_entity_graph()
         run = turn.loop.run(window=window, message=user_msg, ledger=turn.ledger, pinned=pinned, carried=carried)
         result: AgentResult | None = None
         try:
@@ -1268,21 +1224,6 @@ class SessionManager:
         by_id = {n.node.node_id: n for n in nodes}
         return window, [by_id[passage.node_id] for passage in window.carried]
 
-    def _warm_entity_graph(self) -> None:
-        """Build the collection's entity aggregate once, before an agent turn's searches expand against it.
-
-        Each search expands its own query, so on a cold cache every concurrent search of a
-        round would build the aggregate itself, in the search slots and the turn's time.
-        Expansion is best effort: a failure is logged by its type alone and the turn goes on.
-        """
-        try:
-            self.rag._get_collection_ner_aggregate(refresh=False)
-        except Exception as exc:
-            logger.warning(
-                "Warming the entity graph for an agent turn failed ({}); its searches expand without it",
-                type(exc).__name__,
-            )
-
     def _finish_agent_turn(
         self,
         user_msg: str,
@@ -1345,8 +1286,6 @@ class SessionManager:
         )
         if labelled is not None and labelled.outcome != "empty":
             normalized["response"] = labelled.text
-        graph_debug = self.rag.graph_debug_skipped(user_msg, "agent")
-        normalized["graph_debug"] = graph_debug
         normalized["retrieval_target"] = retrieval_target
         if retrieval_target == "visual" and not scoped_node_ids:
             # Zero is a visual answer that saw no pixels; absent is a turn that never targeted imagery.
@@ -1372,7 +1311,6 @@ class SessionManager:
             "sources": normalized.get("sources", []),
             "session_id": session_id,
             "reasoning": normalized.get("reasoning"),
-            "graph_debug": graph_debug,
             "retrieval_query": normalized.get("retrieval_query"),
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),

@@ -241,7 +241,6 @@ def _wire_chat_engine(sm: SessionManager) -> None:
     engine.synthesize.return_value = _response([])
     sm.rag.query_engine = engine
     cast(Any, sm.rag).build_query_engine.return_value = engine
-    cast(Any, sm.rag).expand_query_with_graph_with_debug.return_value = ("expanded", {})
     # A fresh dict per call: production's ``_normalize_response_data`` builds
     # one each time, and the turn index is stamped onto it in place.
     cast(Any, sm.rag)._normalize_response_data.side_effect = lambda *a, **k: {"response": "Hi", "sources": []}

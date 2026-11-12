@@ -21,7 +21,7 @@ environment variables they read, and the defaults baked into each factory.
 
 ## Inference endpoint — `OpenAIConfig`
 
-Loaded by `load_openai_env()` (`env_cfg.py:2016`). Controls the
+Loaded by `load_openai_env()` (`env_cfg.py:1977`). Controls the
 OpenAI-compatible client used for chat, embeddings, and vision.
 
 | Variable | Default | Description |
@@ -71,7 +71,7 @@ When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI pro
 
 ## Models — `ModelConfig`
 
-Loaded by `load_model_env()` (`env_cfg.py:1329`). Resolves model
+Loaded by `load_model_env()` (`env_cfg.py:1290`). Resolves model
 identifiers, with provider-specific fallbacks.
 
 | Variable | Default (by provider) | Description |
@@ -107,12 +107,12 @@ engine, against the same endpoint, under the same budget.
 
 ## Host endpoints — `HostConfig`
 
-Loaded by `load_host_env()` (`env_cfg.py:554`).
+Loaded by `load_host_env()` (`env_cfg.py:515`).
 
 | Variable | Default | Description |
 |---|---|---|
 | `BACKEND_HOST` | `http://localhost:8000` | Internal backend URL used by the frontend container. |
-| `BACKEND_PUBLIC_HOST` | `http://localhost:8000` | External URL used for document preview links. It does **not** inherit `BACKEND_HOST`: `env_cfg.py:555` falls back to the same literal default as `BACKEND_HOST` does, not to whatever `BACKEND_HOST` was set to. Setting only `BACKEND_HOST` in production therefore leaves preview links pointing at localhost. Set both. |
+| `BACKEND_PUBLIC_HOST` | `http://localhost:8000` | External URL used for document preview links. It does **not** inherit `BACKEND_HOST`: `env_cfg.py:516` falls back to the same literal default as `BACKEND_HOST` does, not to whatever `BACKEND_HOST` was set to. Setting only `BACKEND_HOST` in production therefore leaves preview links pointing at localhost. Set both. |
 | `QDRANT_HOST` | `http://localhost:6333` | Qdrant REST URL. |
 | `QDRANT_API_KEY` | *(unset)* | Sent as the `api-key` header on every Qdrant request. Required with data-plane, which runs Qdrant with authentication: set it to the same value as data-plane's `QDRANT_API_KEY`. Unset sends no header, which only a Qdrant without authentication accepts. `qdrant-client` warns on first use that the key travels over plain HTTP — expected on `data-net`, which never leaves the Docker bridge. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated CORS origins (the Vite dev server). |
@@ -131,7 +131,7 @@ Requires Qdrant server ≥ 1.18 (the data-plane stack ships v1.18.3).
 
 ## Identity and authentication — `PrincipalConfig`
 
-Loaded by `load_principal_env()` (`env_cfg.py:720`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
+Loaded by `load_principal_env()` (`env_cfg.py:681`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -163,8 +163,8 @@ anonymous (401 in production) until the gateway catches up.
 
 ## Data-protection audit log — `AuditConfig`, `AuditCliConfig`
 
-Loaded by `load_audit_env()` (`env_cfg.py:813`) and, for the command-line
-tools, `load_audit_cli_env()` (`env_cfg.py:846`). What the audit log records,
+Loaded by `load_audit_env()` (`env_cfg.py:774`) and, for the command-line
+tools, `load_audit_cli_env()` (`env_cfg.py:807`). What the audit log records,
 and how, is [audit.md](audit.md).
 
 | Variable | Dataclass | Default | Description |
@@ -177,7 +177,7 @@ and how, is [audit.md](audit.md).
 
 ## Retrieval — `RetrievalConfig`
 
-Loaded by `load_retrieval_env()` (`env_cfg.py:2577`).
+Loaded by `load_retrieval_env()` (`env_cfg.py:2538`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -253,7 +253,7 @@ sources you do not control.
 
 ## Dense embedding client — `EmbedClientConfig`
 
-Loaded by `load_embed_client_env()` (`env_cfg.py:1950`). Dense embeddings
+Loaded by `load_embed_client_env()` (`env_cfg.py:1911`). Dense embeddings
 go through an OpenAI-compatible endpoint on every provider; these knobs
 only need to change on a CPU dev host that wants dense embeddings routed
 to a dedicated container instead of the default OpenAI-style base.
@@ -269,8 +269,8 @@ request timeout is `EMBED_TIMEOUT_SECONDS`, documented under
 
 ## Sparse encoder & hybrid retrieval — `SparseClientConfig`
 
-Loaded by `load_sparse_client_env()` (`env_cfg.py:1895`) and
-`resolve_enable_hybrid()` (`env_cfg.py:1393`). Sparse embedding is a
+Loaded by `load_sparse_client_env()` (`env_cfg.py:1856`) and
+`resolve_enable_hybrid()` (`env_cfg.py:1354`). Sparse embedding is a
 remote HTTP call on every provider — `RemoteSparseEncoder` POSTs to
 `{SPARSE_API_BASE}/pooling` (`task: token_classify`) and
 `{SPARSE_API_BASE}/tokenize`. Its wire format is frozen: production
@@ -390,7 +390,7 @@ image sets its own bind in the container CMD.
 
 ## Pipeline — `PipelineConfig`
 
-Loaded by `load_pipeline_config()` (`env_cfg.py:2270`). Controls the
+Loaded by `load_pipeline_config()` (`env_cfg.py:2231`). Controls the
 page-level PDF pipeline in `docint/core/readers/documents/`.
 
 | Variable | Default | Description |
@@ -433,7 +433,7 @@ document was fully read.
 
 ## Ingestion — `IngestionConfig`
 
-Loaded by `load_ingestion_env()` (`env_cfg.py:1114`). Controls chunking
+Loaded by `load_ingestion_env()` (`env_cfg.py:1075`). Controls chunking
 sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 
 | Variable | Default | Description |
@@ -477,7 +477,7 @@ The default supported file extensions (hard-coded in
 
 ## Image ingestion — `ImageIngestionConfig`
 
-Loaded by `load_image_ingestion_config()` (`env_cfg.py:921`).
+Loaded by `load_image_ingestion_config()` (`env_cfg.py:882`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -576,7 +576,7 @@ German query in an English-locale deployment is not translated.
 
 ## NER — `NERConfig`
 
-Loaded by `load_ner_env()` (`env_cfg.py:1443`).
+Loaded by `load_ner_env()` (`env_cfg.py:1404`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -619,7 +619,7 @@ chunks carrying the earlier types.
 
 ## Hate-speech detection — `HateSpeechConfig`
 
-Loaded by `load_hate_speech_env()` (`env_cfg.py:462`).
+Loaded by `load_hate_speech_env()` (`env_cfg.py:423`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -633,21 +633,9 @@ The hate-speech prompts need a chat context of at least 8k tokens; an endpoint
 that serves less rejects them or silently truncates them. See
 `docs/ingestion.md` § NER and hate-speech.
 
-## Graph-RAG — `GraphRAGConfig`
-
-Loaded by `load_graphrag_env()` (`env_cfg.py:413`).
-
-| Variable | Default | Description |
-|---|---|---|
-| `GRAPHRAG_ENABLED` | `true` | Enable graph-assisted query expansion. |
-| `GRAPHRAG_NEIGHBOR_HOPS` | `2` | Graph hops walked for expansion. |
-| `GRAPHRAG_TOP_K_NODES` | `50` | Max graph nodes kept in memory. |
-| `GRAPHRAG_MIN_EDGE_WEIGHT` | `3` | Min edge weight for graph filtering. |
-| `GRAPHRAG_MAX_NEIGHBORS` | `6` | Max neighbours appended to a query. |
-
 ## Summarisation — `SummaryConfig`
 
-Loaded by `load_summary_env()` (`env_cfg.py:2777`).
+Loaded by `load_summary_env()` (`env_cfg.py:2738`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -697,7 +685,7 @@ concurrency semaphore, read by `load_summary_concurrency()`:
 
 ## Sessions — `SessionConfig`
 
-Loaded by `load_session_env()` (`env_cfg.py:2738`).
+Loaded by `load_session_env()` (`env_cfg.py:2699`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -877,7 +865,7 @@ unchanged across languages.
 
 ## Response validation — `ResponseValidationConfig`
 
-Loaded by `load_response_validation_env()` (`env_cfg.py:2374`).
+Loaded by `load_response_validation_env()` (`env_cfg.py:2335`).
 
 | Variable | Default | Description |
 |---|---|---|

@@ -84,7 +84,6 @@ def test_an_agent_search_asks_a_real_engine_for_every_child(monkeypatch: pytest.
         node_postprocessors=[recorder],
     )
     rag = _rag()
-    monkeypatch.setattr(rag, "expand_query_with_graph", lambda query: query)
     turn = rag.agent_turn(
         engine,
         retrieval_target="documents",

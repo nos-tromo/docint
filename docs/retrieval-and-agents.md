@@ -201,7 +201,7 @@ postprocessor POSTs to `{RERANK_API_BASE}/rerank` in the Jina shape
 onto the nodes. Gates:
 
 - `RERANK_MODEL` — model identifier (default
-  `BAAI/bge-reranker-v2-m3`, `env_cfg.py:1108`).
+  `BAAI/bge-reranker-v2-m3`, `env_cfg.py:1069`).
 - `RERANK_API_BASE` / `RERANK_API_KEY` / `RERANK_TIMEOUT` — endpoint,
   Bearer token and per-request timeout; each inherits the matching
   `OPENAI_*` setting when unset. See
@@ -425,36 +425,17 @@ The SPA's visual presets (kind of imagery, clip name, time range) compile to
 companion's indexes for those keys are created at ingest and backported on
 the first visual query.
 
-## Graph-assisted retrieval
+## What a plain lookup retrieves with
 
-When `GRAPHRAG_ENABLED=true`, `RAG` builds an entity graph from the
-ingested NER metadata (`docint/core/ner.py`) and exposes
-`expand_query_with_graph_with_debug()`. Before dispatching a query to
-the retriever, the engine:
+A session lookup retrieves with the history-resolved rewrite but is asked the
+user's own words, with the rewrite on a labelled line beneath them when it adds
+any (`question_block` in `docint/agents/turn/history.py`). A follow-up such as
+"Are those all?" is therefore answered as asked. A stateless query has no
+rewrite: it retrieves with the question and is asked the question alone.
 
-1. Extracts entity mentions from the user question.
-2. Walks `GRAPHRAG_NEIGHBOR_HOPS` hops through the graph, keeping edges
-   whose weight is at least `GRAPHRAG_MIN_EDGE_WEIGHT`.
-3. Picks up to `GRAPHRAG_MAX_NEIGHBORS` neighbour entities, capped by
-   `GRAPHRAG_TOP_K_NODES`.
-4. Appends the neighbour names to the retrieval query so that Qdrant
-   sees a richer embedding.
-
-The appended names serve retrieval alone. A session lookup retrieves with the
-rewritten, expanded query but is asked the user's own words, with the
-history-resolved rewrite on a labelled line beneath them when it adds any
-(`question_block` in `docint/agents/turn/history.py`). A follow-up such as
-"Are those all?" is therefore answered as asked, and the neighbour names never
-reach the generation prompt. A stateless query has no rewrite: it retrieves with
-the expanded question and is asked the question alone. The `retrieval_query` and
-`graph_debug` the response reports do not change.
-
-An agent turn runs no turn-level expansion. Each query its model writes is
-expanded for that search alone, and its `graph_debug` reports the skip with the
-reason `agent`.
-
-A `graph_debug` payload is returned in the `QueryOut` for the
-stateless path so the UI can visualise what was added.
+Nothing is appended to a query before retrieval. The entity graph built from
+the NER metadata (`docint/core/ner.py`) feeds the Analysis NER **Graph** view
+only.
 
 ## Response validation
 
@@ -685,9 +666,8 @@ an active topic run with topics (see [Topics](#topics)).
 - **`search(query)`** retrieves through the turn's own engine, so the request's
   filters, rerank and parent-context expansion apply as on a lookup, and under
   a topic rule parent context and link-following are left out as there. Every
-  retrieved child of a section is kept (`AgentSearchQuery`). Each query is
-  expanded with graph neighbours for retrieval alone; the reply and the trail
-  show the model's own words. A sub-floor image gets no description re-score
+  retrieved child of a section is kept (`AgentSearchQuery`). The engine gets
+  the model's query verbatim. A sub-floor image gets no description re-score
   here: the agent searches pictures with its own image tools.
 - **`search_images(description)`** runs the visual target's chain over the
   `{collection}_images` companion, under the request's filters: CLIP and the
@@ -1242,8 +1222,8 @@ that cites no passage beside topic checks is validated against the checks, as
 above.
 
 An agent turn is stored with its `answer_mode` and its trail. It reports
-`retrieval_mode: "agent"` (or `"scoped"`), `retrieval_query: null` and a
-`graph_debug` skipped with the reason `agent`. Its `Turn complete | …` log line
+`retrieval_mode: "agent"` (or `"scoped"`) and `retrieval_query: null`. Its
+`Turn complete | …` log line
 adds `answer=`, `steps=`, `outcome=` and `reason=`: counts and protocol tokens,
 never a query, an argument or document text.
 
@@ -1266,8 +1246,7 @@ list. That list holds up to 8 passages, oldest cited first, and takes at most
 and the summary do, but is listed after them. When its lines do not all fit, the
 oldest give way and their markers are dropped. An earlier assessment shows its
 two parts, each labelled. A stateless turn reads none.
-The model writes its own searches, so an agent turn runs no history rewrite and
-no turn-level graph expansion.
+The model writes its own searches, so an agent turn runs no history rewrite.
 
 A plain lookup that follows an assessment (a fallback, or any turn while agent
 turns are off) receives only the source-backed part of that answer as its prior

@@ -75,10 +75,6 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     shared = MagicMock()
     session_manager.rag.query_engine = shared
     session_manager.rag.build_query_engine.return_value = engine  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "ok",
         "sources": [],
@@ -93,12 +89,9 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     session_manager.chat("Please elaborate.", prior_turn=prior)
 
     session_manager.rag.rewrite_retrieval_query.assert_not_called()  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.assert_called_once_with(  # type: ignore[attr-defined]
-        "Please elaborate."
-    )
-    # Retrieval runs on the expanded query; the answer is asked the message alone.
+    # Retrieval runs on the message as typed; the answer is asked the message alone.
     engine.retrieve.assert_called_once()
-    assert engine.retrieve.call_args.args[0].query_str == "expanded"
+    assert engine.retrieve.call_args.args[0].query_str == "Please elaborate."
     engine.synthesize.assert_called_once()
     assert engine.synthesize.call_args.args[0].query_str == "Please elaborate."
     shared.retrieve.assert_not_called()
@@ -121,10 +114,6 @@ def test_chat_binds_prior_turn_context_via_update_prompts(
     shared = MagicMock()
     session_manager.rag.query_engine = shared
     session_manager.rag.build_query_engine.return_value = engine  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "ok",
         "sources": [],
@@ -163,10 +152,6 @@ def test_chat_default_path_still_rewrites(
 
     session_manager.rag.query_engine = engine
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten"  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "ok",
         "sources": [],
@@ -201,10 +186,6 @@ def _stub_turn_plumbing(session_manager: SessionManager, monkeypatch: pytest.Mon
         session_manager (SessionManager): The session manager fixture.
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "ok",
         "sources": [],

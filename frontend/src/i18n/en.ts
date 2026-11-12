@@ -198,9 +198,6 @@ export const en = {
   'chat.value_placeholder': 'value',
   'chat.operator_aria': 'Operator',
   'chat.remove_rule_aria': 'Remove rule',
-  'chat.graph_debug': 'Graph debug',
-  'chat.graph_debug_show': 'Show graph debug',
-  'chat.graph_debug_hide': 'Hide graph debug',
   'chat.scope_not_applied':
     'This answer was not restricted to the {count} selected chunks — it came from ordinary retrieval.',
   'chat.rerank_not_applied':

@@ -279,10 +279,6 @@ def test_chat_uses_request_scoped_filtered_engine(
     session_manager.rag.query_engine = MagicMock()
     session_manager.rag.build_query_engine.return_value = filtered_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded hello",
-        {},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Hi",
         "sources": [],
@@ -298,7 +294,7 @@ def test_chat_uses_request_scoped_filtered_engine(
     )
 
     session_manager.rag.build_query_engine.assert_called_once()  # type: ignore[attr-defined]
-    assert _asked(filtered_engine) == ("expanded hello", question_block("hello", "rewritten hello"))
+    assert _asked(filtered_engine) == ("rewritten hello", question_block("hello", "rewritten hello"))
     session_manager.rag._normalize_response_data.assert_called_once_with(  # type: ignore[attr-defined]
         "hello",
         filtered_response,
@@ -329,10 +325,6 @@ def test_stream_chat_includes_final_response_when_no_tokens(
 
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded hello",
-        {},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Fallback answer",
         "sources": [],
@@ -361,7 +353,6 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "sources": [],
             "session_id": "session-1",
             "reasoning": None,
-            "graph_debug": {},
             "retrieval_query": "rewritten hello",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact",
@@ -389,7 +380,6 @@ def test_scoped_chat_reports_that_it_answered_from_the_scope(
     scoped_engine = MagicMock()
     scoped_engine.synthesize.return_value = MagicMock()
     session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Hi",
         "sources": [],
@@ -404,13 +394,10 @@ def test_scoped_chat_reports_that_it_answered_from_the_scope(
     assert response["scoped_chunk_count"] == 2
 
 
-def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
+def test_a_scoped_turn_retrieves_with_the_rewrite_and_answers_the_users_words(
     session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Graph expansion widens *retrieval*, and a scoped turn does none.
-
-    A scope retrieves by id, so expanding the query would only pay for an
-    NER-aggregate load that buys nothing.
+    """A scoped turn hands its engine the rewrite and asks the message with the rewrite labelled.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
@@ -420,7 +407,6 @@ def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
     scoped_engine.synthesize.return_value = MagicMock()
     session_manager.rag.build_query_engine.return_value = scoped_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
-    session_manager.rag.graph_debug_skipped.return_value = {"applied": False, "reason": "scoped"}  # type: ignore[attr-defined]
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Hi",
         "sources": [],
@@ -430,9 +416,8 @@ def test_a_scoped_turn_does_not_expand_the_query_with_the_graph(
 
     response = session_manager.chat("hello", scoped_node_ids=["c1"])
 
-    session_manager.rag.expand_query_with_graph_with_debug.assert_not_called()  # type: ignore[attr-defined]
     assert _asked(scoped_engine) == ("rewritten hello", question_block("hello", "rewritten hello"))
-    assert response["graph_debug"] == {"applied": False, "reason": "scoped"}
+    assert "graph_debug" not in response
 
 
 def test_scoped_stream_chat_reports_the_scope_in_its_final_frame(
@@ -450,7 +435,6 @@ def test_scoped_stream_chat_reports_the_scope_in_its_final_frame(
     streaming_response.source_nodes = cast(list[Any], [])
     streaming_engine.synthesize.return_value = streaming_response
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})  # type: ignore[attr-defined]
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Hi",
         "sources": [],
@@ -511,10 +495,6 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     shared = MagicMock()
     session_manager.rag.query_engine = shared
     session_manager.rag.build_query_engine.return_value = engine  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "ok",
         "sources": [],
@@ -531,10 +511,7 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     )
 
     session_manager.rag.rewrite_retrieval_query.assert_not_called()  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.assert_called_once_with(  # type: ignore[attr-defined]
-        "Please elaborate."
-    )
-    assert _asked(engine) == ("expanded", "Please elaborate.")
+    assert _asked(engine) == ("Please elaborate.", "Please elaborate.")
     shared.retrieve.assert_not_called()
     shared.update_prompts.assert_not_called()
 
@@ -564,10 +541,6 @@ def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(
 
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten people"  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "expanded people",
-        {},
-    )
     session_manager.rag._infer_collection_profile.return_value = {  # type: ignore[attr-defined]
         "coverage_unit": "documents",
         "is_social_table": False,
@@ -625,10 +598,6 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     engine.synthesize.return_value = filtered_response
     session_manager.rag.query_engine = engine
     session_manager.rag.rewrite_retrieval_query.return_value = "What did Alice post?"  # type: ignore[attr-defined]
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
-        "What did Alice post?",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Grounded answer",
         "sources": [],
@@ -729,15 +698,13 @@ def _wire_a_real_turn(session_manager: SessionManager, monkeypatch: pytest.Monke
         return response
 
     engine = MagicMock()
-    # The plain path retrieves with the expanded query, then synthesizes the user's words.
+    # The plain path retrieves with the rewritten query, then synthesizes the user's words.
     engine.retrieve.return_value = cast(list[Any], [])
     engine.synthesize.side_effect = lambda query, _nodes, **_kw: _answer(str(query))
     rag = cast(Any, session_manager.rag)
     rag.query_engine = engine
     rag.build_query_engine.return_value = engine
     rag.index = object()
-    rag.expand_query_with_graph_with_debug.return_value = ("expanded", cast(dict[str, Any], {}))
-    rag.graph_debug_skipped.return_value = {"applied": False}
     rag._normalize_response_data.side_effect = lambda _query, _result, *, retrieval_mode=None, **_kw: {
         "response": "Hi",
         "sources": cast(list[Any], []),

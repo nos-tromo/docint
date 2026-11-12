@@ -205,9 +205,6 @@ export const de: Strings = {
   'chat.value_placeholder': 'Wert',
   'chat.operator_aria': 'Operator',
   'chat.remove_rule_aria': 'Regel entfernen',
-  'chat.graph_debug': 'Graph-Debug',
-  'chat.graph_debug_show': 'Graph-Debug anzeigen',
-  'chat.graph_debug_hide': 'Graph-Debug ausblenden',
   'chat.scope_not_applied':
     'Diese Antwort wurde nicht auf die {count} ausgewählten Abschnitte eingegrenzt — sie stammt aus der normalen Suche.',
   'chat.rerank_not_applied':

@@ -211,47 +211,23 @@ def test_run_query_records_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     class DummyRAG:
         """Dummy RAG class for testing run_query.
 
-        Simulates query expansion and execution with debug information.
+        Records the queries it is asked to run.
         """
 
         def __init__(self) -> None:
             """Initialize the DummyRAG with an empty list of seen queries."""
             self.seen_queries: list[str] = []
-            self.seen_expansions: list[str | None] = []
 
-        def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
-            """Simulate query expansion via graph; return (expanded_query, debug_info).
-
-            Args:
-                query (str): The original query string to expand.
-
-            Returns:
-                tuple[str, dict[str, Any]]: Expanded query string plus a debug-info dict.
-            """
-            return (
-                f"{query}\n\nRelated entities for retrieval: Acme",
-                {
-                    "enabled": True,
-                    "applied": True,
-                    "original_query": query,
-                    "expanded_query": f"{query}\n\nRelated entities for retrieval: Acme",
-                    "anchor_entities": ["Acme"],
-                    "neighbor_entities": ["Widget"],
-                },
-            )
-
-        def run_query(self, query: str, expanded_query: str | None = None) -> dict[str, Any]:
+        def run_query(self, query: str) -> dict[str, Any]:
             """Simulate running a query by returning the query in the response and recording seen queries.
 
             Args:
-                query (str): The query string to run, which the answer is asked.
-                expanded_query (str | None): What retrieval runs on, the query graph-expanded.
+                query (str): The query string to run, which retrieval runs on and the answer is asked.
 
             Returns:
                 dict[str, Any]: A dictionary containing the query result payload.
             """
             self.seen_queries.append(query)
-            self.seen_expansions.append(expanded_query)
             return {
                 "response": query,
                 "sources": [
@@ -291,13 +267,9 @@ def test_run_query_records_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     name, data = calls[0]
     assert "_3_result" in name
     assert rag.seen_queries == ["hello"]
-    assert rag.seen_expansions == ["hello\n\nRelated entities for retrieval: Acme"]
     assert "Query: hello" in data
     assert "Answer:\nhello\n" in data
-    # The terms are reported in the graph-debug block and nowhere before it.
-    assert "Related entities for retrieval" not in data.split("Graph debug:")[0]
-    assert '"applied": true' in data
-    assert '"anchor_entities": [' in data
+    assert "Graph debug" not in data
     assert "- Text ID: c1" in data
     assert "Validation:" in data
 

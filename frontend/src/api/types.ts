@@ -140,7 +140,6 @@ export interface ChatFinalEvent extends ValidationFields {
   confidence?: number
   tool_used?: string
   reason?: string
-  graph_debug?: unknown
   retrieval_query?: string
   coverage_unit?: string
   /** `'scoped'` when the turn answered from a hand-picked chunk set. */

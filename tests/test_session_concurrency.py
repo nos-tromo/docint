@@ -70,7 +70,6 @@ def _install_chat_stubs(monkeypatch: pytest.MonkeyPatch, build_query_engine: Any
         "rewrite_retrieval_query",
         lambda self, *, user_msg, conversation_context="": user_msg,
     )
-    monkeypatch.setattr(RAG, "expand_query_with_graph_with_debug", lambda self, q: (q, {}))
     monkeypatch.setattr(RAG, "_infer_collection_profile", lambda self: {"coverage_unit": "documents"})
     monkeypatch.setattr(RAG, "_resolve_chat_response_mode", lambda self: _ChatModeStub())
     monkeypatch.setattr(

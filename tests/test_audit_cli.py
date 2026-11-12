@@ -477,7 +477,7 @@ def test_a_query_run_records_the_question_by_hash_and_its_result_file(
     rag = types.SimpleNamespace(
         qdrant_collection="docs",
         text_model_id="chat-model",
-        run_query=lambda query, expanded_query=None: {"response": "An answer.", "sources": [{"id": "p1"}]},
+        run_query=lambda query: {"response": "An answer.", "sources": [{"id": "p1"}]},
     )
     monkeypatch.setattr(query_cli, "_store_text_output", lambda filename, data, output_path=None: None)
 

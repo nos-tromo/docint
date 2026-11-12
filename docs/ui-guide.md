@@ -89,8 +89,8 @@ The primary surface. Streams the answer token-by-token from
 (`/chat/:sessionId`), and builds metadata filters (MIME, date range,
 hate-speech-only, custom field/operator/value rules, each added with the + in
 the custom-rules header) via `src/components/chat/FilterBuilder.tsx`. Each
-exchange renders as a `ChatTurn` with `Citation`s, a `ValidationBanner` for
-answer/source mismatches, and an optional `GraphDebugPanel`. Cancellation uses
+exchange renders as a `ChatTurn` with `Citation`s and a `ValidationBanner` for
+answer/source mismatches. Cancellation uses
 an `AbortController`.
 
 The answer is Markdown: `grounded_qa.txt` on a plain turn, and

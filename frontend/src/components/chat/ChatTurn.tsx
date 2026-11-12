@@ -6,7 +6,6 @@ import { cn } from '@/lib/cn'
 import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
-import { GraphDebugPanel } from './GraphDebugPanel'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { MarkdownProse } from '@/components/common/MarkdownProse'
 import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
@@ -549,7 +548,6 @@ export function ChatTurn({
             <SourcePills sources={sources} />
           </div>
         )}
-        {!!turn.meta?.graph_debug && <GraphDebugPanel data={turn.meta.graph_debug} />}
       </div>
     </article>
   )

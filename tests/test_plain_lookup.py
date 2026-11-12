@@ -1,8 +1,8 @@
 """The plain lookup answers the user's own words, in a session and without one.
 
-Retrieval runs on the history-resolved rewrite with the graph's terms appended; synthesis is asked the
-message itself with the rewrite labelled beside it, and a stateless query, which has no rewrite, is asked
-its question alone. The engines are real, their model echoes its prompt, and every message, passage and
+Retrieval runs on the history-resolved rewrite; synthesis is asked the message itself with the rewrite
+labelled beside it, and a stateless query, which has no rewrite, retrieves with and is asked its question
+alone. The engines are real, their model echoes its prompt, and every message, passage and
 name here is invented.
 """
 
@@ -51,8 +51,6 @@ PHYSICAL = "u0123456789ab__hafen"
 FOLLOW_UP = "Are those all?"
 #: What the history-resolved rewrite makes of it.
 REWRITE = "Which stalls open at the harbour festival on Sunday?"
-#: What the entity graph appends to the rewrite for retrieval.
-TERMS = "Related entities for retrieval: Person A, Person B"
 #: A grounded template that shows the question exactly as the synthesizer is asked it.
 ECHO_TEMPLATE = "CTX<<{context_str}>> Q<<{query_str}>>"
 #: How the question reads in the echo: the user's words, then the rewrite under its label.
@@ -91,19 +89,6 @@ def _normalize(query: str, result: Any, reason: str | None = None, **kwargs: Any
     }
 
 
-def _expand(query: str) -> tuple[str, dict[str, Any]]:
-    """Expand a query the way the entity graph does when it finds neighbours.
-
-    Args:
-        query (str): The unexpanded retrieval query.
-
-    Returns:
-        tuple[str, dict[str, Any]]: The query with the terms appended, and the debug payload.
-    """
-    expanded = f"{query}\n\n{TERMS}"
-    return expanded, {"applied": True, "original_query": query, "expanded_query": expanded}
-
-
 @pytest.fixture
 def session_manager() -> Generator[SessionManager, None, None]:
     """Provide a SessionManager on an in-memory DB over a RAG double whose engines each test brings.
@@ -117,12 +102,6 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag.index = object()
     rag.qdrant_collection = PHYSICAL
     rag.rewrite_retrieval_query.return_value = REWRITE
-    rag.expand_query_with_graph_with_debug.side_effect = _expand
-    rag.graph_debug_skipped.side_effect = lambda query, reason: {
-        "applied": False,
-        "reason": reason,
-        "original_query": query,
-    }
     rag._infer_collection_profile.return_value = {"coverage_unit": "documents"}
     mode = MagicMock()
     mode.value = "compact"
@@ -273,8 +252,8 @@ def test_the_plain_lookup_answers_the_users_own_words_with_the_rewrite_labelled(
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-def test_graph_terms_never_reach_the_synthesis_prompt(session_manager: SessionManager, entry: str) -> None:
-    """The graph's terms widen the search and stop there.
+def test_the_plain_lookup_retrieves_with_the_rewrite_alone(session_manager: SessionManager, entry: str) -> None:
+    """Retrieval runs on the rewrite as it stands; nothing is appended to it and no graph payload is reported.
 
     Args:
         session_manager (SessionManager): The session manager fixture.
@@ -285,10 +264,9 @@ def test_graph_terms_never_reach_the_synthesis_prompt(session_manager: SessionMa
 
     final = _answer(session_manager, entry)
 
-    assert retriever.asked == [f"{REWRITE}\n\n{TERMS}"]
+    assert retriever.asked == [REWRITE]
     assert ASKED in final["response"]
-    assert TERMS not in final["response"]
-    assert final["graph_debug"]["applied"] is True
+    assert "graph_debug" not in final
     assert final["retrieval_query"] == REWRITE
 
 
@@ -326,7 +304,7 @@ def test_a_retrieval_query_handed_in_as_the_message_is_asked_as_it_stands(
     final = _answer(session_manager, entry, reformulated, skip_query_rewrite=True)
 
     cast(Any, session_manager.rag).rewrite_retrieval_query.assert_not_called()
-    assert retriever.asked == [f"{reformulated}\n\n{TERMS}"]
+    assert retriever.asked == [reformulated]
     assert f"Q<<{reformulated}>>" in final["response"]
     assert final["retrieval_query"] == reformulated
 
@@ -349,8 +327,6 @@ def test_a_scoped_lookup_answers_the_users_own_words_from_exactly_the_pinned_chu
     assert ASKED in answer
     assert answer.index(CHUNKS["c2"]) < answer.index(CHUNKS["c1"])
     assert CHUNKS["c3"] not in answer
-    cast(Any, session_manager.rag).expand_query_with_graph_with_debug.assert_not_called()
-    assert final["graph_debug"]["reason"] == "scoped"
     assert final["retrieval_mode"] == "scoped"
     assert final["retrieval_query"] == REWRITE
 
@@ -476,14 +452,10 @@ def test_a_visual_lookup_still_shows_the_model_its_images_and_asks_the_users_wor
     shown = cast(Any, session_manager.rag)._normalize_response_data.call_args.args[1].source_nodes
     assert [scored.node.metadata.get(VISUAL_IMAGES_ATTACHED_KEY) for scored in shown] == [True]
     assert retriever.asked == [REWRITE]
-    assert final["graph_debug"]["reason"] == "visual"
-    cast(Any, session_manager.rag).expand_query_with_graph_with_debug.assert_not_called()
 
 
 #: What a stateless user asked: there is no history, so nothing to rewrite.
 QUESTION = "Which stalls open on Sunday?"
-#: That question with the terms the graph appended, what the retrieval runs on.
-EXPANDED = f"{QUESTION}\n\n{TERMS}"
 #: The stateless entry points: the sync query, and the async one the SSE endpoint awaits.
 QUERY_ENTRIES = ["run_query", "run_query_async"]
 #: The retrieval settings a stateless query reports; the real ones read the collection.
@@ -535,27 +507,6 @@ def _ask(rag: RAG, entry: str, **kwargs: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("entry", QUERY_ENTRIES)
-def test_graph_terms_never_reach_the_stateless_synthesis_prompt(
-    stateless_rag: RAG, monkeypatch: pytest.MonkeyPatch, entry: str
-) -> None:
-    """The graph's terms widen the stateless search and stop there.
-
-    Args:
-        stateless_rag (RAG): The RAG fixture.
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        entry (str): The entry point under test.
-    """
-    retriever = _Passages(_passages())
-    _bring(monkeypatch, _engine(retriever, streaming=False))
-
-    result = _ask(stateless_rag, entry, expanded_query=EXPANDED)
-
-    assert retriever.asked == [EXPANDED]
-    assert f"Q<<{QUESTION}>>" in result["response"]
-    assert TERMS not in result["response"]
-
-
-@pytest.mark.parametrize("entry", QUERY_ENTRIES)
 def test_the_stateless_answer_is_asked_the_users_question(
     stateless_rag: RAG, monkeypatch: pytest.MonkeyPatch, entry: str
 ) -> None:
@@ -568,17 +519,17 @@ def test_the_stateless_answer_is_asked_the_users_question(
     """
     _bring(monkeypatch, _engine(_Passages(_passages()), streaming=False))
 
-    result = _ask(stateless_rag, entry, expanded_query=EXPANDED)
+    result = _ask(stateless_rag, entry)
 
     assert f"Q<<{QUESTION}>>" in result["response"]
     assert RESOLVED_QUESTION_LABEL not in result["response"]
 
 
 @pytest.mark.parametrize("entry", QUERY_ENTRIES)
-def test_a_stateless_query_without_an_expansion_retrieves_with_the_prompt(
+def test_a_stateless_query_retrieves_with_the_prompt(
     stateless_rag: RAG, monkeypatch: pytest.MonkeyPatch, entry: str
 ) -> None:
-    """A caller that expands nothing, the retrieval eval for one, retrieves with and asks the same words.
+    """A stateless query retrieves with and asks the same words.
 
     Args:
         stateless_rag (RAG): The RAG fixture.
@@ -607,7 +558,7 @@ def test_a_scoped_stateless_lookup_answers_the_question_from_exactly_the_pinned_
     """
     _bring(monkeypatch, _engine(_scoped_retriever(["c2", "c1"]), streaming=False))
 
-    result = _ask(stateless_rag, entry, expanded_query=QUESTION, scoped_node_ids=["c2", "c1"])
+    result = _ask(stateless_rag, entry, scoped_node_ids=["c2", "c1"])
 
     answer = result["response"]
     assert f"Q<<{QUESTION}>>" in answer
@@ -632,7 +583,7 @@ def test_a_visual_stateless_lookup_still_shows_the_model_its_images_and_asks_the
     retriever = _Passages([frame_passage(1)])
     _bring(monkeypatch, _visual_engine(retriever, llm, store, streaming=False))
 
-    result = _ask(stateless_rag, entry, expanded_query=QUESTION, retrieval_target="visual")
+    result = _ask(stateless_rag, entry, retrieval_target="visual")
 
     assert result["response"] == SEEN_ANSWER
     assert store.fetches == [["frame-1"]]
@@ -676,7 +627,7 @@ class _Served:
 
 @pytest.fixture
 def served(monkeypatch: pytest.MonkeyPatch) -> _Served:
-    """Serve the real API over a real RAG whose graph appends ``TERMS`` and whose engine echoes its prompt.
+    """Serve the real API over a real RAG whose engine echoes its prompt.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -689,7 +640,6 @@ def served(monkeypatch: pytest.MonkeyPatch) -> _Served:
     monkeypatch.setattr(RAG, "build_query_engine", lambda self, **kwargs: engine)
     monkeypatch.setattr(RAG, "create_index", lambda self: None)
     monkeypatch.setattr(RAG, "create_query_engine", lambda self: None)
-    monkeypatch.setattr(RAG, "expand_query_with_graph_with_debug", lambda self, query: _expand(query))
     monkeypatch.setattr(RAG, "_resolve_runtime_retrieval_settings", lambda self, **kwargs: RETRIEVAL_SETTINGS)
     monkeypatch.setattr(RAG, "ensure_collection_owner_manager", lambda self: _Owners())
     monkeypatch.setattr(api_module, "rag", RAG(qdrant_collection=""))
@@ -705,8 +655,8 @@ def served(monkeypatch: pytest.MonkeyPatch) -> _Served:
 STATELESS_REQUEST = {"question": QUESTION, "collection": "docs", "retrieval_mode": "stateless"}
 
 
-def test_the_stateless_query_endpoint_retrieves_with_the_expansion_and_asks_the_question(served: _Served) -> None:
-    """``/query`` hands the question and its expansion to the query separately, so only retrieval sees the terms.
+def test_the_stateless_query_endpoint_retrieves_with_and_asks_the_question(served: _Served) -> None:
+    """``/query`` retrieves with the question as typed and reports no graph payload.
 
     Args:
         served (_Served): The served API.
@@ -715,13 +665,12 @@ def test_the_stateless_query_endpoint_retrieves_with_the_expansion_and_asks_the_
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert served.retriever.asked == [EXPANDED]
+    assert served.retriever.asked == [QUESTION]
     assert f"Q<<{QUESTION}>>" in body["answer"]
-    assert TERMS not in body["answer"]
-    assert body["graph_debug"]["applied"] is True
+    assert "graph_debug" not in body
 
 
-def test_the_stateless_stream_endpoint_retrieves_with_the_expansion_and_asks_the_question(served: _Served) -> None:
+def test_the_stateless_stream_endpoint_retrieves_with_and_asks_the_question(served: _Served) -> None:
     """``/stream_query`` does the same through the async query the SSE body awaits.
 
     Args:
@@ -735,7 +684,6 @@ def test_the_stateless_stream_endpoint_retrieves_with_the_expansion_and_asks_the
 
     frames = [json.loads(line.removeprefix("data: ")) for line in text.splitlines() if line.startswith("data: ")]
     final = next(frame for frame in frames if "response" in frame)
-    assert served.retriever.asked == [EXPANDED]
+    assert served.retriever.asked == [QUESTION]
     assert f"Q<<{QUESTION}>>" in final["response"]
-    assert TERMS not in final["response"]
-    assert final["graph_debug"]["applied"] is True
+    assert "graph_debug" not in final

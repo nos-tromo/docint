@@ -2107,7 +2107,6 @@ class QueryOut(BaseModel):
     #: name. A placeholder id here was adopted by clients as a conversation,
     #: and the next session-mode turn then created a row under it.
     session_id: str | None = None
-    graph_debug: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
@@ -3611,30 +3610,11 @@ def query(
                 # Stateless mode has no session to pin a scope to, so the
                 # request is the only place one can come from.
                 stateless_scope = [str(entry) for entry in payload.scope_chunk_ids or []]
-                retrieval_query = payload.question
-                graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                # Session mode skips expansion for the visual target too: the
-                # graph's terms would widen a text lane this target does not use.
-                if callable(expand_with_debug) and not stateless_scope and payload.retrieval_target != "visual":
-                    try:
-                        expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
-                        retrieval_query = str(expanded)
-                        if isinstance(debug_payload, dict):
-                            graph_debug = debug_payload
-                    except Exception as exc:
-                        logger.warning(
-                            "Graph debug expansion failed for stateless query: {}",
-                            exc,
-                        )
-
                 data = {}
                 if _agent_turn_allowed(payload.retrieval_target):
-                    # Drained to its final payload; a fallback reports this expansion itself.
+                    # Drained to its final payload.
                     for item in rag.stream_stateless_agent_turn(
                         payload.question,
-                        expanded_query=retrieval_query,
-                        graph_debug=graph_debug,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
@@ -3646,15 +3626,12 @@ def query(
                 else:
                     data = rag.run_query(
                         payload.question,
-                        expanded_query=retrieval_query,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
                         scoped_node_ids=stateless_scope or None,
                         retrieval_target=payload.retrieval_target,
                     )
-                    if graph_debug is not None:
-                        data["graph_debug"] = graph_debug
                 session_id = payload.session_id
             else:
                 session_id = rag.start_session(
@@ -3695,9 +3672,6 @@ def query(
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
-        graph_debug = (
-            data.get("graph_debug") if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict) else None
-        )
         retrieval_query_value: str | None = (
             str(data.get("retrieval_query") or "")
             if isinstance(data, dict) and data.get("retrieval_query") is not None
@@ -3736,7 +3710,6 @@ def query(
             "answer": answer,
             "sources": sources,
             "session_id": session_id,
-            "graph_debug": graph_debug,
             "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
@@ -3843,26 +3816,6 @@ async def stream_query(
                 # Stateless mode has no session to pin a scope to, so the
                 # request is the only place one can come from.
                 stateless_scope = [str(entry) for entry in payload.scope_chunk_ids or []]
-                retrieval_query = payload.question
-                graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                # Session mode skips expansion for the visual target too: the
-                # graph's terms would widen a text lane this target does not use.
-                if callable(expand_with_debug) and not stateless_scope and payload.retrieval_target != "visual":
-                    try:
-                        expanded, debug_payload = cast(
-                            "tuple[Any, Any]",
-                            await to_thread.run_sync(expand_with_debug, retrieval_query),
-                        )
-                        retrieval_query = str(expanded)
-                        if isinstance(debug_payload, dict):
-                            graph_debug = debug_payload
-                    except Exception as exc:
-                        logger.warning(
-                            "Graph debug expansion failed for stateless stream query: {}",
-                            exc,
-                        )
-
                 if _agent_turn_allowed(payload.retrieval_target):
 
                     def _make_stateless_agent_turn() -> Iterator[Any]:
@@ -3875,8 +3828,6 @@ async def stream_query(
                             "Iterator[Any]",
                             rag.stream_stateless_agent_turn(
                                 payload.question,
-                                expanded_query=retrieval_query,
-                                graph_debug=graph_debug,
                                 metadata_filters=metadata_filters,
                                 metadata_filter_rules=payload.metadata_filters,
                                 vector_store_kwargs=vector_store_kwargs or None,
@@ -3896,15 +3847,12 @@ async def stream_query(
                 else:
                     stateless_data = await rag.run_query_async(
                         payload.question,
-                        expanded_query=retrieval_query,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
                         scoped_node_ids=stateless_scope or None,
                         retrieval_target=payload.retrieval_target,
                     )
-                    if graph_debug is not None:
-                        stateless_data["graph_debug"] = graph_debug
 
                     answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
                     async for event in _stream_simulated_text(answer_text):
@@ -3918,7 +3866,6 @@ async def stream_query(
                         "sources": stateless_data.get("sources") or [],
                         "session_id": payload.session_id,
                         "reasoning": stateless_data.get("reasoning"),
-                        "graph_debug": stateless_data.get("graph_debug"),
                         "retrieval_target": stateless_data.get("retrieval_target") or payload.retrieval_target,
                         "visual": stateless_data.get("visual"),
                     }
@@ -4579,9 +4526,8 @@ def get_collection_ner_graph(
 ) -> dict[str, Any]:
     """Return a derived entity graph for the caller's collection.
 
-    Wraps :meth:`docint.core.rag.RAG.get_collection_ner_graph`, exposing the
-    same node/edge payload the GraphRAG expansion uses so the SPA can render an
-    interactive, zoomable entity graph. Nodes are the top ``top_k_nodes``
+    Wraps :meth:`docint.core.rag.RAG.get_collection_ner_graph` so the SPA can
+    render an interactive, zoomable entity graph. Nodes are the top ``top_k_nodes``
     entities by mention count; edges combine extracted relations with
     co-occurrence links. Node ids are cluster keys — clients map a node back to
     an entity for drill-down via its ``text``/``type`` fields.

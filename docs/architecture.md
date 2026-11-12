@@ -91,8 +91,7 @@ The diagram below expands what happens when the UI calls `POST /query` or
       groundedness against the returned sources and sets
       `validation_mismatch` when the LLM disagrees with the answer.
 3. **RAG layer** — `docint/core/rag.py`:
-   - Builds the Qdrant query with optional graph expansion
-     (`expand_query_with_graph_with_debug`), metadata filters
+   - Builds the Qdrant query with metadata filters
      (`docint/core/retrieval_filters.py`) and reranker weights.
    - Runs dense + sparse retrieval, applies the remote rerank
      (`VLLMRerankPostprocessor`), and postprocessors for parent-context

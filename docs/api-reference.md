@@ -334,7 +334,6 @@ target.
   "answer": "...",
   "sources": [{"text": "...", "metadata": {...}, "score": 0.81}],
   "session_id": "...",
-  "graph_debug": null,
   "retrieval_query": "...",
   "coverage_unit": null,
   "retrieval_mode": "session",
@@ -367,8 +366,8 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
 - `answer`: `plain` on a lookup; `split` or `empty` on an assessment, which
   also carries `evidence_chars`, where its source-backed part ends.
 
-Such a turn reports `retrieval_mode: "agent"` (`"scoped"` on a scoped turn),
-`retrieval_query: null`, and a `graph_debug` skipped with the reason `agent`.
+Such a turn reports `retrieval_mode: "agent"` (`"scoped"` on a scoped turn)
+and `retrieval_query: null`.
 `answer_mode` and `agent` are `null` on a plain turn, with one exception: a
 plain answer an agent turn handed over because the endpoint refused tools
 carries

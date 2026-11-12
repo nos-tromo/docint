@@ -1212,16 +1212,13 @@ def test_only_a_visual_turn_shows_the_model_its_pictures(monkeypatch: pytest.Mon
         assert (other.loop._fetch_thumbnails, other.loop._legend_template, other.loop._max_images) == (None, "", 0)
 
 
-def test_each_search_expands_its_own_query_for_retrieval_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Graph terms reach the engine, which asks for every child; the model's reply and trail show its own words.
+def test_each_search_retrieves_with_the_models_own_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine gets the model's query verbatim, asking for every child; nothing is appended to it.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     rag = _rag(monkeypatch)
-    monkeypatch.setattr(
-        rag, "expand_query_with_graph", lambda query: f"{query}\n\nRelated entities for retrieval: Person B"
-    )
     engine = _engine(programme_passage())
     turn = _turn(rag, target="documents", engine=engine)
 
@@ -1231,9 +1228,8 @@ def test_each_search_expands_its_own_query_for_retrieval_only(monkeypatch: pytes
     assert isinstance(bundle, EveryChildQuery)
     # An agent's own search: its sub-floor images get no description re-score.
     assert isinstance(bundle, AgentSearchQuery)
-    assert bundle.query_str == "Hafenfest Sonntag\n\nRelated entities for retrieval: Person B"
+    assert bundle.query_str == "Hafenfest Sonntag"
     assert reply.detail == "Hafenfest Sonntag"
-    assert "Person B" not in reply.text
 
 
 def _record_image_tools(monkeypatch: pytest.MonkeyPatch, rag: RAG) -> tuple[list[Any], list[Any]]:
@@ -1340,28 +1336,14 @@ def test_filters_that_reached_the_turn_in_neither_form_are_refused(monkeypatch: 
 
 
 def test_a_search_runs_on_a_search_thread_inside_the_requests_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The loop starts each search on its own thread in a copy of the request's context, expansion included.
+    """The loop starts each search on its own thread in a copy of the request's context.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     monkeypatch.setenv("AGENT_MAX_ROUNDS", "6")
     rag = _rag(monkeypatch)
-    rag.graphrag_enabled = True
-    expanded_in: list[str] = []
     searched_in: list[tuple[str, str]] = []
-
-    def aggregate(refresh: bool = False) -> dict[str, Any]:
-        """Record which collection the expansion reads its entities from.
-
-        Args:
-            refresh (bool): Unused.
-
-        Returns:
-            dict[str, Any]: No entities, so the query is not expanded.
-        """
-        expanded_in.append(rag.qdrant_collection)
-        return {"entities": []}
 
     def retrieve(bundle: Any) -> list[NodeWithScore]:
         """Record which collection and thread a search ran in.
@@ -1375,7 +1357,6 @@ def test_a_search_runs_on_a_search_thread_inside_the_requests_collection(monkeyp
         searched_in.append((rag.qdrant_collection, threading.current_thread().name))
         return [programme_passage()]
 
-    monkeypatch.setattr(rag, "_get_collection_ner_aggregate", aggregate)
     engine = MagicMock()
     engine.retrieve.side_effect = retrieve
     rag._bounded_text_model = cast(
@@ -1401,7 +1382,6 @@ def test_a_search_runs_on_a_search_thread_inside_the_requests_collection(monkeyp
         turn = _turn(rag, target="documents", engine=engine)
         items = list(turn.loop.run(window=ConversationWindow(), message=MESSAGE, ledger=turn.ledger))
 
-    assert expanded_in == [PHYSICAL]
     assert searched_in == [(PHYSICAL, SEARCH_THREAD_NAME)]
     result = items[-1]
     assert isinstance(result, AgentResult)
