@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, replace
 from typing import Any, cast
 
-import httpx
+import httpx2
 import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
@@ -548,8 +548,8 @@ def _status_error(cls: type[openai.APIStatusError], status: int, message: str) -
     Returns:
         openai.APIStatusError: The error.
     """
-    request = httpx.Request("POST", "http://inference.invalid/v1/chat/completions")
-    return cls(message, response=httpx.Response(status, request=request), body=None)
+    request = httpx2.Request("POST", "http://inference.invalid/v1/chat/completions")
+    return cls(message, response=httpx2.Response(status, request=request), body=None)
 
 
 # --- The thirteen behaviours the plan names -------------------------------------------------

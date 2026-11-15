@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any
 
-import httpx
+import httpx2
 import openai
 import pytest
 from loguru import logger
@@ -63,7 +63,7 @@ def _bad_request() -> openai.BadRequestError:
     Returns:
         openai.BadRequestError: An HTTP 400 error.
     """
-    response = httpx.Response(400, request=httpx.Request("POST", "http://t"))
+    response = httpx2.Response(400, request=httpx2.Request("POST", "http://t"))
     return openai.BadRequestError("x", response=response, body=None)
 
 

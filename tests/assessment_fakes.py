@@ -9,7 +9,7 @@ from collections.abc import Generator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-import httpx
+import httpx2
 import openai
 from llama_index.core.bridge.pydantic import Field
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
@@ -93,8 +93,8 @@ def bad_request(message: str) -> openai.BadRequestError:
     Returns:
         openai.BadRequestError: The error.
     """
-    request = httpx.Request("POST", "http://inference.invalid/v1/chat/completions")
-    return openai.BadRequestError(message, response=httpx.Response(400, request=request), body=None)
+    request = httpx2.Request("POST", "http://inference.invalid/v1/chat/completions")
+    return openai.BadRequestError(message, response=httpx2.Response(400, request=request), body=None)
 
 
 class FixedRetriever(BaseRetriever):

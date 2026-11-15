@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import openai
 import pytest
 from assessment_fakes import llm_view, scored_node
@@ -57,8 +57,8 @@ def status_error(cls: type[openai.APIStatusError], status: int, message: str) ->
     Returns:
         openai.APIStatusError: The error.
     """
-    request = httpx.Request("POST", INVENTED_ENDPOINT)
-    return cls(message, response=httpx.Response(status, request=request), body=None)
+    request = httpx2.Request("POST", INVENTED_ENDPOINT)
+    return cls(message, response=httpx2.Response(status, request=request), body=None)
 
 
 def timed_out() -> openai.APITimeoutError:
@@ -67,7 +67,7 @@ def timed_out() -> openai.APITimeoutError:
     Returns:
         openai.APITimeoutError: The error.
     """
-    return openai.APITimeoutError(request=httpx.Request("POST", INVENTED_ENDPOINT))
+    return openai.APITimeoutError(request=httpx2.Request("POST", INVENTED_ENDPOINT))
 
 
 def unreachable() -> openai.APIConnectionError:
@@ -76,7 +76,7 @@ def unreachable() -> openai.APIConnectionError:
     Returns:
         openai.APIConnectionError: The error.
     """
-    return openai.APIConnectionError(request=httpx.Request("POST", INVENTED_ENDPOINT))
+    return openai.APIConnectionError(request=httpx2.Request("POST", INVENTED_ENDPOINT))
 
 
 def tool_call_delta(

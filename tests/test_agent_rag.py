@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import numpy as np
 import openai
 import pytest
@@ -150,7 +150,7 @@ def _rag(
     return rag
 
 
-def _stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
+def _stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> list[httpx2.Request]:
     """Make every request time out at the HTTP transport, recording each attempt that reaches it.
 
     The SDK's own retries and llama-index's both sit above the transport, so the count is
@@ -160,24 +160,24 @@ def _stalled_endpoint(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
 
     Returns:
-        list[httpx.Request]: The attempts, appended to as they happen.
+        list[httpx2.Request]: The attempts, appended to as they happen.
     """
-    attempts: list[httpx.Request] = []
+    attempts: list[httpx2.Request] = []
 
-    def _stall(_transport: Any, request: httpx.Request) -> httpx.Response:
+    def _stall(_transport: Any, request: httpx2.Request) -> httpx2.Response:
         """Record one attempt and time it out.
 
         Args:
             _transport (Any): The transport, unused.
-            request (httpx.Request): The attempt.
+            request (httpx2.Request): The attempt.
 
         Raises:
-            httpx.ReadTimeout: Always.
+            httpx2.ReadTimeout: Always.
         """
         attempts.append(request)
-        raise httpx.ReadTimeout("The endpoint stalled.", request=request)
+        raise httpx2.ReadTimeout("The endpoint stalled.", request=request)
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _stall)
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", _stall)
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     return attempts
 

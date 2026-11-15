@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
-import httpx
+import httpx2
 import openai
 import pytest
 from llama_index.core import Document
@@ -431,9 +431,9 @@ def test_a_rejected_schema_is_retried_unconstrained_for_windows(
 
     def respond(prompt: str, kwargs: dict[str, Any]) -> str:
         if "response_format" in kwargs:
-            request = httpx.Request("POST", "http://inference.invalid/v1/chat/completions")
+            request = httpx2.Request("POST", "http://inference.invalid/v1/chat/completions")
             raise openai.APIStatusError(
-                "json_schema unsupported", response=httpx.Response(400, request=request), body=None
+                "json_schema unsupported", response=httpx2.Response(400, request=request), body=None
             )
         return _window_reply((0, "endorses"))
 
