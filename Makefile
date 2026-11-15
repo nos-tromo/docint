@@ -12,7 +12,7 @@
 .DEFAULT_GOAL := help
 
 REPO     := docint
-NETWORKS := inference-net data-net edge-net
+NETWORKS := inference-net data-net edge-net workbench-net
 VOLUMES  := docling-cache sessions-storage source-preview-cache pipeline-storage
 include make/common.mk
 
@@ -34,7 +34,7 @@ AUDIT_EXEC_ENV = -e AUDIT_CLI_USER="$${SUDO_USER:-$$(id -un)}" -e AUDIT_CASE_REF
 help:
 	@echo "docint — build-host helpers."
 	@echo
-	@echo "  make network    create the external inference-net + data-net + edge-net"
+	@echo "  make network    create the external inference-net + data-net + edge-net + workbench-net"
 	@echo "  make volumes    create the external Docker volumes"
 	@echo "  make build      build images"
 	@echo "  make bundle     ship the built images as a versioned .tar.gz (latest annotated release tag)"

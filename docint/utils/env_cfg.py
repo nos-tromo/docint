@@ -1586,6 +1586,85 @@ def load_nextext_env(
     )
 
 
+#: Shortest ``WORKBENCH_API_KEY`` accepted. workbench refuses a shorter key too.
+WORKBENCH_KEY_MIN_LENGTH = 32
+
+
+@dataclass(frozen=True)
+class WorkbenchClientConfig:
+    """Client settings for workbench's MCP door (the chat agent's ``run_python`` tool)."""
+
+    api_base: str
+    timeout: float
+    # Kept out of the repr so logging the config can never print the key.
+    api_key: str | None = field(default=None, repr=False)
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the tool can be offered at all: both the key and the base are set."""
+        return bool(self.api_key) and bool(self.api_base)
+
+
+def load_workbench_env(
+    default_api_base: str = "",
+    default_timeout: float = 75.0,
+) -> WorkbenchClientConfig:
+    """Load the workbench client settings from the environment.
+
+    The chat agent's ``run_python`` tool hands a turn's evidence to workbench's
+    MCP door. docint calls workbench directly on ``workbench-net`` and
+    authenticates as a service: ``WORKBENCH_API_KEY`` is sent as
+    ``Authorization: Bearer <key>`` and is the same value as
+    ``DOCINT_WORKBENCH_KEY`` in workbench's ``.env``. A blank variable counts as
+    unset, and the key doubles as the off switch: without one the tool is never
+    offered, and docint works as it did before workbench existed.
+
+    Args:
+        default_api_base (str): Base URL used while ``WORKBENCH_API_BASE`` is
+            unset or blank (empty ⇒ the tool is off). docker/compose.yaml
+            supplies ``http://workbench-api:8000``.
+        default_timeout (float): Seconds one call may take, used while
+            ``WORKBENCH_TIMEOUT`` is unset or blank.
+
+    Returns:
+        WorkbenchClientConfig: Resolved configuration.
+        - api_base (str): The base URL without a trailing ``/``, or ``""``.
+        - timeout (float): Seconds one call may take, positive and finite.
+        - api_key (str | None): The shared key, or ``None`` when unset or blank.
+        - enabled (bool): ``True`` when both the key and the base are set.
+
+    Raises:
+        ValueError: If ``WORKBENCH_API_KEY`` is set but shorter than
+            ``WORKBENCH_KEY_MIN_LENGTH`` characters, or ``WORKBENCH_TIMEOUT`` is
+            not a positive, finite number. The message names the variable and
+            never its value.
+    """
+    raw_key = os.getenv("WORKBENCH_API_KEY")
+    api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    if api_key is not None and len(api_key) < WORKBENCH_KEY_MIN_LENGTH:
+        raise ValueError(
+            f"WORKBENCH_API_KEY is shorter than {WORKBENCH_KEY_MIN_LENGTH} characters. Use the same value as "
+            "DOCINT_WORKBENCH_KEY in workbench's .env (`make env` fills it in), or leave it unset to switch "
+            "the run_python tool off."
+        )
+
+    raw_base = os.getenv("WORKBENCH_API_BASE")
+    api_base = (raw_base if raw_base and raw_base.strip() else default_api_base).strip().rstrip("/")
+
+    raw_timeout = os.getenv("WORKBENCH_TIMEOUT")
+    if raw_timeout is not None and raw_timeout.strip():
+        try:
+            timeout = float(raw_timeout)
+        except ValueError:
+            raise ValueError("WORKBENCH_TIMEOUT must be a number of seconds.") from None
+    else:
+        timeout = float(default_timeout)
+    if not (math.isfinite(timeout) and timeout > 0):
+        raise ValueError("WORKBENCH_TIMEOUT must be a positive, finite number of seconds.")
+
+    return WorkbenchClientConfig(api_base=api_base, timeout=timeout, api_key=api_key)
+
+
 @dataclass(frozen=True)
 class ResolutionConfig:
     """Dataclass for entity-resolution clustering parameters.
