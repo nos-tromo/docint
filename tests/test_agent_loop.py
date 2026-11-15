@@ -3308,6 +3308,68 @@ def test_a_call_to_a_tool_the_turn_does_not_offer_gets_a_reply_but_no_step() -> 
     assert (progress, result.actions, result.steps) == ([], [], 1)
 
 
+# --- A turn's artifacts reach its result ------------------------------------------------------
+
+
+class _Analyst:
+    """A tool that keeps an artifact for the turn, as an analysis will."""
+
+    def __init__(self) -> None:
+        """Describe the tool."""
+        self.name = "analyst"
+        self.description = "Keep an artifact."
+        self.parameters: dict[str, Any] = {"type": "object", "properties": {}}
+        self.kept: list[dict[str, Any]] | None = None
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Answer without a fetch.
+
+        Args:
+            arguments (Mapping[str, Any]): Unused.
+            ctx (ToolContext): Unused.
+
+        Returns:
+            ToolReply | ToolWork: The work.
+        """
+
+        def _keep(fetched: Any, context: ToolContext) -> ToolReply:
+            """Put an artifact into the turn's context and say so.
+
+            Args:
+                fetched (Any): Nothing.
+                context (ToolContext): The turn's context.
+
+            Returns:
+                ToolReply: A plain reply.
+            """
+            context.artifacts.append({"title": "t"})
+            self.kept = context.artifacts
+            return ToolReply(text="Kept.", found=0, action=self.name, detail="", informative=True)
+
+        return ToolWork(detail="", fetch=None, answer=_keep)
+
+
+def test_a_turns_artifacts_reach_its_result() -> None:
+    """What a tool put into the turn's artifacts is the result's analyses, as a list of its own."""
+    llm = streaming_tool_llm([_calls(("call_a", "analyst", {})), _answer()])
+    analyst = _Analyst()
+
+    _, _, result = _drain(_turn(_loop(llm, ToolRegistry([analyst]))))
+
+    assert result.analyses == [{"title": "t"}]
+    assert result.analyses is not analyst.kept
+
+
+def test_a_turn_that_kept_no_artifact_has_no_analyses() -> None:
+    """The analyses default to none, so a result built without them, and a turn that kept none, agree."""
+    llm = streaming_tool_llm([_answer()])
+
+    _, _, result = _drain(_turn(_loop(llm, ToolRegistry([_Analyst()]))))
+
+    assert result.analyses == []
+    assert AgentResult(raw_text="", nodes=[], steps=0, actions=[], reason=None).analyses == []
+
+
 # --- Error replies name their kind, and a round logs them ----------------------------------
 
 

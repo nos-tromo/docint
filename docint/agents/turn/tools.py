@@ -74,6 +74,10 @@ ErrorKind = Literal[
     "late",
     "failed",
     "no_capacity",
+    "call_limit",
+    "code_failed",
+    "unavailable",
+    "too_much_data",
 ]
 """Why a call got an error reply, as the token the turn's log names it by.
 
@@ -81,7 +85,10 @@ ErrorKind = Literal[
 ``no_room``, ``no_time``, ``late``, ``failed`` and ``no_capacity`` are the round's, for a call
 it did not or could not run. The rest are the tools' own refusals of the arguments they were
 given; the keyword matcher's problems (``no_usable_word``, ``one_value_only``,
-``unindexable_word`` and ``long_word``) keep the names the matcher gives them.
+``unindexable_word`` and ``long_word``) keep the names the matcher gives them. ``call_limit``,
+``code_failed``, ``unavailable`` and ``too_much_data`` are the ``run_python`` tool's: a call past
+its limit, code that did not run to its end, an analysis service that gave no answer, and data
+too large to hand over. It reuses ``no_such_passage``, ``no_capacity`` and ``no_time``.
 """
 
 #: Longest main argument a reply carries for the turn's trail.
@@ -208,12 +215,20 @@ class ToolContext:
             as the grounded prompt does.
         answered (dict[tuple[str, str], _Answered]): The calls this turn has answered, by tool
             name and repeat key (see :func:`_repeat_key`); kept by the registry.
+        facts (list[dict[str, Any]]): What the turn's tools found out without admitting a passage,
+            one ``{action, detail, **trail}`` for each reply a tool's work answered with a trail, in
+            call order; kept by the registry (see :meth:`ToolRegistry.finish`). A reply answered
+            from memory or with an error adds none.
+        artifacts (list[dict[str, Any]]): What a tool made for the turn to keep beyond its reply,
+            appended by the tool's answer, in order; they reach :class:`~docint.agents.turn.loop.AgentResult`.
     """
 
     ledger: EvidenceLedger
     budget: TurnBudget
     llm_view: Callable[[BaseNode], BaseNode]
     answered: dict[tuple[str, str], _Answered] = field(default_factory=dict, init=False, repr=False, compare=False)
+    facts: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False, compare=False)
+    artifacts: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -247,7 +262,8 @@ class Tool(Protocol):
     arguments are a JSON object within ``MAX_ARGUMENT_DEPTH``, before :meth:`prepare` checks them,
     so it must cope with arguments that are missing or of the wrong type. ``None`` leaves the
     call to the default key, its arguments compared on one line and case-folded, as does a tool
-    without the method.
+    without the method. A tool may also define ``begin_round() -> None`` (see :class:`HasBeginRound`),
+    which :meth:`ToolRegistry.begin_round` calls once per round, ahead of the round's first call.
 
     Attributes:
         name (str): The name the model calls it by.
@@ -290,6 +306,18 @@ class HasRecallKey(Protocol):
         Returns:
             str | None: The string the call is remembered by, under the tool's name; ``None`` to
             leave the call to the default key.
+        """
+        ...
+
+
+@runtime_checkable
+class HasBeginRound(Protocol):
+    """A tool that wants to know when a round of calls begins: the optional ``begin_round`` of a :class:`Tool`."""
+
+    def begin_round(self) -> None:
+        """Start counting a new round of calls.
+
+        Runs on the loop thread, once per round, before the round's first call is prepared.
         """
         ...
 
@@ -774,6 +802,16 @@ class ToolRegistry:
         """
         return frozenset(self._tools)
 
+    def begin_round(self) -> None:
+        """Tell every offered tool that wants to know that a round of calls begins.
+
+        Runs on the loop thread, once per round, before the round's first call is prepared.
+        A tool without ``begin_round`` (see :class:`HasBeginRound`) is left alone.
+        """
+        for tool in self._tools.values():
+            if isinstance(tool, HasBeginRound):
+                tool.begin_round()
+
     def prepare(self, call: ToolCall, ctx: ToolContext) -> PreparedCall:
         """Check one call, and answer it at once or return the work it still needs.
 
@@ -843,7 +881,9 @@ class ToolRegistry:
         may have been answered since, and a read remembered from an earlier round is
         decided here, while its passage is unchanged. Either way the call is answered from
         memory, its own fetch discarded, never admitted again. Otherwise the work's answer
-        admits and renders, and a :class:`PassageReply` is remembered with a copy of its trail.
+        admits and renders; unless it is an error reply or carries no trail, it is also kept as
+        a fact of the turn (``ctx.facts``), and a :class:`PassageReply` is remembered with a
+        copy of its trail.
 
         Args:
             prepared (PreparedCall): The call, from :meth:`prepare`.
@@ -865,6 +905,8 @@ class ToolRegistry:
         if remembered is not None:
             return remembered
         reply = prepared.work.answer(fetched, ctx)
+        if reply.trail and not reply.error:
+            ctx.facts.append({"action": reply.action, "detail": reply.detail, **reply.trail})
         if isinstance(reply, PassageReply):
             states = tuple((number, _state(ctx.ledger, number)) for number in reply.depends_on)
             # A copy, so a tool that reuses and mutates one dict cannot rewrite earlier steps.
