@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from docint.utils.env_cfg import load_workbench_env
@@ -102,3 +104,20 @@ def test_the_timeout_must_be_a_positive_finite_number(monkeypatch: pytest.Monkey
     with pytest.raises(ValueError, match="WORKBENCH_TIMEOUT") as caught:
         load_workbench_env()
     assert raw not in str(caught.value)
+
+
+def test_the_settings_are_frozen() -> None:
+    """The process-wide client keeps its settings: nothing can change them after loading."""
+    cfg = load_workbench_env()
+    for name in ("api_base", "timeout", "api_key"):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(cfg, name, "http://elsewhere.test")
+
+
+def test_a_bad_timeout_error_carries_no_chained_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The float error, which quotes the raw value, is neither the cause nor shown as context."""
+    monkeypatch.setenv("WORKBENCH_TIMEOUT", "soon")
+    with pytest.raises(ValueError, match="WORKBENCH_TIMEOUT") as caught:
+        load_workbench_env()
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
