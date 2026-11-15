@@ -200,6 +200,31 @@ def _hermetic_edge_secret_env() -> Iterator[None]:
     mp.undo()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _hermetic_workbench_env() -> Iterator[None]:
+    """Keep a developer ``.env`` from switching the workbench tool on.
+
+    With ``WORKBENCH_API_KEY`` and ``WORKBENCH_API_BASE`` set, chat turns would
+    discover workbench over the network and offer ``run_python``. The variables
+    are cleared once for the whole session, before any fixture of a wider scope
+    builds the app, and the process-wide client is forgotten. Tests of the
+    client set them explicitly and clear ``workbench_client`` themselves. A
+    private ``MonkeyPatch`` for the reason :func:`_hermetic_hybrid_env` gives.
+
+    Yields:
+        None.
+    """
+    from docint.utils.workbench_client import workbench_client
+
+    mp = pytest.MonkeyPatch()
+    for name in ("WORKBENCH_API_KEY", "WORKBENCH_API_BASE", "WORKBENCH_TIMEOUT"):
+        mp.delenv(name, raising=False)
+    workbench_client.cache_clear()
+    yield
+    mp.undo()
+    workbench_client.cache_clear()
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_assessment_env() -> Iterator[None]:
     """Keep the assessment rule out of agent turns unless a test opts in.
