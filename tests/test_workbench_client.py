@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import base64
 import copy
+import gzip
 import hashlib
 import hmac
 import json
+import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -24,6 +26,7 @@ import httpx
 import pytest
 from _pytest.logging import LogCaptureFixture
 from loguru import logger
+from typing_extensions import override
 
 import docint.utils.workbench_client as wb
 from docint import __version__
@@ -31,6 +34,7 @@ from docint.utils.audit_forward import forwarding
 from docint.utils.audit_runtime import parse_purpose_header
 from docint.utils.env_cfg import WorkbenchClientConfig
 from docint.utils.workbench_client import (
+    MAX_ANSWER_BYTES,
     MAX_IMAGE_BYTES,
     META_CLIENT_CAPS,
     META_CLIENT_INFO,
@@ -50,6 +54,9 @@ from docint.utils.workbench_client import (
 
 KEY = "k" * 32
 CFG = WorkbenchClientConfig(api_base="http://workbench.test", timeout=75.0, api_key=KEY)
+# Reached through httpx's own transport, so the name is looked up (patched, never on the network).
+LOOKED_UP = WorkbenchClientConfig(api_base="http://workbench-api.test:8000", timeout=75.0, api_key=KEY)
+LOOKUP_S = 3.0
 JOB = "0" * 32
 CODE = "import json\nprint(len(json.load(open('passages.json'))))"
 DATA = (InlineFile(name="passages.json", content="[]"),)
@@ -258,6 +265,48 @@ def log_lines() -> Iterator[list[str]]:
 
 
 @pytest.fixture
+def slow_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every name lookup take LOOKUP_S, then fail, as on a host whose resolvers do not answer."""
+
+    def lookup(*_: Any, **__: Any) -> list[Any]:
+        time.sleep(LOOKUP_S)
+        raise socket.gaierror(socket.EAI_NONAME, "name not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+
+
+class EndlessStream(httpx.AsyncByteStream):
+    """An answer body that never ends, counting the chunks pulled from it.
+
+    A client that reads far past the cap is stopped by the stream itself, so a
+    regression fails the test instead of filling the memory.
+    """
+
+    GUARD = 4 * (MAX_ANSWER_BYTES // 65536 + 1)
+
+    def __init__(self) -> None:
+        """Start with nothing pulled."""
+        self.pulled = 0
+
+    @override
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield 64 KiB chunks for as long as they are asked for.
+
+        Yields:
+            bytes: One chunk of spaces.
+
+        Raises:
+            RuntimeError: Once a client has pulled far past the cap.
+        """
+        while True:
+            if self.pulled >= self.GUARD:
+                raise RuntimeError("the client read far past the cap")
+            self.pulled += 1
+            await anyio.sleep(0)
+            yield b" " * 65536
+
+
+@pytest.fixture
 def fresh_process_client() -> Iterator[None]:
     """Forget the process-wide client before and after the test."""
     wb.workbench_client.cache_clear()
@@ -355,6 +404,42 @@ def test_discovery_gives_up_after_five_seconds(monkeypatch: pytest.MonkeyPatch) 
     assert time.monotonic() - started < 0.9
 
 
+@pytest.mark.usefixtures("slow_lookup")
+def test_a_slow_name_lookup_holds_no_discovery_past_its_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lookup that outlasts the limit is abandoned; a turn waiting on the lock is not held either."""
+    monkeypatch.setattr(wb, "DISCOVERY_TIMEOUT_S", 0.2)
+    client = WorkbenchClient(LOOKED_UP, clock=FakeClock())
+    barrier = threading.Barrier(2)
+
+    def turn(_: int) -> tuple[Discovery | None, float]:
+        barrier.wait()
+        started = time.monotonic()
+        return client.discover(), time.monotonic() - started
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(turn, range(2)))
+    assert [found for found, _ in results] == [None, None]
+    assert max(elapsed for _, elapsed in results) < 1.5 < LOOKUP_S
+
+
+def test_a_turn_waits_for_a_discovery_no_longer_than_one_may_take(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever holds the single-flight lock, a waiting turn gives up after the limit and the grace."""
+    monkeypatch.setattr(wb, "DISCOVERY_TIMEOUT_S", 0.2)
+    door = FakeDoor()
+    client = _client(door)
+    found: list[Discovery | None] = []
+    waiting = threading.Thread(target=lambda: found.append(client.discover()), daemon=True)
+    assert client._flight.acquire()
+    try:
+        waiting.start()
+        waiting.join(timeout=1.5)
+    finally:
+        client._flight.release()
+    assert found == [None]
+    assert door.requests == []
+    assert client.discover() == DISCOVERED
+
+
 # --- requests ----------------------------------------------------------------
 
 
@@ -370,6 +455,7 @@ def test_every_request_states_the_modern_revision() -> None:
         assert request.headers["authorization"] == f"Bearer {KEY}"
         assert request.headers["content-type"] == "application/json"
         assert request.headers["accept"] == "application/json, text/event-stream"
+        assert request.headers["accept-encoding"] == "identity"
         assert request.headers["mcp-protocol-version"] == "2026-07-28"
         assert request.headers["mcp-method"] == body["method"]
         assert body["jsonrpc"] == "2.0"
@@ -458,6 +544,29 @@ def test_one_deadline_bounds_the_whole_call() -> None:
     assert result == RunFailure(kind="unavailable", token="timeout", job_id=None, answered=False)
 
 
+@pytest.mark.usefixtures("slow_lookup")
+def test_a_slow_name_lookup_holds_no_call_past_its_deadline() -> None:
+    """The deadline bounds the name lookup too: the caller is answered on time, the lookup abandoned."""
+    started = time.monotonic()
+    result = _run(WorkbenchClient(LOOKED_UP, clock=FakeClock()), timeout_s=0.3)
+    assert time.monotonic() - started < 1.5 < LOOKUP_S
+    assert result == RunFailure(kind="unavailable", token="timeout", job_id=None, answered=False)
+
+
+def test_the_client_works_inside_a_running_event_loop() -> None:
+    """A caller on an event loop's own thread can discover and call: no loop of its runs the exchange."""
+    door = FakeDoor()
+    client = _client(door)
+
+    async def turn() -> tuple[Discovery | None, RunResult | RunFailure]:
+        return client.discover(), _run(client)
+
+    found, result = anyio.run(turn)
+    assert found == DISCOVERED
+    assert isinstance(result, RunResult)
+    assert door.methods() == ["server/discover", "tools/list", "tools/call"]
+
+
 def test_the_phase_timeouts_stay_as_guards() -> None:
     """Connect, write and pool keep their own short limits inside the call's deadline."""
     assert _client(FakeDoor())._timeout(40.0) == httpx.Timeout(40.0, connect=3.0, write=10.0, pool=3.0)
@@ -484,6 +593,26 @@ def test_an_answer_that_is_not_one_small_json_rpc_message_is_unavailable(
     door = FakeDoor()
     door.answers["tools/call"] = httpx.Response(200, headers={"content-type": content_type}, content=body)
     assert _run(_client(door)) == RunFailure(kind="unavailable", token=token, job_id=None, answered=False)
+
+
+def test_the_cap_holds_while_the_answer_streams() -> None:
+    """An endless answer is cut once past 4 MiB: no more is pulled than the cap and one chunk."""
+    stream = EndlessStream()
+    door = FakeDoor()
+    door.answers["tools/call"] = httpx.Response(200, headers={"content-type": "application/json"}, stream=stream)
+    result = _run(_client(door), timeout_s=5.0)
+    assert result == RunFailure(kind="unavailable", token="answer_too_large", job_id=None, answered=False)
+    assert 0 < stream.pulled <= MAX_ANSWER_BYTES // 65536 + 1
+
+
+def test_a_compressed_answer_is_refused() -> None:
+    """The client asks for identity; an answer compressed anyway could inflate past the cap, so it is refused."""
+    door = FakeDoor()
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": _call_result()}).encode()
+    door.answers["tools/call"] = httpx.Response(
+        200, headers={"content-type": "application/json", "content-encoding": "gzip"}, content=gzip.compress(body)
+    )
+    assert _run(_client(door)) == RunFailure(kind="unavailable", token="encoded", job_id=None, answered=False)
 
 
 @pytest.mark.parametrize(
@@ -618,6 +747,32 @@ def test_the_version_falls_back_to_the_discovery() -> None:
     assert result.server_version == "0.2.1"
 
 
+@pytest.mark.parametrize(
+    ("version", "kept"),
+    [
+        ("0.2.0+build.7-rc1", "0.2.0+build.7-rc1"),
+        ("0.2.0\nforged line", ""),
+        ("0.2.0 beta", ""),
+        ("v" * 65, ""),
+        ("", ""),
+        (2, ""),
+    ],
+    ids=["version_shape", "newline", "space", "past_64", "empty", "not_a_string"],
+)
+def test_a_version_of_any_other_shape_is_dropped(version: object, kept: str) -> None:
+    """Only [0-9A-Za-z.+-]{1,64} is kept as workbench's version, from discovery and from a result alike."""
+    door = FakeDoor()
+    door.answers["server/discover"] = {**_discover_result(), "_meta": {META_SERVER_INFO: {"version": version}}}
+    answer = _call_result()
+    answer["_meta"] = {META_SERVER_INFO: {"version": version}}
+    door.answers["tools/call"] = answer
+    client = _client(door)
+    assert client.discover() == Discovery(cap_s=60, server_version=kept)
+    result = _run(client)
+    assert isinstance(result, RunResult)
+    assert result.server_version == kept
+
+
 def test_an_unreachable_call_or_a_refused_argument_drops_the_discovery() -> None:
     """No answer, a timeout, or invalid_arguments: the next turn discovers again. A busy door keeps it."""
     door = FakeDoor()
@@ -646,6 +801,27 @@ def test_an_unreachable_call_or_a_refused_argument_drops_the_discovery() -> None
     assert client.discover() == DISCOVERED
     assert door.methods()[-1] == "tools/call"
     assert door.methods().count("server/discover") == 4
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "drops"),
+    [
+        (-32022, "unsupported protocol version", True),
+        (-32602, "unknown tool", True),
+        (-32602, "invalid purpose", True),
+        (-32603, "internal error", False),
+    ],
+    ids=["unsupported_revision", "unknown_tool", "invalid_purpose", "internal_error"],
+)
+def test_a_stale_revision_or_an_invalid_request_drops_the_discovery(code: int, message: str, drops: bool) -> None:
+    """-32022 and every -32602 mean the discovery may be stale, whatever the text says; other errors keep it."""
+    door = FakeDoor()
+    client = _client(door)
+    assert client.discover() == DISCOVERED
+    door.answers["tools/call"] = RpcError(code, message, status=400)
+    assert _run(client) == RunFailure(kind="unavailable", token=f"jsonrpc:{code}", job_id=None, answered=True)
+    assert client.discover() == DISCOVERED
+    assert door.methods().count("server/discover") == (2 if drops else 1)
 
 
 # --- logging and hygiene -----------------------------------------------------
@@ -704,7 +880,8 @@ def test_the_log_holds_no_code_data_or_output(log_lines: list[str]) -> None:
         _run(client, code=code, data=data)
     assert len(door.requests) == 1 + len(answers)
     assert log_lines
-    assert not [line for line in log_lines if secret in line or secret.lower() in line]
+    forbidden = (secret, secret.lower(), "user-a", "session-1")
+    assert not [line for line in log_lines if any(value in line for value in forbidden)]
 
 
 class _SpyClient(httpx.AsyncClient):
@@ -737,6 +914,10 @@ def test_the_client_takes_no_proxy_from_the_environment(monkeypatch: pytest.Monk
     assert isinstance(_run(client), RunResult)
     assert len(_SpyClient.built) == 2
     assert all(built.trust_env is False for built in _SpyClient.built)
+    assert [built.timeout for built in _SpyClient.built] == [
+        httpx.Timeout(5.0, connect=3.0, write=10.0, pool=3.0),
+        httpx.Timeout(40.0, connect=3.0, write=10.0, pool=3.0),
+    ]
 
 
 @pytest.mark.usefixtures("fresh_process_client")

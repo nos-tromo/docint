@@ -3,9 +3,16 @@
 docint hands a turn's evidence to workbench, which runs the model's Python on
 it and returns tables (CSV) and charts (PNG). The client speaks MCP revision
 ``2026-07-28`` only, one JSON-RPC message per ``POST {WORKBENCH_API_BASE}/mcp``,
-and holds no MCP session. Each exchange is an ``anyio.run`` over a fresh
-``httpx.AsyncClient`` that takes no proxy from the environment, so the inline
-data cannot leave through one.
+and holds no MCP session. Each exchange (a discovery or a call) is an
+``anyio.run`` over a fresh ``httpx.AsyncClient`` that takes no proxy from the
+environment, so the inline data cannot leave through one. That event loop runs
+on a daemon thread of its own, and the caller waits for it at most the
+exchange's deadline plus half a second. ``anyio.run`` closes its loop by
+joining the thread where asyncio looks host names up, with no limit, so a slow
+lookup would otherwise hold the caller past any deadline; an abandoned lookup
+finishes on its own. The caller's thread never runs an event loop of the
+client's, so the client may be used from any context, a running event loop
+included.
 
 Discovery (``server/discover``, then ``tools/list``, within
 :data:`DISCOVERY_TIMEOUT_S` together) runs before a turn builds its tools,
@@ -13,8 +20,10 @@ single-flight. It succeeds only when workbench serves this revision and lists
 ``run_python`` with ``inputSchema.properties.time_limit_s.maximum``, the cap.
 Each result is cached for its own ``ttlMs``. A failure offers no tool and is
 tried again at most once per :data:`DISCOVERY_RETRY_S`. A call that gets no
-answer, or whose arguments are refused (a cap lowered since), drops the cache.
-Each change between discovered and not logs one line.
+answer, whose arguments are refused (a cap lowered since), or that is answered
+``-32022`` (a revision no longer served) or ``-32602`` (an unknown tool among
+others: the code decides, never the text) drops the cache. Each change between
+discovered and not logs one line.
 
 Identity reaches workbench only on ``tools/call`` and only as keyed
 pseudonyms: HMAC-SHA256 under the shared ``WORKBENCH_API_KEY`` over a label, a
@@ -22,16 +31,18 @@ NUL byte and the owner's name or the session id, as 64 hex digits. The stated
 purpose and request id go with it (``audit_forward``); unstated, the reason is
 ``docint chat``.
 
-An answer is read as a stream and refused past :data:`MAX_ANSWER_BYTES` or
-when it is not ``application/json``: workbench never streams, so SSE is
-refused although MCP asks clients to accept it. A refused run is mapped by its
-``structuredContent.reason`` token, never by its text. ``run_python`` never
-raises; a failure is a :class:`RunFailure` whose ``token`` is one of the
-reason tokens, ``jsonrpc:<code>``, or one of this client's own: ``timeout``,
-``unreachable``, ``not_json``, ``http:<status>``, ``answer_too_large``,
-``not_json_rpc``, ``incomplete``, ``bad_reason``, ``bad_result``,
-``bad_image``, ``not_configured``, ``error``. Discovery fails with the same
-tokens, or ``no_modern_revision`` and ``no_capped_run_python``.
+An answer is read as a stream and refused past :data:`MAX_ANSWER_BYTES`,
+when it is not ``application/json``, or when it is compressed (the client asks
+for ``identity``, so the cap counts the bytes received). workbench never
+streams, so SSE is refused although MCP asks clients to accept it. A refused
+run is mapped by its ``structuredContent.reason`` token, never by its text.
+``run_python`` never raises; a failure is a :class:`RunFailure` whose
+``token`` is one of the reason tokens, ``jsonrpc:<code>``, or one of this
+client's own: ``timeout``, ``unreachable``, ``not_json``, ``http:<status>``,
+``encoded``, ``answer_too_large``, ``not_json_rpc``, ``incomplete``,
+``bad_reason``, ``bad_result``, ``bad_image``, ``not_configured``, ``error``.
+Discovery fails with the same tokens, or ``no_modern_revision`` and
+``no_capped_run_python``.
 
 The log holds statuses, kinds and tokens, never code, data or output. A call
 is no ``ai_call``: it calls no model.
@@ -41,6 +52,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import concurrent.futures
 import functools
 import hashlib
 import hmac
@@ -51,9 +63,9 @@ import re
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import anyio
 import httpx
@@ -117,6 +129,8 @@ _SESSION_LABEL = b"workbench-session/v1"
 _CONNECT_S = 3.0
 _WRITE_S = 10.0
 _POOL_S = 3.0
+# How long past an exchange's deadline its caller waits for the exchange's thread.
+_GRACE_S = 0.5
 _REASON_KINDS: Mapping[str, FailureKind] = {
     "too_large": "too_much_data",
     "queue_full": "no_capacity",
@@ -124,12 +138,16 @@ _REASON_KINDS: Mapping[str, FailureKind] = {
     "executor_busy": "no_capacity",
     "not_completed": "code_failed",
 }
-# A call without an answer may mean workbench moved; refused arguments may mean a lowered cap.
-_DROPS_DISCOVERY = frozenset({"timeout", "unreachable", "invalid_arguments"})
+# A call without an answer may mean workbench moved; refused arguments may mean a lowered cap;
+# -32022 is a revision no longer served, and -32602 covers an unknown tool (mapped by code, never text).
+_DROPS_DISCOVERY = frozenset({"timeout", "unreachable", "invalid_arguments", "jsonrpc:-32022", "jsonrpc:-32602"})
 # A reason is logged, so only a token's shape passes: no sentence a server might put there.
 _TOKEN = re.compile(r"[a-z][a-z0-9_]{0,39}")
 _JOB_ID = re.compile(r"[0-9a-f]{32}")
-_VERSION_CHARS = 64
+# The version is logged and kept in an analysis's provenance, so only a version's shape passes.
+_VERSION = re.compile(r"[0-9A-Za-z.+-]{1,64}")
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -303,7 +321,7 @@ def _server_version(result: Mapping[str, Any]) -> str | None:
     meta = result.get("_meta")
     info = meta.get(META_SERVER_INFO) if isinstance(meta, dict) else None
     version = info.get("version") if isinstance(info, dict) else None
-    return version if isinstance(version, str) and 0 < len(version) <= _VERSION_CHARS else None
+    return version if isinstance(version, str) and _VERSION.fullmatch(version) else None
 
 
 def _cap_s(result: Mapping[str, Any]) -> int | None:
@@ -422,6 +440,34 @@ def _files(value: object) -> tuple[OutputFile, ...]:
     return tuple(files)
 
 
+def _detached(work: Callable[[], Awaitable[_T]], wait_s: float) -> _T:
+    """Run ``work`` in an event loop of its own on a daemon thread, and wait at most ``wait_s``.
+
+    Args:
+        work (Callable[[], Awaitable[_T]]): The exchange, bounded by its own deadline.
+        wait_s (float): Seconds to wait for the thread: the deadline plus :data:`_GRACE_S`.
+
+    Returns:
+        _T: What ``work`` returned.
+
+    Raises:
+        TimeoutError: When the thread has not finished in time. It is abandoned
+            and its late result dropped.
+    """
+    future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+
+    def exchange() -> None:
+        try:
+            future.set_result(anyio.run(work))
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    # A fresh context, not the caller's: a copy would carry the running loop's sniffio marker, and
+    # anyio.run would refuse. The exchange reads no context variable; its headers are built before.
+    threading.Thread(target=exchange, name="workbench-exchange", daemon=True).start()
+    return future.result(timeout=wait_s)
+
+
 class WorkbenchClient:
     """Discover workbench's ``run_python`` and call it, one exchange at a time."""
 
@@ -498,6 +544,7 @@ class WorkbenchClient:
             "Authorization": f"Bearer {self._cfg.api_key}",
             "Content-Type": "application/json",
             "Accept": _ACCEPT,
+            "Accept-Encoding": "identity",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
             "Mcp-Method": method,
             **(headers or {}),
@@ -507,6 +554,8 @@ class WorkbenchClient:
             media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
             if media_type != "application/json":
                 raise _Unusable(f"http:{response.status_code}" if response.is_error else "not_json")
+            if response.headers.get("content-encoding", "identity").strip().lower() not in {"", "identity"}:
+                raise _Unusable("encoded")
             raw = bytearray()
             async for chunk in response.aiter_bytes():
                 raw += chunk
@@ -519,8 +568,10 @@ class WorkbenchClient:
     def discover(self) -> Discovery | None:
         """Return the cached discovery, discovering first when a result has expired.
 
-        Concurrent callers wait for the one discovery in progress. A failure
-        is tried again at most once per :data:`DISCOVERY_RETRY_S`.
+        Concurrent callers wait for the one discovery in progress, never
+        longer than its limit plus half a second; a caller that would is
+        offered no tool on this turn. A failure is tried again at most once
+        per :data:`DISCOVERY_RETRY_S`.
 
         Returns:
             Discovery | None: The cap and the version, or ``None`` when
@@ -528,41 +579,56 @@ class WorkbenchClient:
         """
         if not self._cfg.enabled:
             return None
-        with self._flight:
-            now = self._clock()
-            server, tools = self._server, self._tools
-            server = server if server is not None and now < server.expires_at else None
-            tools = tools if tools is not None and now < tools.expires_at else None
-            if server is not None and tools is not None:
-                return Discovery(cap_s=tools.cap_s, server_version=server.version)
-            if self._retry_at is not None and now < self._retry_at:
-                return None
-            try:
-                fresh_server, fresh_tools = anyio.run(self._discover, server, tools, now)
-            except _Unusable as exc:
-                return self._discovery_failed(now, exc.token)
-            except (TimeoutError, httpx.TimeoutException):
-                return self._discovery_failed(now, "timeout")
-            except httpx.TransportError:
-                return self._discovery_failed(now, "unreachable")
-            except Exception as exc:
-                logger.warning("workbench discovery raised {}", type(exc).__name__)
-                return self._discovery_failed(now, "error")
-            # Only what was fetched is written back: a forget() meanwhile keeps its effect.
-            if fresh_server is not server:
-                self._server = fresh_server
-            if fresh_tools is not tools:
-                self._tools = fresh_tools
-            self._retry_at = None
-            found = Discovery(cap_s=fresh_tools.cap_s, server_version=fresh_server.version)
-            if self._up is not True:
-                self._up = True
-                logger.info(
-                    "workbench is discovered: run_python is offered, capped at {} s (workbench '{}')",
-                    found.cap_s,
-                    found.server_version,
-                )
-            return found
+        # The holder waits at most the same, so a turn is never held past discovery's own limit.
+        if not self._flight.acquire(timeout=DISCOVERY_TIMEOUT_S + _GRACE_S):
+            return None
+        try:
+            return self._discover_held()
+        finally:
+            self._flight.release()
+
+    def _discover_held(self) -> Discovery | None:
+        """Discover, holding the single-flight lock.
+
+        Returns:
+            Discovery | None: As :meth:`discover`.
+        """
+        now = self._clock()
+        server, tools = self._server, self._tools
+        server = server if server is not None and now < server.expires_at else None
+        tools = tools if tools is not None and now < tools.expires_at else None
+        if server is not None and tools is not None:
+            return Discovery(cap_s=tools.cap_s, server_version=server.version)
+        if self._retry_at is not None and now < self._retry_at:
+            return None
+        try:
+            fresh_server, fresh_tools = _detached(
+                lambda: self._discover(server, tools, now), DISCOVERY_TIMEOUT_S + _GRACE_S
+            )
+        except _Unusable as exc:
+            return self._discovery_failed(now, exc.token)
+        except (TimeoutError, httpx.TimeoutException):
+            return self._discovery_failed(now, "timeout")
+        except httpx.TransportError:
+            return self._discovery_failed(now, "unreachable")
+        except Exception as exc:
+            logger.warning("workbench discovery raised {}", type(exc).__name__)
+            return self._discovery_failed(now, "error")
+        # Only what was fetched is written back: a forget() meanwhile keeps its effect.
+        if fresh_server is not server:
+            self._server = fresh_server
+        if fresh_tools is not tools:
+            self._tools = fresh_tools
+        self._retry_at = None
+        found = Discovery(cap_s=fresh_tools.cap_s, server_version=fresh_server.version)
+        if self._up is not True:
+            self._up = True
+            logger.info(
+                "workbench is discovered: run_python is offered, capped at {} s (workbench '{}')",
+                found.cap_s,
+                found.server_version,
+            )
+        return found
 
     async def _discover(self, server: _Server | None, tools: _Tools | None, now: float) -> tuple[_Server, _Tools]:
         with anyio.fail_after(DISCOVERY_TIMEOUT_S):
@@ -616,7 +682,8 @@ class WorkbenchClient:
             time_limit_s (int): The run's limit at workbench, within the cap.
             owner (str): ``principal.effective_owner``; sent as its pseudonym.
             session_id (str): The chat session; sent as its pseudonym.
-            timeout_s (float): The deadline for the whole call, connect to last byte.
+            timeout_s (float): The deadline for the whole call, name lookup to last
+                byte. The caller is answered within it plus half a second.
 
         Returns:
             RunResult | RunFailure: What the run returned, or why there is nothing.
@@ -637,7 +704,10 @@ class WorkbenchClient:
                     "data": [{"name": item.name, "content": item.content} for item in data],
                     "time_limit_s": time_limit_s,
                 }
-                outcome = anyio.run(self._call, {"name": _TOOL, "arguments": arguments}, headers, timeout_s)
+                params = {"name": _TOOL, "arguments": arguments}
+                outcome = _detached(lambda: self._call(params, headers, timeout_s), timeout_s + _GRACE_S)
+        except TimeoutError:
+            outcome = RunFailure(kind="unavailable", token="timeout")
         except Exception as exc:
             logger.warning("workbench run_python raised {}", type(exc).__name__)
             outcome = RunFailure(kind="unavailable", token="error")
