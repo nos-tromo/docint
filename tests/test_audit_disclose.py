@@ -53,16 +53,39 @@ def test_a_disclosure_is_taken_as_it_stands() -> None:
         )
         lost = record_disclosure(point_ids=["p3"], passages=1, keyword_checks=0, topic_listings=0, data_bytes=900)
         record_disclosure(point_ids=["p4"], passages=1, keyword_checks=0, topic_listings=0, data_bytes=800)
-    done.answered("0" * 32)
+    done.answered(JOB)
     lost.unanswered()
 
     taken = ledger.take()
 
     assert [(r.outcome, r.job_id, r.incomplete) for r in taken] == [
-        ("ok", "0" * 32, False),
+        ("ok", JOB, False),
         ("error", None, False),
         ("error", None, True),
     ]
+    assert ledger.take() == []
+
+
+def test_an_answer_that_names_no_job_is_still_ok() -> None:
+    """An answer came, so the hand-over is ok; it names no workbench job, so the record names none."""
+    ledger = DisclosureLedger()
+    _hand_over(ledger, "p1").answered(None)
+
+    (record,) = ledger.take()
+
+    assert (record.outcome, record.job_id, record.incomplete) == ("ok", None, False)
+
+
+@pytest.mark.parametrize("point_ids", ["p1", b"p1"], ids=["str", "bytes"])
+def test_a_bare_string_is_no_list_of_point_ids(point_ids: str | bytes) -> None:
+    """A single id passed as text would become one id per character, so it is refused and nothing is recorded."""
+    ledger = DisclosureLedger()
+
+    with pytest.raises(TypeError):
+        ledger.add(point_ids=point_ids, passages=1, keyword_checks=0, topic_listings=0, data_bytes=10)  # type: ignore[arg-type]
+    with binding(ledger), pytest.raises(TypeError):
+        record_disclosure(point_ids=point_ids, passages=1, keyword_checks=0, topic_listings=0, data_bytes=10)  # type: ignore[arg-type]
+
     assert ledger.take() == []
 
 

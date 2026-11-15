@@ -78,9 +78,12 @@ class DisclosureRecord:
     incomplete: bool
 
 
-_FLYING = "flying"
-_ANSWERED = "answered"
-_UNANSWERED = "unanswered"
+_EntryState = Literal["flying", "answered", "unanswered"]
+"""How far a recorded call got: still in flight, answered, or ended without an answer."""
+
+_FLYING: _EntryState = "flying"
+_ANSWERED: _EntryState = "answered"
+_UNANSWERED: _EntryState = "unanswered"
 
 
 @dataclass
@@ -96,7 +99,7 @@ class _Entry:
     keyword_checks: int
     topic_listings: int
     data_bytes: int
-    state: str = _FLYING
+    state: _EntryState = _FLYING
     job_id: str | None = None
 
     def record(self) -> DisclosureRecord:
@@ -187,8 +190,11 @@ class DisclosureLedger:
             Disclosure: The handle to settle the call with.
 
         Raises:
+            TypeError: When ``point_ids`` is one string or bytes, which would become one id per character.
             DisclosureRefused: When the ledger is sealed.
         """
+        if isinstance(point_ids, (str, bytes)):
+            raise TypeError("point_ids must be a sequence of point ids, not a single string.")
         entry = _Entry(tuple(point_ids), passages, keyword_checks, topic_listings, data_bytes)
         with self._lock:
             if self._sealed:
@@ -228,14 +234,14 @@ class DisclosureLedger:
         self._pending = []
         return [entry.record() for entry in pending]
 
-    def _settle(self, entry: _Entry, state: str, job_id: str | None) -> None:
+    def _settle(self, entry: _Entry, state: _EntryState, job_id: str | None) -> None:
         """Settle a call, unless it was already settled.
 
         A call that was written has left the ledger, so settling it reaches no record.
 
         Args:
             entry (_Entry): The recorded call.
-            state (str): ``answered`` or ``unanswered``.
+            state (_EntryState): ``answered`` or ``unanswered``.
             job_id (str | None): The job an answer named.
         """
         with self._lock:
@@ -292,6 +298,7 @@ def record_disclosure(
         Disclosure: The handle to settle the call with.
 
     Raises:
+        TypeError: When ``point_ids`` is one string or bytes, which would become one id per character.
         DisclosureRefused: When no ledger is bound, or the bound one is sealed. The caller must
             then send nothing.
     """
