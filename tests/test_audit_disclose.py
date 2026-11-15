@@ -8,10 +8,10 @@ writes what is on it and seals it, after which no later call may send anything.
 from __future__ import annotations
 
 import contextvars
-import itertools
 import sys
 import threading
-from dataclasses import FrozenInstanceError
+import time
+from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
 
@@ -290,56 +290,89 @@ def test_the_seal_takes_and_closes_in_one_critical_section(monkeypatch: pytest.M
     assert lock.entered == 1
 
 
-def _race_the_seal(workers: int, enough: int) -> tuple[list[str], list[str], list[DisclosureRecord]]:
+#: How many disclosures a racing worker may try before it gives up unrefused, which is a failure.
+_RACE_TRIES = 5_000
+#: Seconds the race may take, from the workers' start to the last join, before it is a failure.
+_RACE_SECONDS = 20.0
+
+
+@dataclass
+class _Race:
+    """What a race between worker threads and the seal left behind.
+
+    Attributes:
+        accepted (list[str]): The points the ledger accepted.
+        written (list[str]): The points written by take and seal.
+        after (list[DisclosureRecord]): What a take after the seal returned.
+        refused (list[int]): The workers that stopped because the ledger refused them.
+        stuck (int): Workers still running at the deadline.
+    """
+
+    accepted: list[str]
+    written: list[str]
+    after: list[DisclosureRecord]
+    refused: list[int]
+    stuck: int
+
+
+def _race_the_seal(workers: int, enough: int) -> _Race:
     """Let worker threads record disclosures while the main thread takes and then seals the ledger.
+
+    Every wait is bounded, and a worker that is never refused stops after ``_RACE_TRIES``, so a
+    ledger that accepts after its seal fails the race instead of hanging it.
 
     Args:
         workers (int): Threads that record until one is refused.
         enough (int): Disclosures to accept before the seal.
 
     Returns:
-        tuple[list[str], list[str], list[DisclosureRecord]]: The points the ledger accepted, the
-        points written by take and seal, and what a take after the seal returns.
+        _Race: What the race left behind.
     """
     ledger = DisclosureLedger()
-    started = threading.Barrier(workers + 1)
+    deadline = time.monotonic() + _RACE_SECONDS
+    started = threading.Barrier(workers + 1, timeout=_RACE_SECONDS)
     accepted: list[str] = []
-    accepted_lock = threading.Lock()
+    refused: list[int] = []
+    guard = threading.Lock()
 
     def work(worker: int) -> None:
         started.wait()
-        for number in itertools.count():
+        for number in range(_RACE_TRIES):
             point = f"w{worker}-{number}"
             try:
                 handle = _hand_over(ledger, point)
             except DisclosureRefused:
+                with guard:
+                    refused.append(worker)
                 return
             handle.answered(JOB)
-            with accepted_lock:
+            with guard:
                 accepted.append(point)
 
-    threads = [threading.Thread(target=work, args=(worker,)) for worker in range(workers)]
+    threads = [threading.Thread(target=work, args=(worker,), daemon=True) for worker in range(workers)]
     for thread in threads:
         thread.start()
     started.wait()
     written: list[str] = []
-    while len(accepted) < enough:
+    while len(accepted) < enough and time.monotonic() < deadline:
         written.extend(point for record in ledger.take() for point in record.point_ids)
     written.extend(point for record in ledger.seal() for point in record.point_ids)
     for thread in threads:
-        thread.join()
-    return accepted, written, ledger.take()
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return _Race(accepted, written, ledger.take(), refused, stuck=sum(thread.is_alive() for thread in threads))
 
 
 def test_calls_racing_the_seal_are_written_once_or_refused() -> None:
-    """Under contention every accepted call is written exactly once, and none is accepted after the seal wrote."""
+    """Under contention every accepted call is written exactly once, and every worker ends refused."""
     interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
     try:
         for _ in range(10):
-            accepted, written, after = _race_the_seal(workers=6, enough=100)
+            race = _race_the_seal(workers=6, enough=100)
 
-            assert after == []
-            assert sorted(written) == sorted(accepted)
+            assert race.stuck == 0
+            assert sorted(race.refused) == list(range(6))
+            assert race.after == []
+            assert sorted(race.written) == sorted(race.accepted)
     finally:
         sys.setswitchinterval(interval)
