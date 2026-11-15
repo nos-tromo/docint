@@ -1556,6 +1556,51 @@ def test_an_answer_the_trail_does_not_show_adds_no_fact(reply: ToolReply) -> Non
     assert ctx.facts == []
 
 
+def test_a_facts_head_wins_over_a_trail_that_names_the_same_keys() -> None:
+    """A trail with its own action and detail keys cannot rename the fact: the tool's head stands, the rest is kept."""
+    ctx = tool_context()
+    reply = ToolReply(
+        text="Done.",
+        found=0,
+        action="answering",
+        detail="Hafenfest",
+        trail={"action": "x", "detail": "y", "field": "text"},
+    )
+
+    ToolRegistry([_Answering(reply)]).call(tool_call("answering"), ctx)
+
+    assert ctx.facts == [{"action": "answering", "detail": "Hafenfest", "field": "text"}]
+
+
+@pytest.mark.parametrize("keyword_first", [True, False], ids=["keyword-then-topics", "topics-then-keyword"])
+def test_facts_keep_the_order_of_the_calls(keyword_first: bool) -> None:
+    """Two different fresh calls of one turn leave two facts, in the order they were made, whichever tool comes first.
+
+    Args:
+        keyword_first (bool): Whether the keyword count is called before the topics listing.
+    """
+    ctx = tool_context()
+    line = TopicLine(topic_id=4, label="Hafenfest und Stände", keywords=("hafenfest", "stände"), size=120)
+    listing = TopicsListing(lines=(line,), total=400)
+    topics = TopicsTool(TopicsSource(listing=lambda: listing, passages=lambda topic_id: None))
+    registry = ToolRegistry([_hafenfest_count(), topics])
+    keyword = tool_call("keyword", words="Hafenfest")
+    listed = tool_call("topics")
+    count = {"action": "keyword", "detail": "Hafenfest", "field": "text", "matches": 3}
+    listing_fact = {
+        "action": "topics",
+        "detail": "",
+        "total": 400,
+        "filtered": False,
+        "topics": [[4, "Hafenfest und Stände", 120]],
+    }
+
+    for call in (keyword, listed) if keyword_first else (listed, keyword):
+        registry.call(call, ctx)
+
+    assert ctx.facts == ([count, listing_fact] if keyword_first else [listing_fact, count])
+
+
 class _Rounds:
     """A tool that notes when a round begins and when it prepares a call, so their order shows."""
 

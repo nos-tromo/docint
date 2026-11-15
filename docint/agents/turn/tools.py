@@ -148,7 +148,8 @@ class ToolReply:
             copied verbatim; a key may hold ``None`` on purpose, as a failed count's ``matches``
             does. Its values must be JSON values (str, int, float, bool, ``None``, or lists of
             them, as a topics listing's ``topics`` is), since the stored step is persisted with
-            ``json.dumps``. ``None`` for none.
+            ``json.dumps``. It also becomes the body of a turn fact (``ToolContext.facts``), after
+            the call's own ``action`` and ``detail``, which it never replaces. ``None`` for none.
         kind (str): Why the call was not answered, an :data:`ErrorKind` token, on every
             :func:`error_reply`; empty on any other reply. The turn logs it in place of the
             call's arguments.
@@ -318,6 +319,7 @@ class HasBeginRound(Protocol):
         """Start counting a new round of calls.
 
         Runs on the loop thread, once per round, before the round's first call is prepared.
+        It must not raise: no guard catches it, so an error here would escape the round.
         """
         ...
 
@@ -906,7 +908,9 @@ class ToolRegistry:
             return remembered
         reply = prepared.work.answer(fetched, ctx)
         if reply.trail and not reply.error:
-            ctx.facts.append({"action": reply.action, "detail": reply.detail, **reply.trail})
+            fact: dict[str, Any] = {"action": reply.action, "detail": reply.detail}
+            fact.update((key, value) for key, value in reply.trail.items() if key not in fact)
+            ctx.facts.append(fact)
         if isinstance(reply, PassageReply):
             states = tuple((number, _state(ctx.ledger, number)) for number in reply.depends_on)
             # A copy, so a tool that reuses and mutates one dict cannot rewrite earlier steps.

@@ -306,16 +306,6 @@ class EndlessStream(httpx.AsyncByteStream):
             yield b" " * 65536
 
 
-@pytest.fixture
-def fresh_process_client() -> Iterator[None]:
-    """Forget the process-wide client before and after the test."""
-    wb.workbench_client.cache_clear()
-    try:
-        yield
-    finally:
-        wb.workbench_client.cache_clear()
-
-
 # --- discovery ---------------------------------------------------------------
 
 
@@ -920,7 +910,6 @@ def test_the_client_takes_no_proxy_from_the_environment(monkeypatch: pytest.Monk
     ]
 
 
-@pytest.mark.usefixtures("fresh_process_client")
 def test_without_a_key_there_is_no_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """The process-wide client exists only while a key and a base are set, and is built once."""
     monkeypatch.setenv("WORKBENCH_API_BASE", "http://workbench.test")
