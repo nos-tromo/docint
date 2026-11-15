@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
-import httpx
+import httpx2
 import openai
 import pytest
 
@@ -45,8 +45,8 @@ def _status_error(status_code: int, message: str) -> openai.APIStatusError:
     Returns:
         openai.APIStatusError: The error.
     """
-    request = httpx.Request("POST", "http://inference.invalid/v1/chat/completions")
-    return openai.APIStatusError(message, response=httpx.Response(status_code, request=request), body=None)
+    request = httpx2.Request("POST", "http://inference.invalid/v1/chat/completions")
+    return openai.APIStatusError(message, response=httpx2.Response(status_code, request=request), body=None)
 
 
 # ---------------------------------------------------------------------------

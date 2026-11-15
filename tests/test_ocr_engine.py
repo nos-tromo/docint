@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from openai import APIConnectionError, APITimeoutError, InternalServerError
 from PIL import Image as PILImage
@@ -51,16 +51,16 @@ DOTS_PAGE = json.dumps(
 
 
 def _http_500() -> InternalServerError:
-    request = httpx.Request("POST", _ENDPOINT)
-    return InternalServerError("Error code: 500", response=httpx.Response(500, request=request), body=None)
+    request = httpx2.Request("POST", _ENDPOINT)
+    return InternalServerError("Error code: 500", response=httpx2.Response(500, request=request), body=None)
 
 
 def _timeout() -> APITimeoutError:
-    return APITimeoutError(request=httpx.Request("POST", _ENDPOINT))
+    return APITimeoutError(request=httpx2.Request("POST", _ENDPOINT))
 
 
 def _connection_error() -> APIConnectionError:
-    return APIConnectionError(request=httpx.Request("POST", _ENDPOINT))
+    return APIConnectionError(request=httpx2.Request("POST", _ENDPOINT))
 
 
 def _response(content: str) -> MagicMock:

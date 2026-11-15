@@ -1025,10 +1025,10 @@ def _status_error(exc_type: type[Any], status: int, body: dict[str, Any]) -> Exc
     Returns:
         Exception: A real ``openai`` status error, not a stand-in.
     """
-    import httpx
+    import httpx2
 
-    request = httpx.Request("POST", "http://embed-only:8000/embeddings")
-    response = httpx.Response(status, request=request, json=body)
+    request = httpx2.Request("POST", "http://embed-only:8000/embeddings")
+    response = httpx2.Response(status, request=request, json=body)
     # Mirrors the SDK's own `_make_status_error_from_response`, which folds
     # the decoded body into the message — that text is what the
     # context-limit detector reads.
@@ -1082,7 +1082,7 @@ def test_text_embedding_connection_failure_names_the_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unreachable endpoint must name itself, not just "connection error"."""
-    import httpx
+    import httpx2
 
     from docint.utils.openai_cfg import EmbeddingEndpointError
 
@@ -1099,7 +1099,7 @@ def test_text_embedding_connection_failure_names_the_endpoint(
         _ = (self, texts)
         from openai import APIConnectionError
 
-        raise APIConnectionError(request=httpx.Request("POST", "http://embed-only:8000/embeddings"))
+        raise APIConnectionError(request=httpx2.Request("POST", "http://embed-only:8000/embeddings"))
 
     monkeypatch.setattr(
         "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",

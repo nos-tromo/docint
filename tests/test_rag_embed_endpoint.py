@@ -106,14 +106,14 @@ def test_probe_raises_when_the_embed_endpoint_cannot_serve(
             NotFoundError: Always.
         """
         _ = (self, query)
-        import httpx
+        import httpx2
         from openai import NotFoundError
 
-        request = httpx.Request("POST", "http://embed-only:8000/embeddings")
+        request = httpx2.Request("POST", "http://embed-only:8000/embeddings")
         body = {"detail": "Not Found"}
         raise NotFoundError(
             f"Error code: 404 - {body}",
-            response=httpx.Response(404, request=request, json=body),
+            response=httpx2.Response(404, request=request, json=body),
             body=body,
         )
 

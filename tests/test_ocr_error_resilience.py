@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from openai import APIConnectionError, APITimeoutError, InternalServerError
 from PIL import Image as PILImage
@@ -33,8 +33,8 @@ def _http_500() -> InternalServerError:
     Returns:
         InternalServerError: The SDK's wrapper around a 500 response.
     """
-    request = httpx.Request("POST", "http://ollama:11434/v1/chat/completions")
-    response = httpx.Response(500, request=request, json={"error": "Internal Server Error (ref: test)"})
+    request = httpx2.Request("POST", "http://ollama:11434/v1/chat/completions")
+    response = httpx2.Response(500, request=request, json={"error": "Internal Server Error (ref: test)"})
     return InternalServerError("Error code: 500", response=response, body=None)
 
 
@@ -44,7 +44,7 @@ def _timeout() -> APITimeoutError:
     Returns:
         APITimeoutError: The SDK's timeout error.
     """
-    return APITimeoutError(request=httpx.Request("POST", "http://ollama:11434/v1/chat/completions"))
+    return APITimeoutError(request=httpx2.Request("POST", "http://ollama:11434/v1/chat/completions"))
 
 
 def _connection_error() -> APIConnectionError:
@@ -53,7 +53,7 @@ def _connection_error() -> APIConnectionError:
     Returns:
         APIConnectionError: The SDK's connection error.
     """
-    return APIConnectionError(request=httpx.Request("POST", "http://ollama:11434/v1/chat/completions"))
+    return APIConnectionError(request=httpx2.Request("POST", "http://ollama:11434/v1/chat/completions"))
 
 
 def _build_engine() -> DocumentOcrEngine:
