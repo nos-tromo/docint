@@ -932,3 +932,16 @@ def test_without_a_key_there_is_no_client(monkeypatch: pytest.MonkeyPatch) -> No
     client = wb.workbench_client()
     assert isinstance(client, WorkbenchClient)
     assert wb.workbench_client() is client
+
+
+def test_a_client_built_for_one_test_is_forgotten_after_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Part one of a pair: build the process-wide client under this test's env and leave it cached."""
+    monkeypatch.setenv("WORKBENCH_API_BASE", "http://one.test")
+    monkeypatch.setenv("WORKBENCH_API_KEY", KEY)
+
+    assert isinstance(wb.workbench_client(), WorkbenchClient)
+
+
+def test_the_next_test_finds_no_client_of_the_one_before() -> None:
+    """Part two of the pair: no key is set here, so no client exists, whatever the test before built."""
+    assert wb.workbench_client() is None

@@ -226,6 +226,24 @@ def _hermetic_workbench_env() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _fresh_workbench_client() -> Iterator[None]:
+    """Forget the process-wide workbench client before and after every test.
+
+    The client is built once from the environment of the first call. One built under a test's
+    ``WORKBENCH_*`` variables would otherwise outlive its ``monkeypatch`` and answer the next
+    test, which set others.
+
+    Yields:
+        None.
+    """
+    from docint.utils.workbench_client import workbench_client
+
+    workbench_client.cache_clear()
+    yield
+    workbench_client.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_assessment_env() -> Iterator[None]:
     """Keep the assessment rule out of agent turns unless a test opts in.
 
