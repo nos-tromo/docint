@@ -76,6 +76,7 @@ export type AgentAction =
   | 'read'
   | 'keyword'
   | 'topics'
+  | 'run_python'
 
 /** One step of an agent turn, streamed as an `{agent}` frame. */
 export interface AgentStep {
@@ -84,8 +85,8 @@ export interface AgentStep {
   /**
    * The search's words, the image search's cues or the keyword check's words; the
    * clip, with ` #n` when one frame was asked for; the passage number read; the topic
-   * read (`T12`); or the note's text. Empty for `seed`, `carried`, `answer` and a
-   * listing of the topics.
+   * read (`T12`); the title a `run_python` run was given, empty for none; or the note's
+   * text. Empty for `seed`, `carried`, `answer` and a listing of the topics.
    */
   detail: string
   found: number
@@ -125,6 +126,66 @@ export interface AgentTrail {
   shortened?: number
   /** Where an assessment's source-backed part ends; absent on a lookup. */
   evidence_chars?: number | null
+}
+
+/** One table an analysis kept: its header, at most 500 rows of cells cut to 500 characters, and how many rows there were. */
+export interface AnalysisTable {
+  name: string
+  columns: string[]
+  rows: string[][]
+  row_count: number
+  truncated: boolean
+}
+
+/** One chart an analysis kept: a PNG as a data URI. */
+export interface AnalysisChart {
+  name: string
+  data_uri: string
+  bytes: number
+}
+
+/** A passage an analysis was computed from; the number is the one the answer cites it by. */
+export interface AnalysisSource {
+  citation_index: number
+  chunk_id: string
+  file_hash: string | null
+  filename: string | null
+  page: number | null
+}
+
+/**
+ * What a `run_python` run kept: tables, charts, the code behind them and where they came from.
+ * Its text fields come from sandbox output steered by retrieved passages, so they are shown as text only.
+ */
+export interface Analysis {
+  id: string
+  schema: 1
+  title: string
+  question: string
+  code: string
+  stdout: string
+  tables: AnalysisTable[]
+  charts: AnalysisChart[]
+  provenance: {
+    session_id: string
+    turn_idx: number
+    /** The caller's own name for the collection, set when the analysis is served. */
+    collection: string | null
+    sources: AnalysisSource[]
+    inputs: { passages: number; keyword_checks: number; topic_listings: number }
+    workbench: { job_id: string; version: string; tool: string }
+    created_at: string
+  }
+}
+
+/** An analysis as a session's history describes it: shapes only, its data read through `GET /sessions/{id}/analyses/{id}`. */
+export interface AnalysisSummary {
+  id: string
+  /** From 1: the number the user sees it by, as Analysis 1. */
+  index: number
+  title: string | null
+  tables: { name: string; columns: number; rows: number }[]
+  charts: { name: string; bytes: number }[]
 }
 
 export interface ChatFinalEvent extends ValidationFields {
@@ -169,6 +230,8 @@ export interface ChatFinalEvent extends ValidationFields {
   answer_mode?: AnswerMode
   /** What an agent turn did, or why it handed a plain answer over (`tools_unavailable`). Absent otherwise. */
   agent?: AgentTrail | null
+  /** The analyses a turn's `run_python` runs kept, in full; a reloaded turn carries `AnalysisSummary`s. */
+  analyses?: Array<Analysis | AnalysisSummary>
 }
 
 /** A rule targets either one `field` or several `fields`; with several, it
@@ -335,6 +398,8 @@ export interface SessionMessage extends Partial<ValidationFields> {
   answer_mode?: AnswerMode
   /** The agent turn's trail. */
   agent?: AgentTrail | null
+  /** The turn's analyses, described by their shape; absent for a turn that kept none. */
+  analyses?: AnalysisSummary[]
   /**
    * The evidence the turn answered under. Absent — not `all` — for a scoped
    * turn and for one recorded before the target was stored.
@@ -539,7 +604,13 @@ export interface HateSpeechRow {
 }
 
 // --- Report builder ---
-export type ArtifactType = 'chat_answer' | 'entity_finding' | 'hate_speech_finding' | 'summary' | 'topics'
+export type ArtifactType =
+  | 'chat_answer'
+  | 'entity_finding'
+  | 'hate_speech_finding'
+  | 'summary'
+  | 'topics'
+  | 'analysis'
 
 export type ReportExportFormat = 'md' | 'html' | 'pdf' | 'json' | 'zip'
 

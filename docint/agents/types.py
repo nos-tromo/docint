@@ -7,7 +7,17 @@ AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
 AgentAction = Literal[
-    "seed", "carried", "search", "answer", "note", "search_images", "keyframes", "keyword", "topics", "read"
+    "seed",
+    "carried",
+    "search",
+    "answer",
+    "note",
+    "search_images",
+    "keyframes",
+    "keyword",
+    "topics",
+    "read",
+    "run_python",
 ]
 """What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
 round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages, and

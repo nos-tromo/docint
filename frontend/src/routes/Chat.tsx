@@ -289,6 +289,7 @@ export function Chat() {
                 retry_query: m.retry_query,
                 answer_mode: m.answer_mode,
                 agent: m.agent,
+                analyses: m.analyses,
                 retrieval_target: m.retrieval_target
               } as ChatFinalEvent)
             : null

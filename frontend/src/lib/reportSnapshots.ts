@@ -118,6 +118,17 @@ export function entityFindingSnapshot(
   }
 }
 
+/**
+ * An analysis as a report item: its id alone. The server builds the snapshot from the stored row,
+ * so nothing else the browser holds of it is sent.
+ *
+ * @param id - The analysis's id.
+ * @returns The report item.
+ */
+export function analysisReportItem(id: string): ReportItemInput {
+  return { artifact_type: 'analysis', dedupe_key: `analysis:${id}`, snapshot: { analysis_id: id } }
+}
+
 export function summarySnapshot(params: { collection: string; text: string }): ReportItemInput {
   return {
     artifact_type: 'summary',

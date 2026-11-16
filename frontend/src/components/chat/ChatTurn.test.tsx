@@ -2,7 +2,7 @@ import type { ReactElement } from 'react'
 import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { DocumentsIcon, ImageIcon, LayersIcon, SearchIcon } from '@infra/ui'
+import { DocumentsIcon, ImageIcon, LayersIcon, PlayIcon, SearchIcon } from '@infra/ui'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatTurn, type ChatTurnData } from './ChatTurn'
@@ -10,6 +10,7 @@ import type { AgentReason, AgentStep, AgentTrail, ChatFinalEvent } from '@/api/t
 import { en } from '@/i18n/en'
 import { LanguageContext } from '@/i18n/LanguageContext'
 import { useUiStore } from '@/stores/ui'
+import { ANALYSIS } from '@/test/analysis'
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
@@ -1086,6 +1087,94 @@ describe('ChatTurn', () => {
     renderTurn({ user: 'q', assistant: '', done: false, meta: null, agentSteps: [unknown] })
 
     expect(screen.getByTestId('agent-trail-live')).toHaveTextContent('Hafen')
+  })
+
+  it.each([
+    ['en', ['Ran Python: Posts per author', 'Ran Python on the passages']],
+    ['de', ['Python ausgeführt: Posts per author', 'Python auf den Passagen ausgeführt']]
+  ] as const)('labels a run_python step by its title, or without one, in %s', (lang, labels) => {
+    renderTurn(
+      {
+        user: 'q',
+        assistant: '',
+        done: false,
+        meta: null,
+        agentSteps: [
+          { step: 1, action: 'run_python', detail: 'Posts per author', found: 0 },
+          { step: 2, action: 'run_python', detail: '', found: 0 }
+        ]
+      },
+      lang
+    )
+
+    expect(trailRows('agent-trail-live')).toEqual(labels)
+  })
+
+  it('labels a run_python step and draws it with PlayIcon', () => {
+    renderTurn({
+      user: 'q',
+      assistant: '',
+      done: false,
+      meta: null,
+      agentSteps: [
+        { step: 1, action: 'search', detail: 'Hafen', found: 1 },
+        { step: 1, action: 'run_python', detail: 'Posts per author', found: 0 }
+      ]
+    })
+
+    const [search, python] = within(screen.getByTestId('agent-trail-live')).getAllByRole('listitem')
+    expect(python).toHaveTextContent('Ran Python: Posts per author')
+    expect(python.querySelector('svg')?.innerHTML).toBe(innerMarkup(<PlayIcon />))
+    expect(python.querySelector('svg')?.innerHTML).not.toBe(search.querySelector('svg')?.innerHTML)
+  })
+
+  it('keeps a run_python step in a finished trail', async () => {
+    const stored: AgentTrail = {
+      ...LOOKUP_TRAIL,
+      actions: [{ action: 'run_python', detail: 'Posts per author', found: 0 }]
+    }
+    renderTurn({ user: 'q', assistant: 'Done.', done: true, meta: lookupMeta(stored) })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+
+    expect(trailRows('agent-trail')).toEqual(['Ran Python: Posts per author'])
+  })
+
+  it('shows each analysis below the answer', () => {
+    const meta = { ...lookupMeta(), analyses: [ANALYSIS] }
+    renderTurn({ user: 'q', assistant: 'Alice posted most [1].', done: true, meta }, 'en', { sessionId: 'session-1' })
+
+    const answer = screen.getByText('Alice posted most [1].')
+    const card = screen.getByTestId('analysis-card')
+    expect(within(card).getByText('Posts per author')).toBeInTheDocument()
+    expect(answer.compareDocumentPosition(card)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('numbers an untitled analysis by its place among the turn’s', () => {
+    const meta = { ...lookupMeta(), analyses: [ANALYSIS, { ...ANALYSIS, id: 'a2', title: '' }] }
+    renderTurn({ user: 'q', assistant: 'Two runs.', done: true, meta }, 'en', { sessionId: 'session-1' })
+
+    const cards = screen.getAllByTestId('analysis-card')
+    expect(cards).toHaveLength(2)
+    expect(within(cards[1]).getByText('Analysis 2')).toBeInTheDocument()
+  })
+
+  it('shows an analysis the report already holds as added', () => {
+    const meta = { ...lookupMeta(), analyses: [ANALYSIS] }
+    renderTurn({ user: 'q', assistant: 'Alice.', done: true, meta }, 'en', {
+      sessionId: 'session-1',
+      turnIdx: 0,
+      reportDedupeKeys: new Set(['analysis:a1'])
+    })
+
+    const card = screen.getByTestId('analysis-card')
+    expect(within(card).getByRole('button', { name: 'In report' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('shows no analysis card on a turn that kept none', () => {
+    renderTurn({ user: 'q', assistant: 'Alice.', done: true, meta: lookupMeta() })
+
+    expect(screen.queryByTestId('analysis-card')).not.toBeInTheDocument()
   })
 
   it('draws a seed as passages, as a read is, never as a search', () => {
