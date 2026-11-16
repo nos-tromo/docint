@@ -108,6 +108,16 @@ def report_item_sources(artifact_type: str, snapshot: Mapping[str, Any]) -> tupl
     if artifact_type in {"entity_finding", "hate_speech_finding"}:
         chunk = str(snapshot.get("chunk_id") or "").strip()
         return set(), ({chunk} if chunk else set()), not chunk
+    if artifact_type == "analysis":
+        provenance = snapshot.get("provenance")
+        sources = provenance.get("sources") if isinstance(provenance, Mapping) else None
+        found = {
+            str(source.get("file_hash") or "").strip()
+            for source in (sources if isinstance(sources, list) else [])
+            if isinstance(source, Mapping)
+        }
+        found.discard("")
+        return found, set(), not found
     return set(), set(), True
 
 

@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -60,7 +61,7 @@ from docint.agents.history import build_prior_turn
 from docint.agents.turn.keyword import KEYWORD_CHECKS_CHARS, render_keyword_checks
 from docint.agents.turn.probe import probe_tools
 from docint.agents.turn.topics import TOPIC_CHECKS_CHARS, render_topic_checks
-from docint.agents.turn.workbench_tool import ANALYSIS_CHECKS_CHARS, render_analysis_checks
+from docint.agents.turn.workbench_tool import ANALYSIS_CHECKS_CHARS, CHART_BYTES, CHARTS_BYTES, render_analysis_checks
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
 from docint.core import audit, audit_ingest
@@ -5900,6 +5901,66 @@ def delete_report(
     return {"ok": True}
 
 
+_ANALYSIS_CHART = re.compile(r"data:image/png;base64,[A-Za-z0-9+/]+={0,2}")
+
+
+def _chart_bytes(chart: Any) -> int | None:
+    """Measure a stored chart, or refuse it.
+
+    Args:
+        chart (Any): One entry of a stored analysis's ``charts``.
+
+    Returns:
+        int | None: The decoded size of its PNG data URI; ``None`` for anything else, or base64 that is not padded.
+    """
+    uri = chart.get("data_uri") if isinstance(chart, Mapping) else None
+    if not isinstance(uri, str) or not _ANALYSIS_CHART.fullmatch(uri):
+        return None
+    encoded = uri.partition(",")[2]
+    return None if len(encoded) % 4 else len(encoded) // 4 * 3 - encoded.count("=")
+
+
+def _analysis_item(
+    raw: Mapping[str, Any], report: Mapping[str, Any], principal: Principal
+) -> tuple[str, dict[str, Any]]:
+    """Build a report item for a stored analysis, from its stored row alone.
+
+    The request names the analysis by id and nothing else is read from it: the caller must own the
+    analysis, its session must be pinned to the report's collection, and its charts must be PNG data
+    URIs within the caps. Every refusal is the same 404.
+
+    Args:
+        raw (Mapping[str, Any]): The request's snapshot; only ``analysis_id`` is read.
+        report (Mapping[str, Any]): The owned report the item is added to.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        tuple[str, dict[str, Any]]: The item's dedupe key and its snapshot.
+
+    Raises:
+        HTTPException: 404 when the analysis is not found for the caller in the report's collection, or
+            a chart is not a PNG data URI within the caps.
+    """
+    missing = HTTPException(status_code=404, detail="Analysis not found.")
+    analysis_id = raw.get("analysis_id")
+    if not isinstance(analysis_id, str) or not analysis_id:
+        raise missing
+    owner = principal.effective_owner
+    logical = str(report.get("collection_name") or "")
+    physical = rag.ensure_collection_owner_manager().resolve(owner, logical)
+    found = rag.ensure_session_manager().find_analysis(analysis_id, owner)
+    if physical is None or found is None or found[1] != physical:
+        raise missing
+    stored = found[0]
+    charts = stored.get("charts") or []
+    if not isinstance(charts, list):
+        raise missing
+    sizes = [_chart_bytes(chart) for chart in charts]
+    if any(size is None or size > CHART_BYTES for size in sizes) or sum(size or 0 for size in sizes) > CHARTS_BYTES:
+        raise missing
+    return f"analysis:{analysis_id}", served_analysis(stored, logical)
+
+
 @app.post("/reports/{report_id}/items", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def add_report_item(
     report_id: int,
@@ -5923,15 +5984,20 @@ def add_report_item(
         dict[str, Any]: The added (or pre-existing) item.
 
     Raises:
-        HTTPException: 404 when the report is missing or not owned.
+        HTTPException: 404 when the report is missing or not owned, or an ``analysis`` is not
+            found for the caller in the report's collection (see :func:`_analysis_item`).
     """
     report = _get_owned_report(report_id, principal.effective_owner, collection)
-    snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
+    if payload.artifact_type == "analysis":
+        dedupe_key, snapshot = _analysis_item(payload.snapshot, report, principal)
+    else:
+        dedupe_key = payload.dedupe_key
+        snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
     item = rag.ensure_report_manager().add_item(
         report_id,
         principal.effective_owner,
         artifact_type=payload.artifact_type,
-        dedupe_key=payload.dedupe_key,
+        dedupe_key=dedupe_key,
         snapshot=snapshot,
         note=payload.note,
         collection=collection,
@@ -5939,7 +6005,7 @@ def add_report_item(
     if item is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     op.record(
-        target=Target(kind="report_item", ids=[payload.dedupe_key], count=1),
+        target=Target(kind="report_item", ids=[dedupe_key], count=1),
         criteria={"report_id": report_id, "artifact_type": payload.artifact_type},
     )
     return item
@@ -5978,24 +6044,30 @@ def add_report_items(
         dict[str, Any]: ``{"added", "skipped", "updated", "item_count"}``.
 
     Raises:
-        HTTPException: 404 when the report is missing or not owned.
+        HTTPException: 404 when the report is missing or not owned, or any ``analysis`` item is not
+            found for the caller in the report's collection; nothing is added then.
     """
     report = _get_owned_report(report_id, principal.effective_owner, collection)
+    # An analysis is built from its stored row, and one that cannot be fails the batch before anything is added.
+    entries: list[dict[str, Any]] = []
+    for item in payload.items:
+        dedupe_key, snapshot = item.dedupe_key, item.snapshot
+        if item.artifact_type == "analysis":
+            dedupe_key, snapshot = _analysis_item(snapshot, report, principal)
+        entries.append(
+            {"artifact_type": item.artifact_type, "dedupe_key": dedupe_key, "snapshot": snapshot, "note": item.note}
+        )
     # Enrichment edits the snapshots in place, so the manager stores what the
     # one companion scroll stamped.
-    _enrich_snapshots_thumbnails([(item.snapshot, item.artifact_type) for item in payload.items], report, principal)
+    _enrich_snapshots_thumbnails(
+        [(entry["snapshot"], entry["artifact_type"]) for entry in entries if entry["artifact_type"] != "analysis"],
+        report,
+        principal,
+    )
     result = rag.ensure_report_manager().add_items(
         report_id,
         principal.effective_owner,
-        items=[
-            {
-                "artifact_type": item.artifact_type,
-                "dedupe_key": item.dedupe_key,
-                "snapshot": item.snapshot,
-                "note": item.note,
-            }
-            for item in payload.items
-        ],
+        items=entries,
         collection=collection,
     )
     if result is None:
@@ -6009,7 +6081,7 @@ def add_report_items(
         result["skipped"],
     )
     op.record(
-        target=Target(kind="report_item", ids=[item.dedupe_key for item in payload.items], count=len(payload.items)),
+        target=Target(kind="report_item", ids=[entry["dedupe_key"] for entry in entries], count=len(entries)),
         criteria={
             "report_id": report_id,
             "added": result["added"],

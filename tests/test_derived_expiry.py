@@ -166,6 +166,11 @@ def test_report_item_sources() -> None:
     assert report_item_sources("hate_speech_finding", {"chunk_id": ""}) == (set(), set(), True)
     assert report_item_sources("summary", {"collection": "docs"}) == (set(), set(), True)
     assert report_item_sources("topics", {"run_id": "r"}) == (set(), set(), True)
+    named = {"provenance": {"sources": [{"file_hash": "a"}, {"file_hash": "b"}]}}
+    assert report_item_sources("analysis", named) == ({"a", "b"}, set(), False)
+    assert report_item_sources("analysis", {"provenance": {"sources": [{"file_hash": None}]}}) == (set(), set(), True)
+    assert report_item_sources("analysis", {"provenance": {"sources": []}}) == (set(), set(), True)
+    assert report_item_sources("analysis", {}) == (set(), set(), True)
 
 
 def _reports(rag: MagicMock, sessions: SessionManager) -> Any:
@@ -200,6 +205,32 @@ def test_report_item_inherits_its_sources(stores: tuple[MagicMock, DocumentReten
     assert _report_expiry(reports, report_id) == NOW - 10 * DAY + 365 * DAY
     reports.add_item(report_id, "alice", artifact_type="entity_finding", dedupe_key="e:1", snapshot={"chunk_id": "p1"})
     assert _report_expiry(reports, report_id) == NOW - 200 * DAY + 365 * DAY
+
+
+def test_an_analysis_item_inherits_the_documents_it_drew_on(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
+    """An analysis takes the deadline of the documents its passages came from; with none named, the oldest's."""
+    rag, _, sessions = stores
+    reports = _reports(rag, sessions)
+    named = int(reports.create_report(title="r1", owner="alice", collection_name="docs")["id"])
+    reports.add_item(
+        named,
+        "alice",
+        artifact_type="analysis",
+        dedupe_key="analysis:1",
+        snapshot={"provenance": {"sources": [{"file_hash": "new"}]}},
+    )
+    assert _report_expiry(reports, named) == NOW - 10 * DAY + 365 * DAY
+    unnamed = int(reports.create_report(title="r2", owner="alice", collection_name="docs")["id"])
+    reports.add_item(
+        unnamed,
+        "alice",
+        artifact_type="analysis",
+        dedupe_key="analysis:2",
+        snapshot={"provenance": {"sources": [{"file_hash": None}]}},
+    )
+    assert _report_expiry(reports, unnamed) == NOW - 300 * DAY + 365 * DAY
 
 
 def test_summary_item_and_overview_take_the_oldest(
