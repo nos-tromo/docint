@@ -1107,6 +1107,17 @@ describe('Report view — analyses', () => {
     expect(screen.getByText(/tags\.csv \(rows: 1, columns: 1\)/)).toBeInTheDocument()
   })
 
+  it('counts the columns a cut table had, not the ones it kept', async () => {
+    const snapshot = {
+      ...ANALYSIS,
+      tables: [{ name: 'wide.csv', columns: ['a', 'b'], column_count: 40, rows: [['1', '2']], row_count: 1, truncated: true }]
+    }
+    mockFetch({ ...reportDetail, items: [analysisItem(20, snapshot)] })
+    renderReport()
+
+    expect(await screen.findByText(/wide\.csv \(rows: 1, columns: 40\)/)).toBeInTheDocument()
+  })
+
   it('renders only PNG charts, and every field as text', async () => {
     const hostile = '<img src="x" onerror="alert(1)"><b>bold</b>'
     const snapshot = {

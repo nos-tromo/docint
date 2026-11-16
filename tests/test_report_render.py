@@ -2678,10 +2678,40 @@ def test_a_table_is_cut_when_flagged_or_when_it_shows_fewer_rows_than_it_had(mon
     short = {**_table("short.csv", ["a"], [["1"], ["2"]]), "row_count": 9}
     whole = _table("whole.csv", ["a"], [["1"], ["2"]])
     md = R.render_markdown(_analysis_report(tables=[{**flagged, "truncated": True}, short, whole]))
-    assert "**flagged.csv** · 2 rows × 1 columns · first 2 shown" in md  # noqa: RUF001
+    assert "**flagged.csv** · 2 rows × 1 columns · shown cut" in md  # noqa: RUF001
     assert "**short.csv** · 9 rows × 1 columns · first 2 shown" in md  # noqa: RUF001
     assert "**whole.csv** · 2 rows × 1 columns\n" in md and md.count("shown") == 2  # noqa: RUF001
     assert "shown" not in R.render_markdown(_analysis_report(tables=[{**whole, "truncated": "yes"}]))
+
+
+def test_a_table_cut_in_its_columns_reports_the_columns_it_had(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every row is shown, so the label is "shown cut", and the shape counts the 40 columns the run had."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    wide = {**_table("wide.csv", ["a", "b"], [["1", "2"], ["3", "4"]]), "column_count": 40, "truncated": True}
+    report = _analysis_report(tables=[wide])
+    md, htm = R.render_markdown(report), R.render_html(report)
+    assert "**wide.csv** · 2 rows × 40 columns · shown cut\n\n| a | b |" in md  # noqa: RUF001
+    assert '<div class="analysis-table-name">wide.csv · 2 rows × 40 columns · shown cut</div>' in htm  # noqa: RUF001
+    assert "first" not in md
+    assert _csv_rows(_zip(report), "analyses.csv")[1][7] == "analysis-1/wide.csv (shown cut)"
+
+
+def test_a_table_cut_in_its_rows_and_columns_says_the_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When rows were cut the label names how many are shown, whatever else was cut."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    both = {**_cut_table(), "column_count": 40}
+    md = R.render_markdown(_analysis_report(tables=[both]))
+    assert "**big.csv** · 2000 rows × 40 columns · first 3 shown" in md  # noqa: RUF001
+
+
+@pytest.mark.parametrize("count", [None, 1, True, "40", float("nan")], ids=["none", "below", "bool", "text", "nan"])
+def test_a_column_count_that_cannot_be_trusted_falls_back_to_the_columns_kept(
+    monkeypatch: pytest.MonkeyPatch, count: Any
+) -> None:
+    """An older table, or a count below the columns kept or not a number, is counted by the columns it keeps."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    table = {**_table("t.csv", ["a", "b"], [["1", "2"]]), "column_count": count}
+    assert "**t.csv** · 1 rows × 2 columns\n" in R.render_markdown(_analysis_report(tables=[table]))  # noqa: RUF001
 
 
 def test_a_cut_table_reads_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2690,6 +2720,10 @@ def test_a_cut_table_reads_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
     report = _analysis_report(tables=[_cut_table()])
     assert "**big.csv** · 2000 Zeilen × 2 Spalten · die ersten 3 gezeigt" in R.render_markdown(report)  # noqa: RUF001
     assert "(die ersten 3 gezeigt)" in _csv_rows(_zip(report), "analyses.csv")[1][7]
+    wide = {**_table("wide.csv", ["a"], [["1"]]), "column_count": 40, "truncated": True}
+    assert "**wide.csv** · 1 Zeilen × 40 Spalten · Anzeige gekürzt" in R.render_markdown(  # noqa: RUF001
+        _analysis_report(tables=[wide])
+    )
 
 
 def _png_uri_of(data: bytes) -> str:

@@ -74,7 +74,7 @@ describe('AnalysisCard', () => {
     renderCard()
 
     const card = screen.getByTestId('analysis-card')
-    expect(within(card).getByText('Posts per author')).toBeInTheDocument()
+    expect(within(card).getByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     const table = within(card).getByRole('table')
     const body = within(table).getAllByRole('row').slice(1)
     expect(body.map((row) => row.textContent)).toEqual(['alice7', 'bob6', 'carol5', 'dave4', 'erin3'])
@@ -95,6 +95,21 @@ describe('AnalysisCard', () => {
     renderCard({ entry: { ...ANALYSIS, tables: [table] } })
 
     expect(screen.getByText('595 more rows')).toBeInTheDocument()
+  })
+
+  it('heads a titled analysis with its number, as the model calls it, then its title', () => {
+    renderCard({ index: 2 })
+
+    const card = screen.getByTestId('analysis-card')
+    expect(within(card).getByText('Analysis 2 · Posts per author')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Analysis 2 · Posts per author' })).toBe(card)
+    expect(within(card).getByRole('button', { name: 'Show code of Posts per author' })).toBeInTheDocument()
+  })
+
+  it('heads a titled analysis in German', () => {
+    renderCard({ lang: 'de' })
+
+    expect(screen.getByText('Analyse 1 · Posts per author')).toBeInTheDocument()
   })
 
   it('names an untitled analysis by its place in the turn', () => {
@@ -269,7 +284,7 @@ describe('AnalysisCard from a summary', () => {
     const urls = serve(ANALYSIS)
     renderCard({ entry: SUMMARY })
 
-    expect(screen.getByText('Posts per author')).toBeInTheDocument()
+    expect(screen.getByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     expect(screen.getByText('Loading analysis…')).toBeInTheDocument()
     await screen.findByText('alice')
 
@@ -301,7 +316,7 @@ describe('AnalysisCard from a summary', () => {
     renderCard({ entry: SUMMARY, sessionId: null })
 
     expect(urls).toEqual([])
-    expect(screen.getByText('Posts per author')).toBeInTheDocument()
+    expect(screen.getByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     expect(screen.getByText(NO_DETAIL)).toBeInTheDocument()
   })
 
@@ -372,7 +387,7 @@ describe('AnalysisCard from a summary', () => {
     renderCard({ entry: SUMMARY })
 
     expect(await screen.findByText('This analysis could not be loaded.')).toBeInTheDocument()
-    expect(screen.getByText('Posts per author')).toBeInTheDocument()
+    expect(screen.getByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /add to report/i })).toBeInTheDocument()
   })
 

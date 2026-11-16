@@ -261,6 +261,7 @@ export const de: Strings = {
   'chat.agent_trail_run_python': 'Python ausgeführt: {title}',
   'chat.agent_trail_run_python_untitled': 'Python auf den Passagen ausgeführt',
   'chat.analysis_label': 'Analyse {n}',
+  'chat.analysis_heading': 'Analyse {n} · {title}',
   'chat.analysis_code_show': 'Code von {title} anzeigen',
   'chat.analysis_code_hide': 'Code von {title} ausblenden',
   'chat.analysis_code_of': 'Code von {title}',

@@ -562,7 +562,7 @@ describe('Chat session-history validation restoration', () => {
 
     renderChatWithSession('sess-analyses')
 
-    expect(await screen.findByText('Posts per author')).toBeInTheDocument()
+    expect(await screen.findByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     expect(await screen.findByText('alice')).toBeInTheDocument()
     expect(urls.filter((u) => u.includes('/analyses/')).map((u) => u.slice(u.indexOf('/sessions/')))).toEqual([
       '/sessions/sess-analyses/analyses/a1?collection=docs'

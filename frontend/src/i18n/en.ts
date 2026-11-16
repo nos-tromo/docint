@@ -248,6 +248,7 @@ export const en = {
   'chat.agent_trail_run_python': 'Ran Python: {title}',
   'chat.agent_trail_run_python_untitled': 'Ran Python on the passages',
   'chat.analysis_label': 'Analysis {n}',
+  'chat.analysis_heading': 'Analysis {n} · {title}',
   'chat.analysis_code_show': 'Show code of {title}',
   'chat.analysis_code_hide': 'Hide code of {title}',
   'chat.analysis_code_of': 'Code of {title}',

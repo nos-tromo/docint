@@ -280,13 +280,14 @@ function tableShapes(snapshot: Record<string, unknown>, t: Translate): string {
   return tables
     .flatMap((entry) => {
       if (typeof entry !== 'object' || entry === null) return []
-      const { name, columns, rows, row_count: rowCount } = entry as Record<string, unknown>
+      const { name, columns, column_count: columnCount, rows, row_count: rowCount } = entry as Record<string, unknown>
       const count = typeof rowCount === 'number' ? rowCount : Array.isArray(rows) ? rows.length : 0
+      const kept = Array.isArray(columns) ? columns.length : 0
       return [
         t('report.analysis_table_shape', {
           name: typeof name === 'string' ? truncate(name, 80) : '',
           rows: count,
-          columns: Array.isArray(columns) ? columns.length : 0
+          columns: typeof columnCount === 'number' ? Math.max(columnCount, kept) : kept
         })
       ]
     })

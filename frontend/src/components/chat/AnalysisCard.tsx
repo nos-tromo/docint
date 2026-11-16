@@ -214,7 +214,11 @@ export function AnalysisCard({
   useSeedSessionAnalysis(sessionId, full ? entry : null)
   const read = useSessionAnalysis(sessionId, entry.id, !full)
   const analysis = full ? entry : (read.data ?? null)
-  const title = text(analysis?.title).trim() || text(entry.title).trim() || t('chat.analysis_label', { n: index })
+  const named = text(analysis?.title).trim() || text(entry.title).trim()
+  const label = t('chat.analysis_label', { n: index })
+  const title = named || label
+  // The model refers to a card as "Analysis n", so a titled one carries that name too.
+  const heading = named ? t('chat.analysis_heading', { n: index, title: named }) : label
   const provenance = analysis ? provenanceLine(analysis, t) : null
   return (
     <section
@@ -224,7 +228,7 @@ export function AnalysisCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div id={titleId} className="min-w-0 break-words font-medium">
-          {title}
+          {heading}
         </div>
         <AddToReportButton item={analysisReportItem(entry.id)} inReport={inReport} />
       </div>

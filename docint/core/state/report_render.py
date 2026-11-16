@@ -890,18 +890,24 @@ class _AnalysisTable:
     rows: list[list[str]]
     row_count: int
     truncated: bool = False
+    column_count: int = 0
 
     @property
     def shape(self) -> str:
-        """The table's localized shape, from the rows the run had."""
-        return ui_string("report_label_table_shape").format(rows=self.row_count, columns=len(self.columns))
+        """The table's localized shape, from the rows and columns the run had."""
+        columns = max(self.column_count, len(self.columns))
+        return ui_string("report_label_table_shape").format(rows=self.row_count, columns=columns)
 
     @property
     def cut(self) -> str:
-        """What a table stored cut says about itself, localized; ``""`` for a whole one."""
-        if not self.truncated and len(self.rows) >= self.row_count:
-            return ""
-        return ui_string("report_label_table_cut").format(shown=len(self.rows))
+        """What a table stored cut says about itself, localized: the rows shown, else that cells or columns were cut.
+
+        Returns:
+            str: ``""`` for a whole table.
+        """
+        if len(self.rows) < self.row_count:
+            return ui_string("report_label_table_cut").format(shown=len(self.rows))
+        return ui_string("report_label_table_trimmed") if self.truncated else ""
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -972,6 +978,7 @@ def _analysis_tables(snap: dict[str, Any]) -> list[_AnalysisTable]:
                 rows=rows,
                 row_count=max(count, len(rows)) if count is not None and count >= 0 else len(rows),
                 truncated=table.get("truncated") is True,
+                column_count=_whole(table.get("column_count")) or 0,
             )
         )
     return tables

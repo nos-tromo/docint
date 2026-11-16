@@ -128,10 +128,12 @@ export interface AgentTrail {
   evidence_chars?: number | null
 }
 
-/** One table an analysis kept: its header, at most 500 rows of cells cut to 500 characters, and how many rows there were. */
+/** One table an analysis kept: its header, at most 500 rows of cells cut to 500 characters, and how many rows and columns there were. */
 export interface AnalysisTable {
   name: string
   columns: string[]
+  /** How many columns the run's table had; absent on an analysis stored before it was kept. */
+  column_count?: number
   rows: string[][]
   row_count: number
   truncated: boolean

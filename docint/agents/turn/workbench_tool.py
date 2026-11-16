@@ -103,6 +103,7 @@ MAX_CHARTS = 4
 MAX_ROWS = 500
 MAX_COLUMNS = 32
 CELL_CHARS = 500
+MAX_NAME_CHARS = 200
 CHART_BYTES = 512 * 1024
 CHARTS_BYTES = 1024 * 1024
 MAX_CHART_SIDE = 4096
@@ -459,15 +460,17 @@ def parse_table(name: str, text: str) -> dict[str, Any] | None:
     A leading BOM is dropped, and an empty header name (pandas' index column) is kept as ``""``.
     The first row is the header; a short row is padded to its width and a long one cut, the
     table then marked ``truncated``. At most ``MAX_COLUMNS`` columns and ``MAX_ROWS`` rows are
-    kept, each cell cut to ``CELL_CHARS``, and ``row_count`` keeps how many rows there were.
+    kept, each cell cut to ``CELL_CHARS``, and ``row_count`` and ``column_count`` keep how many rows and
+    columns there were. The name is cut to ``MAX_NAME_CHARS``.
 
     Args:
         name (str): The file's name.
         text (str): The file's text.
 
     Returns:
-        dict[str, Any] | None: ``name``, ``columns``, ``rows``, ``row_count`` and ``truncated``;
-        ``None`` for a file without a header, such as an empty one, or one the CSV reader refuses.
+        dict[str, Any] | None: ``name``, ``columns``, ``column_count``, ``rows``, ``row_count`` and
+        ``truncated``; ``None`` for a file without a header, such as an empty one, or one the CSV reader
+        refuses.
     """
     try:
         rows = list(csv.reader(io.StringIO(text.removeprefix(_BOM), newline="")))
@@ -492,7 +495,14 @@ def parse_table(name: str, text: str) -> dict[str, Any] | None:
             cells.append(cell)
             truncated = truncated or cut
         kept.append(cells)
-    return {"name": name, "columns": columns, "rows": kept, "row_count": len(body), "truncated": truncated}
+    return {
+        "name": name[:MAX_NAME_CHARS],
+        "columns": columns,
+        "column_count": len(header),
+        "rows": kept,
+        "row_count": len(body),
+        "truncated": truncated,
+    }
 
 
 def _png_size(png: bytes) -> tuple[int, int] | None:
@@ -541,7 +551,7 @@ def _charts(images: Sequence[tuple[str, bytes]]) -> tuple[list[dict[str, Any]], 
         else:
             total += len(png)
             data_uri = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
-            kept.append({"name": name, "data_uri": data_uri, "bytes": len(png)})
+            kept.append({"name": name[:MAX_NAME_CHARS], "data_uri": data_uri, "bytes": len(png)})
     return kept, dropped
 
 
@@ -705,6 +715,19 @@ def _check_passages(provenance: Mapping[str, Any]) -> str:
     return _ranges(sorted(numbers), most=_HEAD_NUMBERS_CHARS)
 
 
+def _column_count(table: Mapping[str, Any]) -> int:
+    """Count the columns a stored table's run had.
+
+    Args:
+        table (Mapping[str, Any]): The table, its ``columns`` a list.
+
+    Returns:
+        int: Its ``column_count``, never fewer than the columns it keeps; an older table has none.
+    """
+    kept, count = len(table["columns"]), table.get("column_count")
+    return max(kept, count) if type(count) is int else kept
+
+
 def _check_table(table: Any) -> str | None:
     """Describe a table's name and shape.
 
@@ -720,7 +743,7 @@ def _check_table(table: Any) -> str | None:
     if not isinstance(name, str) or not isinstance(columns, list) or type(rows) is not int or rows < 0:
         return None
     label = _check_output(name, _NAME_CHARS)
-    return f"{label} ({_count(rows, 'row')} × {_count(len(columns), 'column')})" if label else None  # noqa: RUF001
+    return f"{label} ({_count(rows, 'row')} × {_count(_column_count(table), 'column')})" if label else None  # noqa: RUF001
 
 
 def _analysis_check(number: int, analysis: Any) -> str | None:
@@ -1163,7 +1186,7 @@ class WorkbenchPythonTool:
             limit (int): Characters the reply may take.
 
         Returns:
-            str: The reply.
+            str: The reply, a look-alike of the assessment sentinel in what the code wrote defused.
         """
         named = _ranges(handover.numbers, most=_HEAD_NUMBERS_CHARS)
         inputs = [_count(len(handover.numbers), "passage") + (f" ({named})" if handover.numbers else "")]
@@ -1181,7 +1204,7 @@ class WorkbenchPythonTool:
         if stdout.strip():
             slots.append(_Slot(5, fit=_block("stdout:", stdout, _middle, limit)))
         for table in tables:
-            rows, columns = int(table["row_count"]), len(table["columns"])
+            rows, columns = int(table["row_count"]), _column_count(table)
             size = f"{_count(rows, 'row')} × {_count(columns, 'column')}"  # noqa: RUF001
             shape = f"Table {str(table['name'])[:_NAME_CHARS]}: {size}"
             shape_slot = _Slot(2, text=shape + ("; the user sees only part of it" if table["truncated"] else ""))
@@ -1215,4 +1238,4 @@ class WorkbenchPythonTool:
             slots.append(_Slot(3, fit=_block("stderr, its end:", stderr, _tail, _STDERR_CHARS)))
         if number is not None:
             slots.append(_Slot(0, text=ANALYSIS_NOTE.format(k=number)))
-        return _compose(slots, limit)
+        return neutralize_sentinel(_compose(slots, limit))

@@ -376,7 +376,7 @@ ends ([Background jobs](#background-jobs)).
 
 | Route | Recorded as | Target and notes |
 |---|---|---|
-| `POST /query` | `query` `chat.query` + `ai_call` `chat.answer` (+ `disclose` `chat.workbench` per call sent to workbench) | `chunk`: the sources returned. Criteria `question_sha256`, `session_id`, `retrieval_mode`, `retrieval_target`, `metadata_filters`, `scope_chunks`, `topic_id`, `reasoning`. The `ai_call` (`inference:chat`) carries the answer's hash and the same sources. Each `disclose` (`workbench:run_python`) has `chunk`: the point ids handed over; criteria `workbench_job`, `passages`, `keyword_checks`, `topic_listings`, `data_bytes`. |
+| `POST /query` | `query` `chat.query` + `ai_call` `chat.answer` (+ `disclose` `chat.workbench` per call sent to workbench) | `chunk`: the sources returned. Criteria `question_sha256`, `session_id`, `retrieval_mode`, `retrieval_target`, `metadata_filters`, `scope_chunks`, `topic_id`, `reasoning`. The `ai_call` (`inference:chat`) carries the answer's hash and the same sources. Each `disclose` (`workbench:run_python`) has `chunk`: the point ids handed over; criteria `workbench_job`, `passages`, `keyword_checks`, `topic_listings`, `data_bytes`, `incomplete`. |
 | `POST /stream_query` | as `POST /query` | Written before the final frame ([Streaming routes](#streaming-routes)). |
 | `POST /search` | `query` `search.fulltext` | `chunk`: the hits on the page. Criteria `keywords` (parsed), `field`, `metadata_filters`, `limit`, `page`. |
 | `GET /search/chunk` | `query` `search.chunk` | `chunk` [id]. |
@@ -582,7 +582,11 @@ the run goes on. In docint's own log the round trip is the run's
 
 ## Calls to workbench
 
-A chat turn's `run_python` tool hands passages to workbench.
+A chat turn's `run_python` tool hands passages to workbench. A call carries each
+passage's text with its `file`, `page`, `time`, `author`, `network` and `kind`,
+the model's code, and the turn's keyword counts and topic listings; workbench
+keeps them only for the job
+([workbench's side](https://github.com/nos-tromo/workbench/blob/main/docs/data-flow.md)).
 
 - **Pseudonyms.** The user and the session reach workbench only as HMACs under
   `WORKBENCH_API_KEY` (`X-User-Id`, `X-Session-Id`).

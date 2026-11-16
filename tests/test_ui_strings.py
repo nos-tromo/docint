@@ -69,6 +69,7 @@ def test_analysis_report_strings_are_worded_in_both_locales() -> None:
             "report_label_workbench_job": "workbench {version}, job {job}",
             "report_label_table_shape": "{rows} rows × {columns} columns",  # noqa: RUF001
             "report_label_table_cut": "first {shown} shown",
+            "report_label_table_trimmed": "shown cut",
             "report_label_analysis_untitled": "Analysis",
         },
         "de": {
@@ -79,6 +80,7 @@ def test_analysis_report_strings_are_worded_in_both_locales() -> None:
             "report_label_workbench_job": "workbench {version}, Job {job}",
             "report_label_table_shape": "{rows} Zeilen × {columns} Spalten",  # noqa: RUF001
             "report_label_table_cut": "die ersten {shown} gezeigt",
+            "report_label_table_trimmed": "Anzeige gekürzt",
             "report_label_analysis_untitled": "Analyse",
         },
     }

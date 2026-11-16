@@ -1146,7 +1146,7 @@ describe('ChatTurn', () => {
 
     const answer = screen.getByText('Alice posted most [1].')
     const card = screen.getByTestId('analysis-card')
-    expect(within(card).getByText('Posts per author')).toBeInTheDocument()
+    expect(within(card).getByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     expect(answer.compareDocumentPosition(card)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 

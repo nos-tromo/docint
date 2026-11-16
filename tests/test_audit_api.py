@@ -10,7 +10,6 @@ which lands on the same stream) is verified by ``conftest.audit_stream``.
 
 import io
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -1488,8 +1487,9 @@ def test_a_chat_turn_needs_a_purpose_to_disclose_only_while_workbench_is_configu
         key (str): ``WORKBENCH_API_KEY``; empty leaves workbench unconfigured.
         statuses (list[int]): What ``/query`` and ``/stream_query`` answer.
     """
+    # Only what the import needs: a developer's exported WORKBENCH_* or AUDIT_* variables cannot flip it.
     env = {
-        **os.environ,
+        "HOME": str(tmp_path),
         "AUDIT_REQUIRE_PURPOSE": "disclose",
         "WORKBENCH_API_KEY": key,
         "WORKBENCH_API_BASE": "http://workbench-api:8000",
