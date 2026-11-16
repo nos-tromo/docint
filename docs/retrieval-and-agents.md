@@ -561,6 +561,8 @@ plain lookup.
     the text;
   - where `topics` is offered, its line (`agent_tools_topics.txt`), after the
     keyword lines;
+  - where `run_python` is offered, its line (`agent_tools_python.txt`), the
+    last of the tool lines;
   - the assessment rule while `ASSESSMENT_ENABLED` is on;
   - the conversation's summary block;
 - the offered tool schemas;
@@ -950,13 +952,13 @@ with no network. It gets `passages.json` (384 KiB, texts cut to 4000 characters)
 and, when the turn made such checks, `keyword_checks.json` (32 KiB) and
 `topics.json` (64 KiB). It runs once per round and twice per turn, within the
 shorter of `WORKBENCH_TIMEOUT` and the time left less 15 s (under 20 s nothing
-is sent); the run's own limit is that less 12 s. The reply gives a head line,
-`stdout`, each table's shape and first five rows, the chart names, the tail of
-`stderr` and the analysis's number. A run that wrote a CSV table or a PNG chart
-is an analysis: two at most are stored per turn, `stdout` cut to 16,384
-characters. The validator reads each as a computed fact, never a source: its
-title, the passages used, its tables' shapes and 600 characters of `stdout`,
-within 1600 in all.
+is sent); the run's own limit is that less 12 s, or workbench's cap if lower.
+The reply gives a head line, `stdout`, each table's shape and first five rows,
+the chart names, the tail of `stderr` and the analysis's number. A run that
+wrote a CSV table or a PNG chart is an analysis: two at most are stored per
+turn, `stdout` cut to 16,384 characters. The validator reads each as a computed
+fact, never a source: its title, the passages used, its tables' shapes and 600
+characters of `stdout`, within 1600 in all.
 
 Residual risks: those 600 characters are text the code printed, so their
 structure is defused but not their prose. Stored analyses grow the session

@@ -376,7 +376,7 @@ ends ([Background jobs](#background-jobs)).
 
 | Route | Recorded as | Target and notes |
 |---|---|---|
-| `POST /query` | `query` `chat.query` + `ai_call` `chat.answer` (+ `disclose` `chat.workbench` per `run_python` call) | `chunk`: the sources returned. Criteria `question_sha256`, `session_id`, `retrieval_mode`, `retrieval_target`, `metadata_filters`, `scope_chunks`, `topic_id`, `reasoning`. The `ai_call` (`inference:chat`) carries the answer's hash and the same sources. Each `disclose` (`workbench:run_python`) has `chunk`: the point ids handed over; criteria `workbench_job`, `passages`, `keyword_checks`, `topic_listings`, `data_bytes`. |
+| `POST /query` | `query` `chat.query` + `ai_call` `chat.answer` (+ `disclose` `chat.workbench` per call sent to workbench) | `chunk`: the sources returned. Criteria `question_sha256`, `session_id`, `retrieval_mode`, `retrieval_target`, `metadata_filters`, `scope_chunks`, `topic_id`, `reasoning`. The `ai_call` (`inference:chat`) carries the answer's hash and the same sources. Each `disclose` (`workbench:run_python`) has `chunk`: the point ids handed over; criteria `workbench_job`, `passages`, `keyword_checks`, `topic_listings`, `data_bytes`. |
 | `POST /stream_query` | as `POST /query` | Written before the final frame ([Streaming routes](#streaming-routes)). |
 | `POST /search` | `query` `search.fulltext` | `chunk`: the hits on the page. Criteria `keywords` (parsed), `field`, `metadata_filters`, `limit`, `page`. |
 | `GET /search/chunk` | `query` `search.chunk` | `chunk` [id]. |
@@ -582,21 +582,17 @@ the run goes on. In docint's own log the round trip is the run's
 
 ## Calls to workbench
 
-A chat turn's `run_python` tool hands passages to workbench
-(`docint/utils/workbench_client.py`), which keeps an audit log of its own.
+A chat turn's `run_python` tool hands passages to workbench.
 
 - **Pseudonyms.** The user and the session reach workbench only as HMACs under
-  the shared `WORKBENCH_API_KEY` (`X-User-Id`, `X-Session-Id`); no edge user
-  name leaves docint, and an admin acting sends the owner's.
-- **Purpose and request id.** `X-Audit-Purpose` is the turn's stated purpose, or
-  `reason=docint chat` when none was; `X-Request-ID` is the request's.
+  `WORKBENCH_API_KEY` (`X-User-Id`, `X-Session-Id`).
+- **Purpose and request id.** `X-Audit-Purpose` is the turn's stated purpose,
+  else `reason=docint chat`; `X-Request-ID` is the request's.
 - **One job, two trails.** A call is entered in the turn's ledger before it is
-  sent, and one that cannot be entered is not sent; the turn writes one
-  `disclose` per entry. Once workbench answers, its job id is the
-  `workbench_job` that workbench's own event carries too.
-- **The seal.** However the turn ends its ledger is sealed: a later call sends
-  nothing, and one still in flight is written with `outcome: error`,
-  `incomplete: true` and no job id.
+  sent, and one that cannot be entered is not sent; docint's `workbench_job` is
+  the `job` in workbench's own event.
+- **The seal.** When the turn ends, a later call sends nothing, and one still in
+  flight is written with `outcome: error`, `incomplete: true` and no job id.
 
 ## Calls to the inference router
 

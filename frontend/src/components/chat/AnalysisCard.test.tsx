@@ -103,31 +103,55 @@ describe('AnalysisCard', () => {
     expect(within(screen.getByTestId('analysis-card')).getByText('Analysis 2')).toBeInTheDocument()
   })
 
-  it('keeps the code behind a disclosure that one constant label names', async () => {
+  it('keeps the code behind a disclosure whose name says the next click and carries the title', async () => {
     renderCard()
 
     expect(screen.queryByText(/import pandas/)).not.toBeInTheDocument()
-    const toggle = screen.getByRole('button', { name: 'Code' })
+    const toggle = screen.getByRole('button', { name: 'Show code of Posts per author' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    // The words are part of the button, so a click on them opens it.
-    await userEvent.click(within(toggle).getByText('Code'))
+    await userEvent.click(toggle)
 
     expect(screen.getByText(/import pandas/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Code' })).toHaveAttribute('aria-expanded', 'true')
-    await userEvent.click(screen.getByRole('button', { name: 'Code' }))
+    const open = screen.getByRole('button', { name: 'Hide code of Posts per author' })
+    expect(open).toHaveAttribute('aria-expanded', 'true')
+    expect(open).toHaveAttribute('aria-controls', screen.getByRole('region', { name: 'Code of Posts per author' }).id)
+    await userEvent.click(open)
     expect(screen.queryByText(/import pandas/)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Code' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: 'Show code of Posts per author' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('sits the toggle at the row end, so the words are no button', async () => {
+    renderCard()
+
+    const row = screen.getByText('Code of Posts per author').parentElement as HTMLElement
+    expect(within(row).getByRole('button', { name: 'Show code of Posts per author' })).toBe(row.lastElementChild)
+    await userEvent.click(screen.getByText('Code of Posts per author'))
+    expect(screen.queryByText(/import pandas/)).not.toBeInTheDocument()
+  })
+
+  it('names the code of two analyses apart', () => {
+    renderCard()
+    renderCard({ entry: { ...ANALYSIS, id: 'a2', title: 'Posts per day' }, index: 2 })
+
+    expect(screen.getByRole('button', { name: 'Show code of Posts per author' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show code of Posts per day' })).toBeInTheDocument()
+  })
+
+  it('names the code toggle in German', () => {
+    renderCard({ lang: 'de' })
+
+    expect(screen.getByRole('button', { name: 'Code von Posts per author anzeigen' })).toBeInTheDocument()
   })
 
   it('lets a keyboard user scroll a table and the code, each by a name', async () => {
     renderCard()
-    await userEvent.click(screen.getByRole('button', { name: 'Code' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Show code of Posts per author' }))
 
     const card = screen.getByTestId('analysis-card')
     const tableRegion = within(card).getByRole('region', { name: 'posts.csv' })
     expect(tableRegion).toHaveAttribute('tabindex', '0')
     expect(tableRegion).toContainElement(within(card).getByRole('table'))
-    const codeRegion = within(card).getByRole('region', { name: 'Code' })
+    const codeRegion = within(card).getByRole('region', { name: 'Code of Posts per author' })
     expect(codeRegion).toHaveAttribute('tabindex', '0')
     expect(codeRegion).toHaveTextContent(/import pandas/)
   })
@@ -377,7 +401,7 @@ describe('AnalysisCard with untrusted content', () => {
       }
     }
     renderCard({ entry })
-    await userEvent.click(screen.getByRole('button', { name: 'Code' }))
+    await userEvent.click(screen.getByRole('button', { name: /^Show code of / }))
 
     const card = screen.getByTestId('analysis-card')
     expect(card.querySelector('b')).toBeNull()

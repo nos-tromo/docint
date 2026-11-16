@@ -192,10 +192,8 @@ In the Markdown, HTML and PDF exports:
   repeats on every page the table reaches, unless it is too tall to: then it
   prints once, as an ordinary row.
 
-In the ZIP each analysis has a row in `analyses.csv` and its tables and charts
-as `analysis-<n>/<name>.csv` and `.png`, the extension fixed whatever name was
-stored. A cell that is a plain number stays one; other text a spreadsheet would
-read as a formula is guarded.
+The ZIP adds `analyses.csv` and `analysis-<n>/<name>.csv` and `.png` members,
+the extension fixed whatever name was stored.
 
 A finding judged from an image **opens with the picture**, printed at up to
 62 × 90 mm and captioned with its kind (image or video frame). Beside it sit the

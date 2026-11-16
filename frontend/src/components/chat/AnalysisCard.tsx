@@ -143,28 +143,34 @@ function provenanceLine(analysis: Analysis, t: Translate): string | null {
   return version || job ? t('chat.analysis_provenance_workbench', { version: version || '?', job: job || '?' }) : null
 }
 
-/** The code behind a disclosure: the whole row is the button, its label is constant and `aria-expanded` says the rest. */
-function CodeDisclosure({ code }: { code: string }) {
+/**
+ * The code behind a disclosure, as `DisclosureButton` is used everywhere: at the row's far edge, its name saying
+ * what the next click does and carrying the analysis's title, since several cards can sit on one screen.
+ */
+function CodeDisclosure({ code, title }: { code: string; title: string }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const codeId = useId()
-  const label = t('chat.analysis_code')
+  const labelId = useId()
   return (
     <div>
-      <DisclosureButton
-        expanded={open}
-        controls={codeId}
-        label={label}
-        onClick={() => setOpen((value) => !value)}
-        className="h-6 w-full flex-row-reverse justify-between text-xs"
-      >
-        <span>{label}</span>
-      </DisclosureButton>
+      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span id={labelId} className="min-w-0 break-words">
+          {t('chat.analysis_code_of', { title })}
+        </span>
+        <DisclosureButton
+          expanded={open}
+          controls={codeId}
+          label={t(open ? 'chat.analysis_code_hide' : 'chat.analysis_code_show', { title })}
+          onClick={() => setOpen((value) => !value)}
+          className="h-6 w-6"
+        />
+      </div>
       {open && (
         <pre
           id={codeId}
           role="region"
-          aria-label={label}
+          aria-labelledby={labelId}
           tabIndex={0}
           className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-background p-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-primary"
         >
@@ -242,7 +248,7 @@ export function AnalysisCard({
             <TablePreview key={i} table={table} n={i + 1} />
           ))}
           <Charts charts={list<AnalysisChart>(analysis.charts)} title={title} />
-          {text(analysis.code) && <CodeDisclosure code={analysis.code} />}
+          {text(analysis.code) && <CodeDisclosure code={analysis.code} title={title} />}
           {provenance && <p className="break-words text-xs text-muted-foreground">{provenance}</p>}
         </>
       )}
