@@ -27,7 +27,6 @@ import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from docint.core.state.pdf_progress import ProgressCallback, progress_scope
@@ -869,8 +868,13 @@ def _md_topics(snap: dict[str, Any], note: str | None) -> list[str]:
 
 
 #: What an analysis chart may be: a base64 PNG, the only image its tool keeps. Nothing a renderer
-#: embeds can then name another resource or break out of a Markdown image's parentheses.
-_PNG_DATA_URI = re.compile(r"data:image/png;base64,[A-Za-z0-9+/]+={0,2}")
+#: embeds can then name another resource or break out of a Markdown image's parentheses. The route
+#: that adds an analysis to a report applies the same pattern.
+PNG_DATA_URI = re.compile(r"data:image/png;base64,[A-Za-z0-9+/]+={0,2}")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+#: A cell that is wholly a plain number: it cannot be a formula, so a table's CSV keeps it as it is.
+_PLAIN_NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 
 #: What opens a link, an image, a code span or a tag in Markdown.
 _MD_SPECIAL = re.compile(r"([\\\[\]<>`])")
@@ -884,11 +888,19 @@ class _AnalysisTable:
     columns: list[str]
     rows: list[list[str]]
     row_count: int
+    truncated: bool = False
 
     @property
     def shape(self) -> str:
         """The table's localized shape, from the rows the run had."""
         return ui_string("report_label_table_shape").format(rows=self.row_count, columns=len(self.columns))
+
+    @property
+    def cut(self) -> str:
+        """What a table stored cut says about itself, localized; ``""`` for a whole one."""
+        if not self.truncated and len(self.rows) >= self.row_count:
+            return ""
+        return ui_string("report_label_table_cut").format(shown=len(self.rows))
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -958,22 +970,38 @@ def _analysis_tables(snap: dict[str, Any]) -> list[_AnalysisTable]:
                 columns=columns,
                 rows=rows,
                 row_count=max(count, len(rows)) if count is not None and count >= 0 else len(rows),
+                truncated=table.get("truncated") is True,
             )
         )
     return tables
 
 
+def _chart_png(uri: str) -> bytes | None:
+    """Decode a chart's PNG data URI; ``None`` when its base64 cannot be read or is not a PNG."""
+    try:
+        png = base64.b64decode(uri.partition(",")[2], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return png if png.startswith(_PNG_SIGNATURE) else None
+
+
 def _analysis_charts(snap: dict[str, Any]) -> list[tuple[str, str]]:
     """The charts an analysis kept that may be embedded, as ``(name, data URI)``.
 
-    The snapshot is stored JSON, so each chart is checked against :data:`_PNG_DATA_URI` here too, and
-    its base64 must be padded as the route that took the analysis in demands.
+    The snapshot is stored JSON, so each chart is checked here too: its URI against
+    :data:`PNG_DATA_URI`, its base64 padded as the route that took the analysis in demands, and its
+    decoded bytes starting with the PNG signature. Any other chart is dropped in every format.
     """
     stored = snap.get("charts")
     charts: list[tuple[str, str]] = []
     for chart in stored if isinstance(stored, list) else []:
         uri = _mapping(chart).get("data_uri")
-        if isinstance(uri, str) and _PNG_DATA_URI.fullmatch(uri) and not len(uri.partition(",")[2]) % 4:
+        if (
+            isinstance(uri, str)
+            and PNG_DATA_URI.fullmatch(uri)
+            and not len(uri.partition(",")[2]) % 4
+            and _chart_png(uri) is not None
+        ):
             charts.append((_one_line(_plain(chart.get("name"))), uri))
     return charts
 
@@ -1051,9 +1079,8 @@ def _md_analysis(snap: dict[str, Any], note: str | None, number: int) -> list[st
             opening, closing = _fence(text, info=info)
             lines += [f"**{ui_string(label_key)}:**", "", opening, text, closing, ""]
     for table in _analysis_tables(snap):
-        label = " · ".join(
-            part for part in (f"**{_md_escape(table.name)}**" if table.name else "", table.shape) if part
-        )
+        name = f"**{_md_escape(table.name)}**" if table.name else ""
+        label = " · ".join(part for part in (name, table.shape, table.cut) if part)
         lines += [label, "", _md_row(table.columns), "| " + " | ".join(["---"] * len(table.columns)) + " |"]
         lines += [*(_md_row(row) for row in table.rows), ""]
     for name, uri in _analysis_charts(snap):
@@ -1921,6 +1948,11 @@ def _html_topics(snap: dict[str, Any], note: str | None) -> str:
     return "".join(parts)
 
 
+def _table_cell(value: str) -> str:
+    """A table cell as a spreadsheet shows it: a plain number as it is, any other text guarded."""
+    return value if _PLAIN_NUMBER.fullmatch(value) else _csv_text(value)
+
+
 def _table_csv(
     columns: Sequence[str], rows: Sequence[Sequence[str]], *, guard: bool, lineterminator: str = "\r\n"
 ) -> str:
@@ -1930,13 +1962,14 @@ def _table_csv(
         columns (Sequence[str]): The header.
         rows (Sequence[Sequence[str]]): The rows.
         guard (bool): Whether every cell, the header's too, goes through :func:`_csv_text`, as a file a
-            spreadsheet opens must; text shown in a report is left as stored.
+            spreadsheet opens must, except a cell that is wholly a plain number, which stays a number;
+            text shown in a report is left as stored.
         lineterminator (str): How a row ends.
 
     Returns:
         str: The CSV text, quoted as the ``excel`` dialect quotes.
     """
-    cell: Callable[[str], str] = _csv_text if guard else str
+    cell: Callable[[str], str] = _table_cell if guard else str
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator=lineterminator)
     writer.writerow([cell(value) for value in columns])
@@ -1951,7 +1984,7 @@ def _html_analysis_table(table: _AnalysisTable, budget: _TableBudget) -> str:
     one :class:`_TableBudget` still has room for is a ``<table>`` and is charged to it. Any other table
     is its CSV in a ``<pre>``, and the budget stays as it was.
     """
-    caption = " · ".join(part for part in (table.name, table.shape) if part)
+    caption = " · ".join(part for part in (table.name, table.shape, table.cut) if part)
     parts = [f'<div class="analysis-table-name">{_esc(caption)}</div>']
     cost = len(table.rows) * len(table.columns)
     if len(table.columns) <= _TABLE_MAX_COLUMNS and cost <= budget.cells_left:
@@ -1970,7 +2003,7 @@ def _html_analysis(snap: dict[str, Any], note: str | None, number: int, table_bu
     """HTML for one analysis: title, question, code, output, tables, charts and its provenance line.
 
     Everything stored is escaped. Tables draw on the report's one cell budget (:func:`_html_analysis_table`);
-    a chart is drawn only if it is a PNG data URI (:data:`_PNG_DATA_URI`).
+    a chart is drawn only if it is a PNG data URI (:func:`_analysis_charts`).
     """
     snap = _mapping(snap)
     parts = [f'<div class="item-title">#{number} · {_esc(_analysis_title(snap))}</div>']
@@ -2285,41 +2318,38 @@ def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _member_name(folder: str, raw: str, fallback: str, taken: set[str]) -> str:
-    """The archive path of one analysis file: a safe name in the analysis's folder, never one already used.
+def _member_name(folder: str, raw: str, fallback: str, suffix: str, taken: set[str]) -> str:
+    """The archive path of one analysis file: a safe stem and a fixed extension, never a name already used.
 
-    Two names that collide once made safe, or that differ only in case and would collide when unpacked
-    on a case-insensitive disk, get `` (2)``, `` (3)`` and so on before the extension.
+    The stored name only contributes its stem, so a name cut or crafted to end in ``.bat`` or ``.html``
+    still unpacks as ``.csv`` or ``.png``. Two names that collide once made safe, or that differ only in
+    case or Unicode normalization and would collide when unpacked on a case-insensitive disk, get
+    `` (2)``, `` (3)`` and so on on the stem.
 
     Args:
         folder (str): The analysis's folder, ``analysis-<n>``.
         raw (str): The name as stored; untrusted, possibly a path.
-        fallback (str): The name used when nothing survives making it safe.
+        fallback (str): The stem used when nothing survives making it safe.
+        suffix (str): The fixed extension, dot included.
         taken (set[str]): The folded names already in the folder; this one is added.
 
     Returns:
-        str: ``folder/name``, which holds no ``..`` and cannot be absolute.
+        str: ``folder/stem + suffix``, which holds no ``..`` and cannot be absolute.
     """
-    from docint.core.extract.bundle import safe_name
+    from docint.core.extract.bundle import _NAME_MAX, _stem
 
-    base = PurePosixPath(safe_name(raw, fallback=fallback))
-    name, count = base.name, 1
-    while name.casefold() in taken:
+    room = _NAME_MAX - len(suffix)
+    stem = _stem(raw, fallback)[:room].strip().strip(".").strip() or fallback
+    name, count = f"{stem}{suffix}", 1
+    while unicodedata.normalize("NFC", name).casefold() in taken:
         count += 1
-        name = f"{base.stem} ({count}){base.suffix}"
-    taken.add(name.casefold())
+        counter = f" ({count})"
+        name = f"{stem[: max(1, room - len(counter))].rstrip()}{counter}{suffix}"
+    taken.add(unicodedata.normalize("NFC", name).casefold())
     return f"{folder}/{name}"
 
 
-def _chart_png(uri: str) -> bytes | None:
-    """Decode a chart's PNG data URI; ``None`` when its base64 cannot be read."""
-    try:
-        return base64.b64decode(uri.partition(",")[2], validate=True)
-    except (binascii.Error, ValueError):
-        return None
-
-
-def _analysis_files(snap: dict[str, Any], number: int) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]:
+def _analysis_files(snap: dict[str, Any], number: int) -> tuple[list[tuple[str, bytes, str]], list[tuple[str, bytes]]]:
     """The files one analysis adds to the archive: its tables as CSV and its charts as PNG.
 
     Args:
@@ -2327,16 +2357,18 @@ def _analysis_files(snap: dict[str, Any], number: int) -> tuple[list[tuple[str, 
         number (int): Its place among the report's analyses, from 1.
 
     Returns:
-        tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]: ``(path, content)`` for each table and for
-        each chart. A table's cells all pass :func:`_csv_text`; a chart that cannot be decoded is left out.
+        tuple[list[tuple[str, bytes, str]], list[tuple[str, bytes]]]: ``(path, content, cut)`` for each table,
+        ``cut`` saying so when the table was stored cut, and ``(path, content)`` for each chart. A table's cells
+        pass :func:`_table_cell`; the paths end in ``.csv`` and ``.png`` whatever the names stored.
     """
     from docint.utils.csv_stream import UTF8_BOM
 
     folder, taken = f"analysis-{number}", set[str]()
     tables = [
         (
-            _member_name(folder, table.name, "table.csv", taken),
+            _member_name(folder, table.name, "table", ".csv", taken),
             UTF8_BOM + _table_csv(table.columns, table.rows, guard=True).encode("utf-8"),
+            table.cut,
         )
         for table in _analysis_tables(snap)
     ]
@@ -2344,7 +2376,7 @@ def _analysis_files(snap: dict[str, Any], number: int) -> tuple[list[tuple[str, 
     for name, uri in _analysis_charts(snap):
         png = _chart_png(uri)
         if png is not None:
-            charts.append((_member_name(folder, name, "chart.png", taken), png))
+            charts.append((_member_name(folder, name, "chart", ".png", taken), png))
     return tables, charts
 
 
@@ -2353,7 +2385,7 @@ def _analysis_csv_row(snap: dict[str, Any], tables: Sequence[str], charts: Seque
 
     Args:
         snap (dict[str, Any]): The analysis.
-        tables (Sequence[str]): The archive paths of its tables.
+        tables (Sequence[str]): The archive paths of its tables, each followed by what it says when stored cut.
         charts (Sequence[str]): The archive paths of its charts.
 
     Returns:
@@ -2423,11 +2455,10 @@ def report_csv_bundle(report: dict[str, Any]) -> bytes:
             for number, item in enumerate(analyses, start=1):
                 snap = _mapping(item.get("snapshot"))
                 tables, charts = _analysis_files(snap, number)
-                for path, content in (*tables, *charts):
+                for path, content in (*((path, content) for path, content, _ in tables), *charts):
                     zf.writestr(path, content)
-                analysis_rows.append(
-                    _analysis_csv_row(snap, [path for path, _ in tables], [path for path, _ in charts])
-                )
+                listed = [f"{path} ({cut})" if cut else path for path, _, cut in tables]
+                analysis_rows.append(_analysis_csv_row(snap, listed, [path for path, _ in charts]))
             zf.writestr("analyses.csv", b"".join(stream_csv(analysis_rows, ANALYSES_COLUMNS)))
 
         summaries = grouped.get(ARTIFACT_SUMMARY) or []

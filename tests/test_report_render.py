@@ -2493,32 +2493,49 @@ def test_the_zip_numbers_each_analysis_and_lists_one_row_each() -> None:
     assert [row[2] for row in _csv_rows(zf, "analyses.csv")[1:]] == ["Posts per author", "Second run"]
 
 
-def test_the_zip_guards_every_cell_against_formulas() -> None:
-    """Every cell of every table and every text cell of the index is guarded."""
-    table = _table("f.csv", ["=cmd", "-1", "ok"], [["=SUM(A1)", "+1", "@x"], ["\t=1", "plain", "a=b"]])
+def test_the_zip_guards_every_text_cell_against_formulas() -> None:
+    """Every text cell of every table and of the index is guarded, the header's too."""
+    table = _table("f.csv", ["=cmd", "-x", "ok"], [["=SUM(A1)", "+A1", "@x"], ["\t=1", "plain", "a=b"]])
     snapshot = _analysis_snapshot(
         title="=HYPERLINK(1)", question="@q", tables=[table], charts=[], provenance={"session_id": "-s"}
     )
     zf = _zip(_single_item_report("analysis", snapshot))
     assert _csv_rows(zf, "analysis-1/f.csv") == [
-        ["'=cmd", "'-1", "ok"],
-        ["'=SUM(A1)", "'+1", "'@x"],
+        ["'=cmd", "'-x", "ok"],
+        ["'=SUM(A1)", "'+A1", "'@x"],
         ["'\t=1", "plain", "a=b"],
     ]
     row = _csv_rows(zf, "analyses.csv")[1]
     assert row[0] == "'-s" and row[2] == "'=HYPERLINK(1)" and row[3] == "'@q"
 
 
+def test_a_cell_that_is_wholly_a_number_stays_a_number_in_the_zip() -> None:
+    """Negative numbers, signs and exponents are data; anything a spreadsheet could read as more is guarded."""
+    numbers = ["-4", "-0.25", "+3", "1e-5", ".5", "5.", "1E+10", "0", "-1"]
+    guarded = ["-2+3", "=1", "@x", "+A1", "--1", "-", "-4\n", "+1e", "-1,5", "-.", "+-1"]
+    table = _table("n.csv", ["-1", "+2", "=3"], [numbers[:3], numbers[3:6], numbers[6:], guarded[:3], guarded[3:6]])
+    table["rows"] += [guarded[6:9], [*guarded[9:], ""]]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=[table], charts=[])))
+    rows = _csv_rows(zf, "analysis-1/n.csv")
+    assert rows[0] == ["-1", "+2", "'=3"]
+    assert [cell for row in rows[1:4] for cell in row] == numbers
+    assert [cell for row in rows[4:] for cell in row if cell] == [f"'{cell}" for cell in guarded]
+
+
 @pytest.mark.parametrize(
     ("name", "member"),
     [
         ("../x.csv", "analysis-1/x.csv"),
-        ("/etc/passwd", "analysis-1/passwd"),
+        ("/etc/passwd", "analysis-1/passwd.csv"),
         ("..\\..\\win.csv", "analysis-1/win.csv"),
         ("a/b/c.csv", "analysis-1/c.csv"),
-        ("..", "analysis-1/_"),
+        ("..", "analysis-1/_.csv"),
         ("", "analysis-1/table.csv"),
         ("na:me?.csv", "analysis-1/na_me_.csv"),
+        ("b", "analysis-1/b.csv"),
+        ("A" * 76 + ".bat" + "-pad.csv", "analysis-1/" + "A" * 76 + ".csv"),
+        ("run.hta", "analysis-1/run.csv"),
+        ("page.html.csv", "analysis-1/page.html.csv"),
     ],
 )
 def test_the_zip_names_each_member_safely(name: str, member: str) -> None:
@@ -2529,7 +2546,7 @@ def test_the_zip_names_each_member_safely(name: str, member: str) -> None:
 
 
 def test_the_zip_keeps_two_names_that_collide_apart() -> None:
-    """A name taken in the folder, in any case, gets a counter before its extension."""
+    """A name taken in the folder, in any case, gets a counter on its stem, before the fixed extension."""
     tables = [_table(name, ["a"], [[name]]) for name in ("a.csv", "sub/a.csv", "A.csv", "b")]
     charts = [{"name": name, "data_uri": _PNG_URI, "bytes": 1} for name in ("c.png", "x/c.png", "a.csv")]
     zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=charts)))
@@ -2539,17 +2556,56 @@ def test_the_zip_keeps_two_names_that_collide_apart() -> None:
             "analysis-1/a.csv",
             "analysis-1/a (2).csv",
             "analysis-1/A (3).csv",
-            "analysis-1/b",
+            "analysis-1/b.csv",
             "analysis-1/c.png",
             "analysis-1/c (2).png",
-            "analysis-1/a (4).csv",
+            "analysis-1/a.png",
         ]
     )
     assert len({n.casefold() for n in members}) == len(members)
     assert zf.read("analysis-1/a (2).csv").decode("utf-8-sig").splitlines() == ["a", "sub/a.csv"]
     assert _csv_rows(zf, "analyses.csv")[1][7] == (
-        "analysis-1/a.csv; analysis-1/a (2).csv; analysis-1/A (3).csv; analysis-1/b"
+        "analysis-1/a.csv; analysis-1/a (2).csv; analysis-1/A (3).csv; analysis-1/b.csv"
     )
+
+
+def test_the_zip_keeps_names_that_differ_only_in_unicode_normalization_apart() -> None:
+    """A composed and a decomposed name unpack to one file on a disk that normalizes names."""
+    import unicodedata
+
+    names = [unicodedata.normalize("NFC", "caf\u00e9"), unicodedata.normalize("NFD", "caf\u00e9"), "CAF\u00c9"]
+    tables = [_table(name, ["a"], [[str(i)]]) for i, name in enumerate(names)]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=[])))
+    members = [n for n in zf.namelist() if n.startswith("analysis-")]
+    assert len(members) == 3
+    assert len({unicodedata.normalize("NFC", n).casefold() for n in members}) == 3
+    assert [n.rsplit(" (", 1)[-1] for n in members[1:]] == ["2).csv", "3).csv"]
+
+
+def test_a_counter_never_pushes_a_member_name_past_the_cap() -> None:
+    """Names sharing a long stem get their counters inside the same length limit as the first."""
+    stem = "s" * 120
+    tables = [_table(f"{stem}{i}.csv", ["a"], [[str(i)]]) for i in range(12)]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=[])))
+    members = [n.removeprefix("analysis-1/") for n in zf.namelist() if n.startswith("analysis-")]
+    assert len(members) == 12 and len({m.casefold() for m in members}) == 12
+    assert max(len(m) for m in members) == 80 and all(m.endswith(".csv") for m in members)
+
+
+def test_every_zip_member_ends_in_its_fixed_extension() -> None:
+    """A table is always .csv and a chart always .png, whatever extension or length the stored name had."""
+    tables = [_table(name, ["a"], [["1"]]) for name in ("x.html", "x.svg", "no-extension", "A" * 76 + ".bat-pad.csv")]
+    chart_names = ("x.html", "x.bat", "x.csv", "plot", "A" * 76 + ".html" + "-pad.png", "")
+    charts = [{"name": name, "data_uri": _PNG_URI, "bytes": 1} for name in chart_names]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=charts)))
+    members = [n for n in zf.namelist() if n.startswith("analysis-")]
+    assert len(members) == len(tables) + len(charts)
+    assert sorted(m.rsplit(".", 1)[-1] for m in members) == ["csv"] * len(tables) + ["png"] * len(charts)
+    assert "analysis-1/x.png" in members and "analysis-1/x (2).png" in members
+    assert all(len(m.removeprefix("analysis-1/")) <= 80 for m in members)
+    listed = _csv_rows(zf, "analyses.csv")[1]
+    assert all(path.endswith(".csv") for path in listed[7].split("; "))
+    assert all(path.endswith(".png") for path in listed[8].split("; "))
 
 
 def test_the_zip_skips_a_chart_that_is_not_a_png() -> None:
@@ -2564,6 +2620,73 @@ def test_the_zip_skips_a_chart_that_is_not_a_png() -> None:
     assert [n for n in zf.namelist() if n.endswith(".png")] == ["analysis-1/ok.png"]
     assert _csv_rows(zf, "analyses.csv")[1][8] == "analysis-1/ok.png"
     assert R.render_markdown(report).count("](data:image/png") == 1
+
+
+def _cut_table(**over: Any) -> dict[str, Any]:
+    """A stored table that was cut: 3 of 2000 rows kept."""
+    table = _table("big.csv", ["a", "b"], [["1", "2"], ["3", "4"], ["5", "6"]])
+    return {**table, "row_count": 2000, "truncated": True, **over}
+
+
+def test_a_table_stored_cut_says_so_in_md_html_and_the_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caption names the rows shown; the index marks the table's path; a whole table says nothing."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _analysis_report(tables=[_cut_table(), _table("whole.csv", ["a"], [["1"]])])
+    md, htm = R.render_markdown(report), R.render_html(report)
+    assert "**big.csv** · 2000 rows × 2 columns · first 3 shown\n\n| a | b |" in md  # noqa: RUF001
+    assert "**whole.csv** · 1 rows × 1 columns\n\n" in md and md.count("shown") == 1  # noqa: RUF001
+    assert '<div class="analysis-table-name">big.csv · 2000 rows × 2 columns · first 3 shown</div>' in htm  # noqa: RUF001
+    assert '<div class="analysis-table-name">whole.csv · 1 rows × 1 columns</div>' in htm  # noqa: RUF001
+    assert htm.count("shown") == 1
+    cell = _csv_rows(_zip(report), "analyses.csv")[1][7]
+    assert cell == "analysis-1/big.csv (first 3 shown); analysis-1/whole.csv"
+
+
+def test_a_table_is_cut_when_flagged_or_when_it_shows_fewer_rows_than_it_had(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Either sign is enough: the flag alone (a cut cell or column) or a short row list."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    flagged = _table("flagged.csv", ["a"], [["1"], ["2"]])
+    short = {**_table("short.csv", ["a"], [["1"], ["2"]]), "row_count": 9}
+    whole = _table("whole.csv", ["a"], [["1"], ["2"]])
+    md = R.render_markdown(_analysis_report(tables=[{**flagged, "truncated": True}, short, whole]))
+    assert "**flagged.csv** · 2 rows × 1 columns · first 2 shown" in md  # noqa: RUF001
+    assert "**short.csv** · 9 rows × 1 columns · first 2 shown" in md  # noqa: RUF001
+    assert "**whole.csv** · 2 rows × 1 columns\n" in md and md.count("shown") == 2  # noqa: RUF001
+    assert "shown" not in R.render_markdown(_analysis_report(tables=[{**whole, "truncated": "yes"}]))
+
+
+def test_a_cut_table_reads_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The note follows the report's language."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    report = _analysis_report(tables=[_cut_table()])
+    assert "**big.csv** · 2000 Zeilen × 2 Spalten · die ersten 3 gezeigt" in R.render_markdown(report)  # noqa: RUF001
+    assert "(die ersten 3 gezeigt)" in _csv_rows(_zip(report), "analyses.csv")[1][7]
+
+
+def _png_uri_of(data: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def test_a_chart_whose_bytes_are_not_a_png_is_dropped_in_every_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The URI can look right and carry an SVG, a GIF or noise; only the PNG signature lets a chart through."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    impostors = {
+        "svg.png": b'<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///etc/hosts"/></svg>',
+        "gif.png": b"GIF89a\x01\x00\x01\x00\x00\x00\x00;",
+        "noise.png": b"\x00\x01\x02\x03",
+        "almost.png": _PNG[:7],
+        "empty.png": b"",
+    }
+    charts = [{"name": name, "data_uri": _png_uri_of(data), "bytes": len(data)} for name, data in impostors.items()]
+    charts.append({"name": "ok.png", "data_uri": _PNG_URI, "bytes": len(_PNG)})
+    report = _analysis_report(charts=charts)
+    assert R.render_markdown(report).count("](data:image/png") == 1
+    htm = R.render_html(report)
+    assert htm.count("<img ") == 1 and "<svg" not in htm and "file:///" not in htm
+    zf = _zip(report)
+    assert [n for n in zf.namelist() if n.endswith(".png")] == ["analysis-1/ok.png"]
+    assert _csv_rows(zf, "analyses.csv")[1][8] == "analysis-1/ok.png"
+    assert R._analysis_charts(report["items"][0]["snapshot"]) == [("ok.png", _PNG_URI)]
 
 
 def test_json_keeps_the_stored_snapshot() -> None:

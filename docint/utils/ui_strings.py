@@ -63,6 +63,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_computed_from": "Computed from",
         "report_label_workbench_job": "workbench {version}, job {job}",
         "report_label_table_shape": "{rows} rows × {columns} columns",  # noqa: RUF001
+        "report_label_table_cut": "first {shown} shown",
         "report_label_analysis_untitled": "Analysis",
         "report_decimal_separator": ".",
         "report_percent_format": "{value}%",
@@ -178,6 +179,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_computed_from": "Berechnet aus",
         "report_label_workbench_job": "workbench {version}, Job {job}",
         "report_label_table_shape": "{rows} Zeilen × {columns} Spalten",  # noqa: RUF001
+        "report_label_table_cut": "die ersten {shown} gezeigt",
         "report_label_analysis_untitled": "Analyse",
         "report_decimal_separator": ",",
         "report_percent_format": "{value} %",

@@ -6,7 +6,6 @@ import io
 import json
 import mimetypes
 import os
-import re
 import secrets
 import threading
 import time
@@ -112,7 +111,13 @@ from docint.core.search.index import search_index_status
 from docint.core.state.collection_owner_manager import validate_collection_name
 from docint.core.state.pdf_progress import ProgressCallback
 from docint.core.state.report_pdf_store import ReportPdfStore
-from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
+from docint.core.state.report_render import (
+    PNG_DATA_URI,
+    PdfEngineUnavailableError,
+    html_to_pdf,
+    pdf_engine_available,
+    render_pdf,
+)
 from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.core.state.turn_analysis import served_analysis
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
@@ -5901,9 +5906,6 @@ def delete_report(
     return {"ok": True}
 
 
-_ANALYSIS_CHART = re.compile(r"data:image/png;base64,[A-Za-z0-9+/]+={0,2}")
-
-
 def _chart_bytes(chart: Any) -> int | None:
     """Measure a stored chart, or refuse it.
 
@@ -5914,7 +5916,7 @@ def _chart_bytes(chart: Any) -> int | None:
         int | None: The decoded size of its PNG data URI; ``None`` for anything else, or base64 that is not padded.
     """
     uri = chart.get("data_uri") if isinstance(chart, Mapping) else None
-    if not isinstance(uri, str) or not _ANALYSIS_CHART.fullmatch(uri):
+    if not isinstance(uri, str) or not PNG_DATA_URI.fullmatch(uri):
         return None
     encoded = uri.partition(",")[2]
     return None if len(encoded) % 4 else len(encoded) // 4 * 3 - encoded.count("=")

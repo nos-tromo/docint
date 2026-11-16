@@ -1750,3 +1750,17 @@ def test_admin_moves_another_owners_report_into_that_owners_collection(client: T
     assert [r["id"] for r in listed] == [rid]
     assert resp.status_code == 200, resp.text
     assert _stored_collection(rid, owner="alice") == "docs"
+
+
+def test_the_add_route_and_the_renderers_share_one_png_data_uri_rule() -> None:
+    """A chart the route takes in is a chart the renderers draw: both use the one pattern."""
+    assert api_module.PNG_DATA_URI is report_render.PNG_DATA_URI
+    chart = _png_chart(64)
+    assert api_module._chart_bytes(chart) == 64
+    snapshot = {"title": "t", "charts": [chart]}
+    assert (
+        report_render.render_markdown(
+            {"title": "T", "items": [{"artifact_type": "analysis", "note": None, "snapshot": snapshot}]}
+        ).count("](data:image/png;base64,")
+        == 1
+    )
