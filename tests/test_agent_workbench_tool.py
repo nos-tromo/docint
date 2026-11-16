@@ -28,6 +28,7 @@ from assessment_fakes import scored_node
 from llama_index.core.schema import NodeWithScore
 
 import docint.agents.turn.workbench_tool as wt
+from docint.agents.turn.keyword import check_key
 from docint.agents.turn.tools import ToolContext, ToolRegistry, ToolReply
 from docint.agents.turn.workbench_tool import (
     ANALYSIS_NOTE,
@@ -242,6 +243,69 @@ def test_refusals_leave_the_turns_two_intact() -> None:
     assert len(workbench.calls) == 2
 
 
+def test_a_run_never_sent_while_workbench_is_busy_is_no_run() -> None:
+    """A call refused for want of a workbench slot sends nothing and leaves the turn its two runs."""
+    workbench = FakeWorkbench()
+    slots = threading.BoundedSemaphore(2)
+    assert slots.acquire(blocking=False) and slots.acquire(blocking=False)
+    tool, ctx = _tool(workbench, slots=slots), _context()
+    _three(ctx)
+    registry = ToolRegistry([tool])
+
+    [busy] = _round(registry, ctx, {"code": CODE})
+    slots.release()
+    slots.release()
+    [first] = _round(registry, ctx, {"code": CODE})
+    [second] = _round(registry, ctx, {"code": CODE})
+    [past_turn] = _round(registry, ctx, {"code": CODE})
+
+    assert busy.kind == "no_capacity"
+    assert not first.error and not second.error
+    assert past_turn.kind == "call_limit" and "no more runs in this turn" in past_turn.text
+    assert len(workbench.calls) == 2
+
+
+@pytest.mark.parametrize("cause", ["no_time", "sealed"])
+def test_a_run_never_sent_for_time_or_its_disclosure_is_no_run(cause: str) -> None:
+    """A call that found too little time, or the turn's ledger sealed, sends nothing and spends no run."""
+    workbench = FakeWorkbench()
+    now = [TURN.deadline - 10.0 if cause == "no_time" else 880.0]
+    tool = WorkbenchPythonTool(workbench, DISCOVERY, TURN, clock=lambda: now[0], slots=threading.BoundedSemaphore(2))
+    ctx = _context()
+    _three(ctx)
+    registry = ToolRegistry([tool])
+    sealed = DisclosureLedger()
+    sealed.seal()
+
+    [refused] = _round(registry, ctx, {"code": CODE}, ledger=sealed if cause == "sealed" else None)
+    now[0] = 880.0
+    [first] = _round(registry, ctx, {"code": CODE})
+    [second] = _round(registry, ctx, {"code": CODE})
+    [past_turn] = _round(registry, ctx, {"code": CODE})
+
+    assert refused.kind == ("no_time" if cause == "no_time" else "unavailable")
+    assert not first.error and not second.error
+    assert past_turn.kind == "call_limit"
+    assert len(workbench.calls) == 2
+
+
+def test_a_run_that_reached_workbench_counts_even_when_it_failed() -> None:
+    """A call workbench answered with a failure was sent, so it is one of the turn's two runs."""
+    failure = RunFailure(kind="code_failed", token="not_completed", job_id=JOB, answered=True)
+    workbench = FakeWorkbench(failure, run_result())
+    tool, ctx = _tool(workbench), _context()
+    _three(ctx)
+    registry = ToolRegistry([tool])
+
+    [failed] = _round(registry, ctx, {"code": CODE})
+    [ran] = _round(registry, ctx, {"code": CODE})
+    [past_turn] = _round(registry, ctx, {"code": CODE})
+
+    assert failed.kind == "code_failed" and not ran.error
+    assert past_turn.kind == "call_limit" and "no more runs in this turn" in past_turn.text
+    assert len(workbench.calls) == 2
+
+
 def test_a_repeated_call_runs_again() -> None:
     """The same arguments in two rounds reach workbench twice: a run is never answered from memory."""
     workbench = FakeWorkbench()
@@ -406,21 +470,24 @@ def test_keyword_checks_and_topics_come_from_the_turns_facts() -> None:
 
 
 def test_keyword_checks_go_only_when_counted_and_once_per_check() -> None:
-    """A failed count says nothing and stays; the same words in the same field go once, as last checked."""
+    """A failed count stays; checks the keyword tool tells apart stay apart, and a true repeat goes once."""
     workbench = FakeWorkbench()
     tool, ctx = _tool(workbench), _context()
     _three(ctx)
     failed = {"action": "keyword", "detail": "Feuerwerk", "field": "text", "matches": None}
-    other_field = {"action": "keyword", "detail": "Hafenfest", "field": "text", "matches": 7}
-    latest = {"action": "keyword", "detail": "hafenfest", "field": "author", "matches": 5}
-    ctx.facts.extend([KEYWORD_FACT, failed, other_field, latest])
+    text_first = {"action": "keyword", "detail": "Regatta", "field": "text", "matches": 0}
+    other_case = {"action": "keyword", "detail": "hafenfest", "field": "author", "matches": 5}
+    text_again = {"action": "keyword", "detail": "regatta", "field": "text", "matches": 4}
+    ctx.facts.extend([KEYWORD_FACT, failed, text_first, other_case, text_again])
     ledger = DisclosureLedger()
 
     _run(tool, ctx, ledger=ledger, code=CODE)
 
-    assert json.loads(_sent(workbench)["keyword_checks.json"]) == [other_field, latest]
+    assert check_key("Hafenfest", "author") != check_key("hafenfest", "author")
+    assert check_key("Regatta", "text") == check_key("regatta", "text")
+    assert json.loads(_sent(workbench)["keyword_checks.json"]) == [KEYWORD_FACT, other_case, text_again]
     [record] = ledger.take()
-    assert record.keyword_checks == 2
+    assert record.keyword_checks == 3
 
 
 def test_each_file_fills_in_order_while_the_next_entry_fits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -631,6 +698,50 @@ def test_the_reply_fits_and_names_the_analysis() -> None:
     assert (reply.found, reply.informative, reply.detail) == (0, True, TITLE)
     assert reply.trail == {"analysis": 1, "passages": 2, "tables": 1, "charts": 1}
     assert ctx.facts == [{"action": NAME, "detail": TITLE, "analysis": 1, "passages": 2, "tables": 1, "charts": 1}]
+
+
+@pytest.mark.parametrize(
+    ("held", "picked", "named"),
+    [(64, None, "64 passages ([1] to [64])"), (800, list(range(1, 801, 2)), "and ")],
+    ids=["all_64", "every_other_of_800"],
+)
+def test_the_note_ends_the_reply_however_many_passages_went(held: int, picked: list[int] | None, named: str) -> None:
+    """A thinking model's shorter reply still ends naming the analysis, the passages named as ranges."""
+    workbench = FakeWorkbench(run_result(stdout="z" * 10_000, stderr="w" * 2_000))
+    tool = _tool(workbench)
+    ctx = tool_context(reasoning=True, cap=held, view=agent_llm_view)
+    _held(ctx, *(_passage(number, text="Hafen") for number in range(1, held + 1)))
+
+    reply = _run(tool, ctx, code=CODE) if picked is None else _run(tool, ctx, code=CODE, passages=picked)
+
+    assert ctx.budget.result_chars == 2_000
+    assert len(reply.text) <= 2_000
+    assert reply.text.endswith(ANALYSIS_NOTE.format(k=1))
+    assert named in reply.text.splitlines()[0]
+
+
+def test_an_analysis_is_kept_only_once_its_reply_is_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When writing the reply fails, the round reports the call failed and no analysis is left behind."""
+
+    def _fails(*args: Any) -> str:
+        """Fail as a broken reply would.
+
+        Args:
+            *args (Any): Unused.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("reply")
+
+    monkeypatch.setattr(WorkbenchPythonTool, "_reply_text", staticmethod(_fails))
+    tool, ctx = _tool(FakeWorkbench()), _context()
+    _three(ctx)
+
+    with pytest.raises(RuntimeError):
+        _run(tool, ctx, code=CODE)
+
+    assert ctx.artifacts == []
 
 
 def test_the_second_analysis_of_a_turn_is_analysis_2() -> None:

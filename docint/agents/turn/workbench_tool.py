@@ -14,7 +14,10 @@ recorded), and is bounded by the turn's deadline less a reserve for the rest of 
 that returns a table or a chart becomes an *analysis*, kept in ``ctx.artifacts``, which the user
 sees below the answer as Analysis k.
 
-A run is limited to one per round and two per turn; a refused call spends neither. Its reply is
+A run is limited to one per round and two per turn. A call refused before it was sent spends
+neither: one refused at ``prepare`` is never counted, and one whose fetch sent nothing (no time,
+no slot, no ledger to record it in) gets its run back when it is answered. A call the round
+dropped after ``prepare`` stays counted, since its fetch may have sent. Its reply is
 a plain :class:`~docint.agents.turn.tools.ToolReply`, which the registry never answers from
 memory, so the same call made again runs again.
 
@@ -34,7 +37,7 @@ import math
 import struct
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -42,7 +45,7 @@ from typing import Any, Protocol
 from llama_index.core.schema import BaseNode, MetadataMode
 from loguru import logger
 
-from docint.agents.turn.passages import refs
+from docint.agents.turn.keyword import DEFAULT_KEYWORD_FIELD, check_key
 from docint.agents.turn.tools import (
     ErrorKind,
     ToolContext,
@@ -52,6 +55,7 @@ from docint.agents.turn.tools import (
     passage_number,
     passage_range,
 )
+from docint.core.search.fields import UnknownSearchFieldError
 from docint.core.summary.units import source_file_hash, source_file_name
 from docint.utils.audit_disclose import DisclosureRefused, record_disclosure
 from docint.utils.env_cfg import load_workbench_env
@@ -146,6 +150,8 @@ _STDERR_CHARS = 500
 _ROWS_SHOWN = 5
 _ROW_LINE_CHARS = 200
 _HINT_CHARS = 300
+# Longest list of passage numbers the head line names; past it, the rest are counted.
+_HEAD_NUMBERS_CHARS = 200
 _NAME_CHARS = 100
 # Least room a stdout or stderr block is worth showing in.
 _MIN_BLOCK_CHARS = 80
@@ -376,15 +382,19 @@ def _keyword_checks(facts: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any
         facts (Sequence[Mapping[str, Any]]): The turn's facts, in call order.
 
     Returns:
-        list[Mapping[str, Any]]: The checks, in call order; of the same words in the same field,
-        only the latest.
+        list[Mapping[str, Any]]: The checks, in call order; of checks the keyword tool takes for
+        one (:func:`~docint.agents.turn.keyword.check_key`), only the latest.
     """
-    seen: set[tuple[str, str]] = set()
+    seen: set[Hashable] = set()
     latest: list[Mapping[str, Any]] = []
     for fact in reversed(facts):
         if fact.get("action") != "keyword" or type(fact.get("matches")) is not int:
             continue
-        key = (" ".join(str(fact.get("detail") or "").split()).casefold(), str(fact.get("field") or ""))
+        words, where = str(fact.get("detail") or ""), str(fact.get("field") or DEFAULT_KEYWORD_FIELD)
+        try:
+            key: Hashable = check_key(words, where)
+        except UnknownSearchFieldError:
+            key = (where, words)
         if key not in seen:
             seen.add(key)
             latest.append(fact)
@@ -536,6 +546,39 @@ def _and(parts: Sequence[str]) -> str:
         str: ``a``, ``a and b``, ``a, b and c``.
     """
     return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _ranges(numbers: Sequence[int], *, most: int | None = None) -> str:
+    """Name passages by number, runs of three or more as ranges.
+
+    Args:
+        numbers (Sequence[int]): Their numbers, ascending.
+        most (int | None): The most characters the names may take; past it, the rest are
+            counted instead. ``None`` for no limit.
+
+    Returns:
+        str: ``[1] to [10], [12], [14], [15]``, or with ``and 30 more`` at its end.
+    """
+    runs: list[tuple[int, int]] = []
+    for number in numbers:
+        if runs and number == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], number)
+        else:
+            runs.append((number, number))
+    names: list[tuple[str, int]] = []
+    for start, end in runs:
+        if end - start >= 2:
+            names.append((f"[{start}] to [{end}]", end - start + 1))
+        else:
+            names.extend((f"[{number}]", 1) for number in range(start, end + 1))
+    shown: list[str] = []
+    named = 0
+    for name, count in names:
+        if most is not None and len(", ".join([*shown, name])) > most:
+            return f"{', '.join(shown)} and {len(numbers) - named} more"
+        shown.append(name)
+        named += count
+    return ", ".join(shown)
 
 
 def _csv_line(cells: Sequence[str]) -> str:
@@ -735,7 +778,7 @@ class WorkbenchPythonTool:
 
         The round's call is counted first, then the turn's limit checked, then the code and the
         passage numbers. Only a call that passes all of them builds its files and is counted
-        against the turn's two.
+        against the turn's two; :meth:`_answer` gives the run back when its fetch sent nothing.
 
         Args:
             arguments (Mapping[str, Any]): ``code``; optionally ``passages``, the numbers to use
@@ -869,6 +912,9 @@ class WorkbenchPythonTool:
     def _answer(self, handover: _Handover, fetched: Any, ctx: ToolContext) -> ToolReply:
         """Reply with what the run returned, and keep its tables and charts as an analysis.
 
+        A call whose fetch sent nothing gets its run back, on the loop thread, before the next
+        round is prepared. The analysis is kept only once its reply is written.
+
         Args:
             handover (_Handover): What the call sent.
             fetched (Any): What :meth:`_fetch` returned.
@@ -880,7 +926,10 @@ class WorkbenchPythonTool:
             :data:`ANALYSIS_NOTE` when the run became an analysis. It admits nothing and is
             informative; its trail names the analysis (``None`` without one) and the counts.
         """
-        if isinstance(fetched, _NotSent | RunFailure):
+        if isinstance(fetched, _NotSent):
+            self._turn_calls -= 1
+            return error_reply(self.name, REFUSALS[fetched.kind], kind=fetched.kind, detail=handover.title)
+        if isinstance(fetched, RunFailure):
             return error_reply(self.name, REFUSALS[fetched.kind], kind=fetched.kind, detail=handover.title)
         if not isinstance(fetched, RunResult):
             return error_reply(self.name, REFUSALS["unavailable"], kind="unavailable", detail=handover.title)
@@ -903,9 +952,9 @@ class WorkbenchPythonTool:
         charts, dropped = _charts(fetched.images)
         not_kept.extend(dropped)
         number = len(ctx.artifacts) + 1 if tables or charts else None
+        text = self._reply_text(handover, fetched, tables, charts, others, not_kept, number, ctx.budget.result_chars)
         if number is not None:
             ctx.artifacts.append(self._analysis(handover, fetched, tables, charts))
-        text = self._reply_text(handover, fetched, tables, charts, others, not_kept, number, ctx.budget.result_chars)
         trail = {"analysis": number, "passages": len(handover.numbers), "tables": len(tables), "charts": len(charts)}
         return ToolReply(text=text, found=0, action=self.name, detail=handover.title, informative=True, trail=trail)
 
@@ -963,7 +1012,8 @@ class WorkbenchPythonTool:
     ) -> str:
         """Write the reply within ``limit``, its parts given room in order of importance.
 
-        The head line and the closing note come first; then the tables' shapes, the charts, the
+        The closing note comes first, then the head line, its passages named as ranges; then the
+        tables' shapes, the charts, the
         other outputs, what was left out or dropped and workbench's hint; then the end of
         ``stderr``; then a few rows of each table; and ``stdout`` fills what is left.
 
@@ -980,9 +1030,8 @@ class WorkbenchPythonTool:
         Returns:
             str: The reply.
         """
-        inputs = [
-            _count(len(handover.numbers), "passage") + (f" ({refs(handover.numbers)})" if handover.numbers else "")
-        ]
+        named = _ranges(handover.numbers, most=_HEAD_NUMBERS_CHARS)
+        inputs = [_count(len(handover.numbers), "passage") + (f" ({named})" if handover.numbers else "")]
         if handover.keyword_checks:
             inputs.append(_count(handover.keyword_checks, "keyword check"))
         if handover.topic_listings:
@@ -1016,7 +1065,7 @@ class WorkbenchPythonTool:
             info.append("Not kept: " + ", ".join(not_kept) + ".")
         left: list[str] = []
         if handover.left_out:
-            left.append(f"passages {refs(handover.left_out)}")
+            left.append(f"passages {_ranges(handover.left_out)}")
         if handover.keyword_left_out:
             left.append(_count(handover.keyword_left_out, "keyword check"))
         if handover.topics_left_out:
@@ -1029,5 +1078,5 @@ class WorkbenchPythonTool:
         if stderr.strip():
             slots.append(_Slot(3, fit=_block("stderr, its end:", stderr, _tail, _STDERR_CHARS)))
         if number is not None:
-            slots.append(_Slot(1, text=ANALYSIS_NOTE.format(k=number)))
+            slots.append(_Slot(0, text=ANALYSIS_NOTE.format(k=number)))
         return _compose(slots, limit)
