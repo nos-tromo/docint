@@ -874,7 +874,8 @@ PNG_DATA_URI = re.compile(r"data:image/png;base64,[A-Za-z0-9+/]+={0,2}")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 #: A cell that is wholly a plain number: it cannot be a formula, so a table's CSV keeps it as it is.
-_PLAIN_NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+#: The digit runs are not split between two classes, so a failed match is linear in the cell's length.
+_PLAIN_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 
 #: What opens a link, an image, a code span or a tag in Markdown.
 _MD_SPECIAL = re.compile(r"([\\\[\]<>`])")

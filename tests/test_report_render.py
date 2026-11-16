@@ -4,8 +4,10 @@ import base64
 import csv
 import html
 import io
+import itertools
 import json
 import re
+import time
 import zipfile
 from collections.abc import Sequence
 from typing import Any, cast
@@ -2520,6 +2522,33 @@ def test_a_cell_that_is_wholly_a_number_stays_a_number_in_the_zip() -> None:
     assert rows[0] == ["-1", "+2", "'=3"]
     assert [cell for row in rows[1:4] for cell in row] == numbers
     assert [cell for row in rows[4:] for cell in row if cell] == [f"'{cell}" for cell in guarded]
+
+
+def test_the_number_check_runs_in_linear_time_on_cells_the_sandbox_controls() -> None:
+    """A long digit run ending in a non-digit fails fast: a full 32 x 50 table of them is no CPU sink."""
+    cell = "1" * 499 + "x"
+    columns = [f"c{i}" for i in range(32)]
+    rows = [[cell] * 32 for _ in range(50)]
+    started = time.perf_counter()
+    text = R._table_csv(columns, rows, guard=True)
+    elapsed = time.perf_counter() - started
+    assert text.count(cell) == 32 * 50
+    assert elapsed < 0.5
+    started = time.perf_counter()
+    assert (
+        R._table_cell("1" * 499 + "e") == "1" * 499 + "e"
+        and R._table_cell("-" + "1" * 499 + "x") == "'-" + "1" * 499 + "x"
+    )
+    assert time.perf_counter() - started < 0.05
+
+
+def test_the_number_pattern_matches_what_the_first_one_did() -> None:
+    """The linear pattern is the same language as the ambiguous one it replaced, on every short string."""
+    first = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+    for length in range(7):
+        for chars in itertools.product("+-.0e1x\n", repeat=length):
+            text = "".join(chars)
+            assert bool(R._PLAIN_NUMBER.fullmatch(text)) == bool(first.fullmatch(text)), text
 
 
 @pytest.mark.parametrize(
