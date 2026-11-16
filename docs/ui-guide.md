@@ -205,6 +205,9 @@ While it works, the turn lists each step as it happens:
 - a passage read again ("Read passage [2]");
 - a listing of the collection's topics ("Listed the topics"), or one topic's
   passages, with how many were new ("Read topic T3: 5 passages");
+- a Python run ("Ran Python: …"), whose tables and charts stay below the answer
+  as an analysis card, with its code behind a disclosure and a **+ Report**
+  control (see [reports.md](reports.md));
 - a note ("Note: …"): text the model wrote before it decided to search
   again. Whatever of that text had already streamed into the answer moves into
   the trail, and the answer starts afresh;

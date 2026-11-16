@@ -94,6 +94,7 @@ instead of the frame carrying the result; a queued job is marked failed
 | `GET`  | `/collections/{name}/topics/{topic_id}/chunks` | `Query` | One page of a topic's chunks. |
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
 | `GET`  | `/sessions/{session_id}/history` | `Sessions` | Return conversation history for a session. |
+| `GET`  | `/sessions/{session_id}/analyses/{analysis_id}` | `Sessions` | One stored analysis of a session, in full. |
 | `GET`  | `/sessions/{session_id}/sources.zip` | `Sessions` | Stream a ZIP of every source file cited in the session. |
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
 | `PUT` | `/sessions/{session_id}/scope` | `Sessions` | Restrict the session's answers to hand-picked chunks. |
@@ -341,6 +342,7 @@ target.
   "visual": null,
   "answer_mode": null,
   "agent": null,
+  "analyses": [],
   "validation_checked": true,
   "validation_mismatch": false,
   "validation_reason": null
@@ -358,7 +360,9 @@ labelled model judgement to the cited evidence. `agent` carries the trail:
   when this backend was writing the collection during the check, so chunks the
   write had not stored yet are in neither number, and a batch it stored during
   the check may be in neither. A count that failed is stored as
-  `matches: null`, never as 0; the frames leave that key out;
+  `matches: null`, never as 0; the frames leave that key out. A `run_python`
+  step adds `analysis` (its number in the turn, `null` when the run made none),
+  `passages`, `tables` and `charts`;
 - `reason`: an `agent.reason` token, or `null` (see
   [Limits and reasons](retrieval-and-agents.md#limits-and-reasons)).
   `answer_cut` means the endpoint cut the answer at its length limit, so the
@@ -373,6 +377,12 @@ plain answer an agent turn handed over because the endpoint refused tools
 carries
 `agent: {"steps": 0, "actions": [], "reason": "tools_unavailable", "answer": "plain"}`.
 
+`analyses` holds what the turn's `run_python` runs kept (see
+[Python on the evidence](retrieval-and-agents.md#python-on-the-evidence)), in
+full, each with its stored `id`: `title`, `question`, `code`, `stdout`,
+`tables`, `charts` (PNG data URIs) and `provenance`. It is empty when the turn
+kept none, as every stateless turn does.
+
 ### `POST /stream_query`
 
 Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
@@ -385,7 +395,8 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
     model's query), `search_images` (the visual cues it looked for),
     `keyframes` (the clip's name, ending in ` #n` when one frame was asked for),
     `keyword` (the words it matched), `topics` (empty for a listing of the
-    topics, `T<n>` for one topic's passages) or `read` (the passage number);
+    topics, `T<n>` for one topic's passages), `run_python` (the title it was
+    given, or empty) or `read` (the passage number);
   - `note`: the text the round wrote before its calls, cut to 500 characters,
     with `found` 0. It arrives after the `token` frames it withdraws: discard
     the answer text so far, and treat later tokens as a fresh answer. The first
@@ -430,7 +441,8 @@ Same inputs as `/query`, streamed as SSE `data:` frames with no `event:` line:
 - The final envelope — `/query`'s fields with the text under `response` instead
   of `answer`, plus `reasoning` (and `retried` / `retry_query` after a
   corrective retry). An agent turn adds `answer_mode` and `agent`; a plain turn
-  carries neither key, except the `tools_unavailable` fallback's `agent`.
+  carries neither key, except the `tools_unavailable` fallback's `agent`. Every
+  final frame carries `analyses`, as `/query` does.
 
 ### `POST /search`
 
@@ -1089,7 +1101,9 @@ Recaptures the frozen document-overview snapshot from the collection's
 
 Adds a snapshotted artifact (`ReportItemIn`: `artifact_type`, `dedupe_key`,
 `snapshot`, optional `note`). The renderers know `chat_answer`,
-`entity_finding`, `hate_speech_finding`, `summary` and `topics` (one item for
+`entity_finding`, `hate_speech_finding`, `analysis` (sent as
+`snapshot: {"analysis_id": …}` alone, the server building the rest from the
+stored row), `summary` and `topics` (one item for
 a whole topic run: `collection`, `run_id`, `run_updated_at`, `coverage`
 `{total, assigned}` and `topics`, each `{id, label, keywords, size, share,
 description}`, keyed `topics:<collection>`). Idempotent by `dedupe_key`, so
@@ -1194,6 +1208,11 @@ carries its `answer_mode` and its `agent` trail, as does a plain turn that kept
 a `tools_unavailable` trail; any other plain turn carries neither. A trail
 stored by the earlier assessment pipeline may also carry `shortened`.
 
+An assistant message whose turn kept analyses also carries `analyses`: one
+summary each, `{id, index, title, tables, charts}`, with the tables' names and
+shapes and the charts' names and sizes. The analysis itself is read from the
+route below.
+
 The `collection` query parameter (the caller's active logical collection) is
 required. `404` unless the session is the caller's and is pinned to that
 collection, so after a collection switch the browser's Back button cannot show
@@ -1205,6 +1224,13 @@ An assistant message carries `retrieval_target` (`all`, `documents` or
 whenever one was stored. The key is absent for a scoped turn, where the pinned
 scope outranks the target and no retrieval ran, and for turns stored before the
 field existed; absent never means `all`.
+
+### `GET /sessions/{session_id}/analyses/{analysis_id}`
+
+Returns one stored analysis in full, as `analyses` carries it, with
+`provenance.collection` set to the caller's collection. `collection` is
+required, and it is gated as the history is: `404` unless the session is the
+caller's, pinned to that collection, and holds the analysis.
 
 ### `GET /sessions/{session_id}/sources.zip`
 

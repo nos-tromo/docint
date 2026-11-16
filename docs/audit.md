@@ -23,6 +23,7 @@ and its access model. Nothing on this page duplicates that.
 - [Background jobs](#background-jobs)
 - [Model calls](#model-calls)
 - [Calls to Nextext](#calls-to-nextext)
+- [Calls to workbench](#calls-to-workbench)
 - [Streaming routes](#streaming-routes)
 - [Retention sweep](#retention-sweep)
 - [Command-line tools](#command-line-tools)
@@ -80,7 +81,7 @@ and its access model. Nothing on this page duplicates that.
 | `collect` | Files staged by an upload (`ingest.upload`) and every ingest run into a collection (`ingest.run`): through the job queued by `POST /ingest/finalize`, the synchronous `POST /ingest`, and the `ingest` command. |
 | `modify` | A session's scope or topic changed; reports created, edited, assigned and filled; a collection summary built; a topic run built, discovered, aligned, reduced or relaxed; the full-text search backfill (`search-index`). |
 | `query` | Chat and agent turns, keyword search, one chunk's text, the NER views, the hate-speech list, the documents list, session listings and histories, report listings and reports, the topics views, a summary read, a source preview or a thumbnail. |
-| `disclose` | Every download (`recipient="download:<format>"`: CSV exports, report exports, extract archives, a single source's extract, a session's source files, a stored report PDF) and every file written for someone to take away (`recipient="file:extract"`, `"file:report_pdf"`, and the command-line tools' result files). |
+| `disclose` | A chat turn's hand-over to workbench (`chat.workbench`), and every download (`recipient="download:<format>"`: CSV exports, report exports, extract archives, a single source's extract, a session's source files, a stored report PDF) and every file written for someone to take away (`recipient="file:extract"`, `"file:report_pdf"`, and the command-line tools' result files). |
 | `ai_call` | A model call: the answer of a chat or agent turn (`inference:chat`), a snippet translation, a summary read's validation, and the transfers of a batch operation — one event per stage, with counts ([Model calls](#model-calls)). |
 | `combine` | Entity resolution: merging entity surfaces into durable canonicals (`entities.resolve`), whether from the API, after an ingest, after the retention sweep deleted documents (as the system), or from `resolve`; and the social linker joining a social export's postings with their comments and media inside an ingest run (`ingest.social_link`). |
 | `delete` | A collection, a session, a report, a report item, a stored extract; the retention sweep's deletions (as the system); `verify --repair`. |
@@ -258,7 +259,8 @@ without one. The default applies only while the variable is unset: set
 actions. The code default is empty (tests, a bare `uvicorn`). The SPA states
 the purpose through its purpose bar ([below](#how-the-spa-sends-the-purpose)).
 A route is refused (428, one `denied` event) when *any* action its
-operation may record is listed — a chat turn records `query` and `ai_call`, a
+operation may record is listed — a chat turn records `query` and `ai_call`
+(and `disclose` while workbench is configured), a
 finalize `collect`, `ai_call`, `combine` and `modify`, a summary request
 `query`, `modify` and `ai_call`. A job runs with the purpose of the request
 that queued it, so the requirement is checked once, at the request.
@@ -311,7 +313,7 @@ one is stated, and it is recorded, but they are not refused without one.
 | `GET` / `POST /summarize` | `query` (+ `modify`, `ai_call`) | yes | `apiGetOrNull`, `apiPost` |
 | `GET /collections/ner/stats`, `/ner/sources`, `/ner/graph`, `GET /collections/hate-speech`, `GET /collections/documents` | `query` | yes | `apiGet` |
 | `GET /collections/{name}/topics` and its `/evidence`, `/documents`, `/chunks` | `query` | yes | `apiGet`, `apiGetOrNull` |
-| `GET /sessions/list`, `GET /sessions/{id}/history` | `query` | yes | `apiGet` |
+| `GET /sessions/list`, `GET /sessions/{id}/history`, `GET /sessions/{id}/analyses/{id}` | `query` | yes | `apiGet` |
 | `GET /reports`, `GET /reports/unassigned`, `GET /reports/{id}` | `query` | yes | `apiGet` |
 | `GET /collections/{name}/export/documents.csv`, `ner-sources.csv`, `hate-speech.csv` | `disclose` | yes | download button → `downloadFile` (was a link) |
 | `GET /search/export.csv` | `disclose` | yes | download button → `downloadFile` (was a link) |
@@ -374,7 +376,7 @@ ends ([Background jobs](#background-jobs)).
 
 | Route | Recorded as | Target and notes |
 |---|---|---|
-| `POST /query` | `query` `chat.query` + `ai_call` `chat.answer` | `chunk`: the sources returned. Criteria `question_sha256`, `session_id`, `retrieval_mode`, `retrieval_target`, `metadata_filters`, `scope_chunks`, `topic_id`, `reasoning`. The `ai_call` (`inference:chat`) carries the answer's hash and the same sources. |
+| `POST /query` | `query` `chat.query` + `ai_call` `chat.answer` (+ `disclose` `chat.workbench` per `run_python` call) | `chunk`: the sources returned. Criteria `question_sha256`, `session_id`, `retrieval_mode`, `retrieval_target`, `metadata_filters`, `scope_chunks`, `topic_id`, `reasoning`. The `ai_call` (`inference:chat`) carries the answer's hash and the same sources. Each `disclose` (`workbench:run_python`) has `chunk`: the point ids handed over; criteria `workbench_job`, `passages`, `keyword_checks`, `topic_listings`, `data_bytes`. |
 | `POST /stream_query` | as `POST /query` | Written before the final frame ([Streaming routes](#streaming-routes)). |
 | `POST /search` | `query` `search.fulltext` | `chunk`: the hits on the page. Criteria `keywords` (parsed), `field`, `metadata_filters`, `limit`, `page`. |
 | `GET /search/chunk` | `query` `search.chunk` | `chunk` [id]. |
@@ -414,6 +416,7 @@ ends ([Background jobs](#background-jobs)).
 |---|---|---|
 | `GET /sessions/list` | `query` `sessions.list` | `session`. A session's title is drawn from its first question. |
 | `GET /sessions/{session_id}/history` | `query` `session.history` | `chunk`: every source the turns cite. Criteria `session_id`, `messages`. |
+| `GET /sessions/{session_id}/analyses/{analysis_id}` | `query` `session.analysis` | `analysis` [id]; criteria `session_id`. |
 | `GET /sessions/{session_id}/sources.zip` | `disclose` `export.session_sources`, `download:zip` | `document`: the files written into the archive. Criteria `session_id`. |
 | `DELETE /sessions/{session_id}` | `delete` `session.delete` | `session` [id]. |
 | `PUT /sessions/{session_id}/scope` | `modify` `session.scope.set` | `chunk`: the pinned ids. Criteria `session_id`. |
@@ -576,6 +579,24 @@ Nextext — a 428 included — skips that clip like any other failure at that st
 (`poll_error` while polling, `error` on submission or download) and is logged;
 the run goes on. In docint's own log the round trip is the run's
 `ingest.transcribe` transfer ([Model calls](#model-calls)).
+
+## Calls to workbench
+
+A chat turn's `run_python` tool hands passages to workbench
+(`docint/utils/workbench_client.py`), which keeps an audit log of its own.
+
+- **Pseudonyms.** The user and the session reach workbench only as HMACs under
+  the shared `WORKBENCH_API_KEY` (`X-User-Id`, `X-Session-Id`); no edge user
+  name leaves docint, and an admin acting sends the owner's.
+- **Purpose and request id.** `X-Audit-Purpose` is the turn's stated purpose, or
+  `reason=docint chat` when none was; `X-Request-ID` is the request's.
+- **One job, two trails.** A call is entered in the turn's ledger before it is
+  sent, and one that cannot be entered is not sent; the turn writes one
+  `disclose` per entry. Once workbench answers, its job id is the
+  `workbench_job` that workbench's own event carries too.
+- **The seal.** However the turn ends its ledger is sealed: a later call sends
+  nothing, and one still in flight is written with `outcome: error`,
+  `incomplete: true` and no job id.
 
 ## Calls to the inference router
 

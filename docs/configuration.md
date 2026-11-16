@@ -370,6 +370,20 @@ defaults apply only to callers that omit these fields.
 | `KEYFRAMES_PER_MINUTE` | `4` | Target frames sampled per minute of video. Sampling itself is requested per job (docint sends `keyframes: true` and `visual_context: false`, declining Nextext's own captions — which needs Nextext ≥ v1.9.0); `0` here — or in `KEYFRAMES_MAX` — turns it off. |
 | `KEYFRAME_DEDUP_COSINE` | `0.95` | Client-side near-duplicate pruning before storage, in `[0, 1]`. A frame whose cosine similarity to an already-kept frame reaches this is dropped. |
 
+## workbench — `WorkbenchClientConfig`
+
+Loaded by `load_workbench_env()`. The chat agent's `run_python` tool runs Python
+on a turn's passages in [workbench](https://github.com/nos-tromo/workbench)'s
+sandbox ([Python on the evidence](retrieval-and-agents.md#python-on-the-evidence)).
+Without the key the tool is never offered and docint works as before.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WORKBENCH_API_KEY` | *unset* (tool off) | The key shared with workbench, the same value as `DOCINT_WORKBENCH_KEY` in its `.env`: sent as `Authorization: Bearer …` and the HMAC key of the pseudonyms docint sends. At least 32 characters, or docint does not start. Read at startup. |
+| `WORKBENCH_API_BASE` | *empty* (compose: `http://workbench-api:8000`) | workbench's api on `workbench-net`. Empty switches the tool off. |
+| `WORKBENCH_TIMEOUT` | `75` | Seconds one call may take, at most; positive and finite. A turn's own time left shortens it. |
+| `WORKBENCH_NET` | `workbench-net` | Compose only: the name of the external network the backend joins to reach workbench. |
+
 ## Metrics — `MetricsConfig`
 
 Loaded by `load_metrics_env()`.

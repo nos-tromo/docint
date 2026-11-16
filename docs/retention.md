@@ -95,6 +95,7 @@ collection's oldest document counts.
 |---|---|
 | Chat session | the documents its answers cite; an answer without citations, an agent-answered turn (its tools may list the whole collection's topics or keywords), a scoped session or one with a topic focus counts as collection-wide |
 | Report | each item's sources (a chat answer's citations, a finding's chunk); summaries, topics and the collection overview count as collection-wide |
+| Stored analysis | its turn: it goes with it. Its report item draws on the sources it names, and is collection-wide unless every source is named and no keyword checks or topic listings went in |
 | Stored extract | collection-wide, and its own `EXTRACT_RETENTION_DAYS` if that comes first |
 | Topic run | collection-wide |
 | Summary and overview caches, full-text and entity data, docstore nodes, source file, pipeline artifacts | part of the document; deleted with it |
