@@ -126,7 +126,7 @@ def _topics() -> TopicsSource:
 
 
 def _python() -> WorkbenchPythonTool:
-    """Build the run_python tool of a stored turn over a workbench double that fails the test if it is called.
+    """Build the run_python tool of a stored turn over a workbench double that answers any call with its stock run.
 
     Returns:
         WorkbenchPythonTool: The tool.

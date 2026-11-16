@@ -157,7 +157,7 @@ REFUSALS: Mapping[RefusalKind, str] = {
 }
 
 _BOM = "\ufeff"
-# A PNG's signature, the IHDR chunk's length, tag and 13 bytes of data, and its checksum.
+#: A PNG's signature, the IHDR chunk's length, tag and 13 bytes of data, and its checksum.
 _PNG_HEADER_BYTES = 33
 _IHDR_LENGTH = b"\x00\x00\x00\x0d"
 _STDERR_CHARS = 500

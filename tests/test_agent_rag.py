@@ -4199,6 +4199,73 @@ def test_a_failing_discovery_costs_a_turn_only_run_python(monkeypatch: pytest.Mo
     assert turn.loop._system_prompt == _system_prompt("en", "all", rule=False, summary=NO_HISTORY)
 
 
+def test_a_fault_costs_run_python_a_warning_once_per_change_of_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fault that withholds the tool is warned of by its exception's type, once; a repeat is a DEBUG line.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    workbench = _workbench_ready(monkeypatch)
+    detail = "an invented fault detail"
+    raised: list[Exception] = [RuntimeError(detail)]
+
+    def _fail() -> Discovery:
+        """Fail as a client that broke would.
+
+        Raises:
+            Exception: The fault the test chose.
+        """
+        raise raised[0]
+
+    workbench.discover = _fail  # type: ignore[method-assign]
+    lines: list[tuple[str, str]] = []
+    sink = logger.add(
+        lambda message: lines.append((message.record["level"].name, message.record["message"])), level="DEBUG"
+    )
+    try:
+        _turn(rag, python_turn=_stored_turn())
+        _turn(rag, python_turn=_stored_turn())
+        raised[0] = ValueError(detail)
+        _turn(rag, python_turn=_stored_turn())
+        workbench.discover = lambda: Discovery(60, "0.2.0")  # type: ignore[method-assign]
+        assert "run_python" in _turn(rag, python_turn=_stored_turn()).loop._registry.names
+        workbench.discover = _fail  # type: ignore[method-assign]
+        _turn(rag, python_turn=_stored_turn())
+    finally:
+        logger.remove(sink)
+
+    assert [line for line in lines if line[1].startswith(NO_ROOM_FOR_PYTHON)] == [
+        ("WARNING", f"{NO_ROOM_FOR_PYTHON}fault (RuntimeError)"),
+        ("DEBUG", f"{NO_ROOM_FOR_PYTHON}fault (RuntimeError)"),
+        ("WARNING", f"{NO_ROOM_FOR_PYTHON}fault (ValueError)"),
+        ("WARNING", f"{NO_ROOM_FOR_PYTHON}fault (ValueError)"),
+    ]
+    assert all(detail not in text for _, text in lines)
+
+
+def test_a_malformed_timeout_is_read_before_workbench_is_asked(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog: Any
+) -> None:
+    """The timeout is read first, so a malformed one costs no discovery, and is warned of without its value.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (Any): Bridged WARNING capture.
+    """
+    monkeypatch.setenv("WORKBENCH_TIMEOUT", "invented-soon")
+    rag = _rag(monkeypatch)
+    workbench = _workbench_ready(monkeypatch)
+    loguru_caplog.clear()
+
+    turn = _turn(rag, python_turn=_stored_turn())
+
+    assert workbench.discoveries == 0
+    assert "run_python" not in turn.loop._registry.names
+    assert loguru_caplog.messages == [f"{NO_ROOM_FOR_PYTHON}fault (ValueError)"]
+    assert "invented-soon" not in loguru_caplog.text
+
+
 def test_run_python_works_for_the_stored_turn_within_the_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool the factory built calls workbench for the turn's owner and session, with the timeout read at the build.
 
@@ -4370,6 +4437,7 @@ async def test_discovery_runs_off_the_event_loop_on_the_streaming_path(monkeypat
     finally:
         ticker.cancel()
 
+    # The thread assertion is the real guard: it holds only while the helper runs the build off the loop.
     assert discovered_on and discovered_on[0] != loop_thread
     assert ticks >= 10
     assert "run_python" in turn.loop._registry.names

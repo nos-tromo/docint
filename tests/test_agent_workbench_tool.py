@@ -857,6 +857,34 @@ def test_the_end_of_stderr_is_shown() -> None:
     assert "LAST" in reply.text and "warn " * 120 not in reply.text
 
 
+def test_a_tail_of_several_lines_starts_at_a_boundary_within_room() -> None:
+    """At every room holding the last word, a long multi-line stderr is cut to a marker and a suffix at a boundary."""
+    text = "\n".join(f"warning {number:03d}: the berth count drifted" for number in range(80))
+    least = len(wt.cut_marker(len(text), len(text))) + 1 + len("drifted")
+
+    assert wt._tail(text, least - 1 - len("drifted")) == ""
+    for room in range(least, len(text)):
+        tail = wt._tail(text, room)
+        head, _, body = tail.partition("\n")
+        assert len(tail) <= room
+        assert head.startswith("[... ") and head.endswith(" characters not shown ...]")
+        assert body and text.endswith(body) and text[-len(body) - 1].isspace()
+
+
+def test_a_tail_of_one_unbroken_token_keeps_its_end_within_room() -> None:
+    """A stderr that is a single token is cut to its end behind a marker, never reduced to the marker alone."""
+    text = "x" * 5_000
+    least = len(wt.cut_marker(len(text), len(text))) + 2
+
+    for room in (least, least + 1, 200, 1_000, len(text) - 1):
+        tail = wt._tail(text, room)
+        assert len(tail) <= room
+        head, _, body = tail.partition("\n")
+        assert head.startswith("[... ") and body and text.endswith(body)
+    assert wt._tail(text, least - 1) == ""
+    assert wt._tail(text, len(text)) == text
+
+
 def test_only_a_run_with_a_table_or_a_chart_becomes_an_analysis() -> None:
     """A run that wrote only notes is named in the reply and kept as nothing."""
     notes = "n" * 120

@@ -3583,6 +3583,7 @@ class RAG:
     _retention_repaired: bool = field(default=False, init=False, repr=False)
     _retention_dirty: set[str] = field(default_factory=set, init=False, repr=False)
     _retention_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _python_fault: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
@@ -9600,8 +9601,10 @@ class RAG:
         stored would never be seen again; a scoped turn answers in one round without tools, and a
         visual turn answers from pictures. Discovery blocks the caller, up to its own limit, and is
         cached, so this runs on the turn's worker thread, as :meth:`agent_turn` does. A withheld offer
-        is logged once at DEBUG by its reason, or as ``fault`` with the exception's type alone; the
-        client says by itself, once per change, when workbench is or is not discovered.
+        is logged at DEBUG by its reason. A ``fault`` (a client bug, or a malformed ``WORKBENCH_*``
+        value) is a WARNING naming the exception's type alone, once per change of the type, and a
+        DEBUG line while it repeats; the client says by itself, once per change, when workbench is
+        or is not discovered.
 
         Args:
             retrieval_target (str): Which evidence the turn may answer from.
@@ -9622,11 +9625,15 @@ class RAG:
         else:
             try:
                 client = workbench_client()
-                discovery = None if client is None else client.discover()
                 timeout = load_workbench_env().timeout
+                discovery = None if client is None else client.discover()
             except Exception as exc:
-                logger.debug("The run_python tool was withheld from an agent turn: fault ({})", type(exc).__name__)
+                fault = type(exc).__name__
+                log = logger.debug if fault == self._python_fault else logger.warning
+                self._python_fault = fault
+                log("The run_python tool was withheld from an agent turn: fault ({})", fault)
                 return None
+            self._python_fault = None
             if client is not None and discovery is not None:
                 return WorkbenchPythonTool(client, discovery, python_turn, timeout_s=timeout)
             reason = "not_configured" if client is None else "not_discovered"
