@@ -749,6 +749,47 @@ def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int
 WORKBENCH_JOB = "0" * 32
 #: The table a scripted workbench run returns, as pandas writes it without its index.
 COUNTS_CSV = "author,posts\nuser-a,12\nuser-b,7\n"
+#: The line a validator reads for the analysis :func:`an_analysis` builds.
+ANALYSIS_LINE = (
+    '- Analysis 1 "Posts per author": from passages [1], [2]; '
+    "tables counts.csv (2 rows × 2 columns); stdout: 2 authors"  # noqa: RUF001
+)
+
+
+def an_analysis(**overrides: Any) -> dict[str, Any]:
+    """Build an analysis as the run_python tool keeps it: two passages, the counts table and a summary.
+
+    Args:
+        **overrides (Any): Keys to set instead.
+
+    Returns:
+        dict[str, Any]: The analysis; a fresh one at each call.
+    """
+    analysis: dict[str, Any] = {
+        "schema": 1,
+        "title": "Posts per author",
+        "code": "print(2)",
+        "stdout": "2 authors",
+        "tables": [
+            {
+                "name": "counts.csv",
+                "columns": ["author", "posts"],
+                "rows": [["user-a", "12"], ["user-b", "7"]],
+                "row_count": 2,
+                "truncated": False,
+            }
+        ],
+        "charts": [],
+        "provenance": {
+            "sources": [
+                {"citation_index": 1, "chunk_id": "p1", "file_hash": None, "filename": None, "page": None},
+                {"citation_index": 2, "chunk_id": "p2", "file_hash": None, "filename": None, "page": None},
+            ],
+            "inputs": {"passages": 2, "keyword_checks": 0, "topic_listings": 0},
+            "workbench": {"job_id": WORKBENCH_JOB, "version": "0.2.0", "tool": "run_python"},
+        },
+    }
+    return {**analysis, **overrides}
 
 
 def tiny_png(width: int = 640, height: int = 480) -> bytes:

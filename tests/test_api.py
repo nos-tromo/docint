@@ -16,9 +16,11 @@ import openai
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    ANALYSIS_LINE,
     KEYWORD_CALLS,
     KEYWORD_STEPS,
     KeywordClient,
+    an_analysis,
     answer_round,
     call_round,
     keyword_match,
@@ -39,7 +41,7 @@ import docint.agents.assessment.gate as gate_module
 import docint.core.api as api_module
 from docint.agents.assessment.bounded import NoSlot
 from docint.agents.assessment.ledger import EvidenceLedger
-from docint.agents.generation import NO_SOURCES_BESIDE_CHECKS, TOPIC_CHECKS_HEADING
+from docint.agents.generation import ANALYSIS_CHECKS_HEADING, NO_SOURCES_BESIDE_CHECKS, TOPIC_CHECKS_HEADING
 from docint.agents.turn.keyword import KeywordMatcher
 from docint.agents.turn.loop import _OVERFLOW_MESSAGE
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TIMEOUT_S, PROBE_TOOL
@@ -7407,6 +7409,176 @@ def test_an_assessment_shows_its_validator_a_check_made_while_written(monkeypatc
     [prompt] = validator.prompts
     assert '\n- "Feuerwerk" (text): 0; collection being written\n' in prompt
     assert "intent=assessment" in prompt
+
+
+#: An analysis as an agent turn's payload carries it, and a trail whose answer is split into its evidence and its view.
+ANALYSIS = an_analysis()
+SPLIT_TRAIL: dict[str, Any] = {"answer": "split", "evidence_chars": None, "actions": []}
+PASSAGES = [{"id": "a", "citation_index": 1, "text": "Der Hafenverein plant das Fest im Mai."}]
+
+
+def _validate_turn(data: dict[str, Any], *, answer: str, sources: list[dict[str, Any]]) -> dict[str, Any]:
+    """Validate a turn's payload as the chat routes do.
+
+    Args:
+        data (dict[str, Any]): The turn's payload.
+        answer (str): The answer text.
+        sources (list[dict[str, Any]]): The turn's numbered sources.
+
+    Returns:
+        dict[str, Any]: The validation metadata.
+    """
+    return api_module._turn_validation(
+        data,
+        question="Wie viele Autoren schreiben über das Hafenfest?",
+        answer=answer,
+        sources=sources,
+        previous_user_input=None,
+        summary_diagnostics=None,
+        retrieval_query=None,
+    )
+
+
+def test_an_agent_lookup_hands_its_analyses_to_the_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A figure the turn's code computed cites no passage but the ones it names, so the validator reads the analysis.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+
+    result = _validate_turn(
+        {"answer_mode": "lookup", "agent": LOOKUP_TRAIL, "analyses": [ANALYSIS]},
+        answer="Zwei Autoren schreiben darüber [1] [2].",
+        sources=PASSAGES,
+    )
+
+    [prompt] = validator.prompts
+    assert f"{ANALYSIS_CHECKS_HEADING}\n{ANALYSIS_LINE}\n" in prompt
+    assert (result["validation_checked"], result["validation_mismatch"]) == (True, False)
+
+
+@pytest.mark.parametrize("path", ["/stream_query", "/query"])
+def test_a_chat_turn_hands_its_analyses_to_the_validator(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """Both chat routes validate with the analyses their turn's payload carries.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    rag = cast(Any, api_module.rag)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    rag.text_model = validator
+    answer = "Zwei Autoren schreiben darüber [1] [2]."
+    final = _agent_final(response=answer, sources=PASSAGES, analyses=[ANALYSIS])
+    monkeypatch.setattr(rag, "stream_chat", _scripted_stream([], [answer, final]))
+    monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+
+    if path == "/query":
+        client.post(path, json={"question": "Wie viele Autoren?"})
+    else:
+        _stream_frames(client, question="Wie viele Autoren?")
+
+    [prompt] = validator.prompts
+    assert f"\n{ANALYSIS_LINE}\n" in prompt
+
+
+@pytest.mark.parametrize("how", ["direct", "turn"])
+def test_an_assessment_hands_its_analyses_to_the_validator(monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """The source-backed part may state a computed figure too, so its validator reads the analyses beside the note.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        how (str): Whether the helper is called itself or by the turn's validation.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+    answer = "Zwei Autoren schreiben darüber [1] [2]."
+
+    if how == "direct":
+        result = api_module._assessment_validation(
+            question="Wie stark prägt das Hafenfest die Sammlung?",
+            answer=answer,
+            sources=PASSAGES,
+            agent=SPLIT_TRAIL,
+            analyses=[ANALYSIS],
+        )
+    else:
+        result = _validate_turn(
+            {"answer_mode": "assessment", "agent": SPLIT_TRAIL, "analyses": [ANALYSIS]},
+            answer=answer,
+            sources=PASSAGES,
+        )
+
+    [prompt] = validator.prompts
+    assert f"{ANALYSIS_CHECKS_HEADING}\n{ANALYSIS_LINE}\n" in prompt
+    assert "intent=assessment" in prompt
+    assert (result["validation_checked"], result["validation_mismatch"]) == (True, False)
+
+
+@pytest.mark.parametrize("mode", ["lookup", "assessment"])
+def test_an_answer_citing_nothing_beside_an_analysis_rests_on_it(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    """An answer that states a computed figure and cites no passage is judged against the analysis alone.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        mode (str): The answer mode.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+    trail = LOOKUP_TRAIL if mode == "lookup" else SPLIT_TRAIL
+
+    _validate_turn(
+        {"answer_mode": mode, "agent": trail, "analyses": [ANALYSIS]},
+        answer="Zwei Autoren schreiben darüber.",
+        sources=PASSAGES,
+    )
+
+    [prompt] = validator.prompts
+    assert f"\n{ANALYSIS_LINE}\n" in prompt
+    assert NO_SOURCES_BESIDE_CHECKS in prompt
+    assert "plant das Fest" not in prompt
+
+
+@pytest.mark.parametrize(
+    "analyses", [None, [], "a table", [{"title": 3}, None, "x"]], ids=["none", "empty", "text", "junk"]
+)
+def test_a_payload_without_readable_analyses_is_validated_as_before(
+    monkeypatch: pytest.MonkeyPatch, analyses: Any
+) -> None:
+    """Analyses that are missing or cannot be read add no heading, and an uncited answer is judged against passages.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        analyses (Any): What the payload carries as its analyses.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    _open_agent_gate(monkeypatch)
+    validator = _PromptRecorder(PASSING_VERDICT)
+    cast(Any, api_module.rag).text_model = validator
+
+    _validate_turn(
+        {"answer_mode": "lookup", "agent": LOOKUP_TRAIL, "analyses": analyses},
+        answer="Zwei Autoren schreiben darüber.",
+        sources=PASSAGES,
+    )
+
+    [prompt] = validator.prompts
+    assert ANALYSIS_CHECKS_HEADING not in prompt
+    assert NO_SOURCES_BESIDE_CHECKS not in prompt
+    assert "plant das Fest im Mai" in prompt
 
 
 #: A topics listing as an agent turn's trail stores it, and the check line its validator reads.

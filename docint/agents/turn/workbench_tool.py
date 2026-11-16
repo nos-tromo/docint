@@ -45,6 +45,7 @@ from typing import Any, Literal, Protocol
 from llama_index.core.schema import BaseNode, MetadataMode
 from loguru import logger
 
+from docint.agents.assessment.split import CITATION_NUMBERS_RE, neutralize_sentinel
 from docint.agents.turn.keyword import DEFAULT_KEYWORD_FIELD, check_key
 from docint.agents.turn.tools import (
     ToolContext,
@@ -105,6 +106,11 @@ CELL_CHARS = 500
 CHART_BYTES = 512 * 1024
 CHARTS_BYTES = 1024 * 1024
 MAX_CHART_SIDE = 4096
+
+#: Characters the analyses may take together in the validator's prompt.
+ANALYSIS_CHECKS_CHARS = 1_600
+#: Characters of one analysis's ``stdout`` the validator reads.
+STDOUT_CHECK_CHARS = 600
 
 #: How the reply ends when the run became an analysis; ``k`` is its number in the turn.
 ANALYSIS_NOTE = (
@@ -648,6 +654,115 @@ def _tail(text: str, room: int) -> str:
         return text
     keep = room - len(cut_marker(len(text), len(text))) - 1
     return fit_tail_with_marker(text, keep)[0] if keep > 0 else ""
+
+
+def _check_text(raw: str, limit: int) -> str:
+    """Defuse text the code or the model wrote before the validator reads it.
+
+    Args:
+        raw (str): The text.
+        limit (int): The most characters to keep.
+
+    Returns:
+        str: The text on one line, without double quotes, citation numbers or sentinels, cut to ``limit``.
+    """
+    text = neutralize_sentinel(CITATION_NUMBERS_RE.sub("", raw.replace('"', "'")))
+    return " ".join(text.split())[:limit].rstrip()
+
+
+def _check_passages(provenance: Mapping[str, Any]) -> str:
+    """Name the passages an analysis was computed from.
+
+    Args:
+        provenance (Mapping[str, Any]): The analysis's provenance.
+
+    Returns:
+        str: The numbers of its sources as ranges; empty when it names none.
+    """
+    sources = provenance.get("sources")
+    numbers = {
+        source["citation_index"]
+        for source in (sources if isinstance(sources, list) else [])
+        if isinstance(source, Mapping) and type(source.get("citation_index")) is int and source["citation_index"] > 0
+    }
+    return _ranges(sorted(numbers), most=_HEAD_NUMBERS_CHARS)
+
+
+def _check_table(table: Any) -> str | None:
+    """Describe a table's name and shape.
+
+    Args:
+        table (Any): The table as the analysis stores it.
+
+    Returns:
+        str | None: Its name with its row and column counts in brackets; ``None`` for a table without either.
+    """
+    if not isinstance(table, Mapping):
+        return None
+    name, columns, rows = table.get("name"), table.get("columns"), table.get("row_count")
+    if not isinstance(name, str) or not isinstance(columns, list) or type(rows) is not int or rows < 0:
+        return None
+    label = _check_text(name, _NAME_CHARS)
+    return f"{label} ({_count(rows, 'row')} × {_count(len(columns), 'column')})" if label else None  # noqa: RUF001
+
+
+def _analysis_check(number: int, analysis: Any) -> str | None:
+    """Write the line one analysis gives its validator.
+
+    Args:
+        number (int): The analysis's place in the turn, from 1, which is the name the user sees.
+        analysis (Any): The analysis as it was stored.
+
+    Returns:
+        str | None: The line; ``None`` for an analysis without a title text, a table list or the passages it was
+        computed from.
+    """
+    if not isinstance(analysis, Mapping):
+        return None
+    title, tables, provenance = analysis.get("title"), analysis.get("tables"), analysis.get("provenance")
+    if not isinstance(title, str) or not isinstance(tables, list) or not isinstance(provenance, Mapping):
+        return None
+    passages = _check_passages(provenance)
+    if not passages:
+        return None
+    label = _check_text(title, TITLE_CHARS)
+    line = f'- Analysis {number} "{label}"' if label else f"- Analysis {number}"
+    line += f": from passages {passages}"
+    shapes = [shape for shape in map(_check_table, tables) if shape]
+    if shapes:
+        line += f"; tables {', '.join(shapes)}"
+    stdout = analysis.get("stdout")
+    shown = _check_text(stdout[:STDOUT_CHECK_CHARS], STDOUT_CHECK_CHARS) if isinstance(stdout, str) else ""
+    return f"{line}; stdout: {shown}" if shown else line
+
+
+def render_analysis_checks(analyses: Sequence[Mapping[str, Any]], *, max_chars: int = ANALYSIS_CHECKS_CHARS) -> str:
+    """Render a turn's analyses for its validator, which reads them as facts computed from the passages they name.
+
+    The analyses are stored and read back as data, so a malformed one is skipped, and what the model
+    or its code wrote is defused. Each keeps the number the user sees it under, whether or not
+    another before it was skipped. Lines are kept whole, in order, while they fit.
+
+    Args:
+        analyses (Sequence[Mapping[str, Any]]): The turn's analyses, in order.
+        max_chars (int): Characters the block may take.
+
+    Returns:
+        str: One line per analysis, naming its title, the passages it came from, its tables' shapes and the start
+        of its output; empty when there is none.
+    """
+    lines: list[str] = []
+    used = 0
+    for number, analysis in enumerate(analyses, start=1):
+        line = _analysis_check(number, analysis)
+        if line is None:
+            continue
+        cost = len(line) + (1 if lines else 0)
+        if used + cost > max_chars:
+            break
+        lines.append(line)
+        used += cost
+    return "\n".join(lines)
 
 
 @dataclass

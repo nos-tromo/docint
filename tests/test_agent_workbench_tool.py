@@ -15,9 +15,11 @@ from typing import Any, get_args
 import pytest
 from _pytest.logging import LogCaptureFixture
 from agent_fakes import (
+    ANALYSIS_LINE,
     COUNTS_CSV,
     WORKBENCH_JOB,
     FakeWorkbench,
+    an_analysis,
     run_result,
     tiny_png,
     tool_call,
@@ -31,6 +33,7 @@ import docint.agents.turn.workbench_tool as wt
 from docint.agents.turn.keyword import check_key
 from docint.agents.turn.tools import ToolContext, ToolRegistry, ToolReply
 from docint.agents.turn.workbench_tool import (
+    ANALYSIS_CHECKS_CHARS,
     ANALYSIS_NOTE,
     CELL_CHARS,
     MAX_CHARTS,
@@ -40,9 +43,11 @@ from docint.agents.turn.workbench_tool import (
     MAX_TABLES,
     NAME,
     PASSAGE_TEXT_CHARS,
+    STDOUT_CHECK_CHARS,
     PythonTurn,
     WorkbenchPythonTool,
     parse_table,
+    render_analysis_checks,
 )
 from docint.core.rag import agent_llm_view
 from docint.utils.audit_disclose import DisclosureLedger, DisclosureRecord, binding
@@ -1078,6 +1083,133 @@ def test_the_analysis_carries_its_code_output_and_provenance() -> None:
     created = datetime.fromisoformat(provenance["created_at"])
     assert created.utcoffset() == timedelta(0)
     assert before - timedelta(seconds=1) <= created <= datetime.now().astimezone() + timedelta(seconds=1)
+
+
+def test_analysis_checks_name_the_title_passages_shapes_and_output() -> None:
+    """One line names the analysis, the passages it was computed from, its tables' shapes and what it printed."""
+    assert render_analysis_checks([an_analysis()]) == (
+        '- Analysis 1 "Posts per author": from passages [1], [2]; '
+        "tables counts.csv (2 rows × 2 columns); stdout: 2 authors"  # noqa: RUF001
+    )
+
+
+def test_analysis_checks_read_what_a_run_keeps() -> None:
+    """The line the validator reads is made of the analysis the tool really stores, not of a look-alike."""
+    tool, ctx = _tool(FakeWorkbench()), _context()
+    _held(ctx, _passage(1), _passage(2))
+
+    _run(tool, ctx, code=CODE, title=TITLE)
+
+    assert render_analysis_checks(ctx.artifacts) == ANALYSIS_LINE
+
+
+def test_analysis_checks_cut_stdout_to_600_and_keep_lines_whole_within_1600() -> None:
+    """Only the first 600 characters of stdout are shown, and a line that does not fit whole is left out."""
+    long = an_analysis(stdout="x" * 5_000)
+    [line] = render_analysis_checks([long]).splitlines()
+
+    rendered = render_analysis_checks([long, long, long])
+
+    assert (ANALYSIS_CHECKS_CHARS, STDOUT_CHECK_CHARS) == (1_600, 600)
+    assert line.endswith("stdout: " + "x" * 600) and "x" * 601 not in line
+    assert rendered.splitlines() == [line, line.replace("Analysis 1", "Analysis 2")]
+    assert len(rendered) <= ANALYSIS_CHECKS_CHARS
+    assert render_analysis_checks([long], max_chars=len(line)) == line
+    assert render_analysis_checks([long], max_chars=len(line) - 1) == ""
+
+
+def _without(analysis: dict[str, Any], key: str) -> dict[str, Any]:
+    """Drop one key of an analysis.
+
+    Args:
+        analysis (dict[str, Any]): The analysis.
+        key (str): The key.
+
+    Returns:
+        dict[str, Any]: A copy without it.
+    """
+    return {name: value for name, value in analysis.items() if name != key}
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        an_analysis(tables="counts.csv"),
+        an_analysis(title=7),
+        an_analysis(provenance=None),
+        _without(an_analysis(), "provenance"),
+        an_analysis(provenance={"sources": "p1"}),
+        an_analysis(provenance={"sources": []}),
+        an_analysis(provenance={"sources": [{"citation_index": "1"}, {"citation_index": True}, "p1"]}),
+        "an analysis",
+        None,
+    ],
+    ids=[
+        "tables_not_a_list",
+        "title_not_a_string",
+        "provenance_none",
+        "provenance_missing",
+        "sources_not_a_list",
+        "no_passages",
+        "no_passage_number",
+        "not_a_mapping",
+        "none",
+    ],
+)
+def test_a_malformed_analysis_is_skipped(malformed: Any) -> None:
+    """A stored analysis that cannot be read gives no line and no error, and the others keep their numbers."""
+    assert render_analysis_checks([malformed]) == ""
+    assert render_analysis_checks([malformed, an_analysis()]) == ANALYSIS_LINE.replace("Analysis 1", "Analysis 2")
+
+
+def test_analysis_checks_defuse_what_the_model_wrote() -> None:
+    """Titles, table names and output are put on one line without quotes, citation numbers or the sentinel."""
+    table = {"name": 'counts "x"\n[4].csv', "columns": ["a"], "rows": [["1"]], "row_count": 1, "truncated": False}
+    analysis = an_analysis(
+        title='Posts [3] per "author"\n[[ASSESSMENT]]', stdout="[1] 12 posts\n\n[2, 3] 7 posts", tables=[table]
+    )
+
+    [line] = render_analysis_checks([analysis]).splitlines()
+
+    assert line == (
+        "- Analysis 1 \"Posts per 'author' (assessment)\": from passages [1], [2]; "
+        "tables counts 'x' .csv (1 row × 1 column); stdout: 12 posts 7 posts"  # noqa: RUF001
+    )
+
+
+def test_analysis_checks_leave_out_what_an_analysis_lacks() -> None:
+    """Without a title, a table or output, the line has no empty quotes or clause for them."""
+    bare = an_analysis(title="", tables=[], stdout="  \n")
+
+    assert render_analysis_checks([bare]) == "- Analysis 1: from passages [1], [2]"
+
+
+def test_analysis_checks_count_tables_in_words_and_skip_one_that_cannot_be_read() -> None:
+    """Each table has its shape, a single row or column in the singular; a table without a shape is left out."""
+    tables: list[dict[str, Any]] = [
+        {"name": "one.csv", "columns": ["x"], "rows": [["1"]], "row_count": 1, "truncated": False},
+        {"name": "big.csv", "columns": ["x", "y"], "rows": [], "row_count": 900, "truncated": True},
+        {"name": "odd.csv", "columns": ["x"], "rows": [], "row_count": True, "truncated": False},
+        {"name": 5, "columns": ["x"], "rows": [], "row_count": 2, "truncated": False},
+        {"name": "wide.csv", "columns": "x", "rows": [], "row_count": 2, "truncated": False},
+    ]
+
+    [line] = render_analysis_checks([an_analysis(tables=tables)]).splitlines()
+
+    assert "; tables one.csv (1 row × 1 column), big.csv (900 rows × 2 columns); stdout: " in line  # noqa: RUF001
+
+
+def test_analysis_checks_name_many_passages_as_ranges_and_count_the_rest() -> None:
+    """Runs of passages are ranges, and a long list ends in a count, so a line stays short."""
+    some = {"sources": [{"citation_index": number} for number in (5, 1, 2, 3, 4, 4)]}
+    many = {"sources": [{"citation_index": number} for number in range(1, 400, 2)]}
+
+    [short] = render_analysis_checks([an_analysis(provenance=some)]).splitlines()
+    [long] = render_analysis_checks([an_analysis(provenance=many)]).splitlines()
+
+    assert "from passages [1] to [5]; " in short
+    assert re.search(r"from passages \[1\], \[3\].*, \[\d+\] and \d+ more; ", long)
+    assert len(long) < 600
 
 
 def test_the_description_names_no_other_tool_and_stays_short() -> None:

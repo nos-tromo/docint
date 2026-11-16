@@ -868,6 +868,25 @@ def test_the_validators_take_a_share_from_a_listed_topic_check_as_grounded(code:
     assert "keyword check" not in lines[0].casefold()
 
 
+@pytest.mark.parametrize("name", VALIDATOR_PROMPTS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_validator_accepts_a_figure_an_analysis_check_gives(name: str, code: str) -> None:
+    """A computed figure cites the passages its code ran on, so each validator has one line accepting it.
+
+    The line names no keyword or topic check, so theirs stay the only lines that do; the English one speaks of a
+    listed analysis check, and the German one names the heading the checks come under, as it names the others.
+
+    Args:
+        code (str): The locale.
+        name (str): The validator prompt.
+    """
+    lines = [line for line in _prompt(name, code).splitlines() if "analysis check" in line.casefold()]
+
+    assert len(lines) == 1, f"{code}/{name}.txt names the analysis checks on {len(lines)} lines"
+    assert "keyword check" not in lines[0].casefold() and "topic check" not in lines[0].casefold()
+    assert {"en": "a listed analysis check", "de": "„Analysis checks“"}[code] in lines[0]
+
+
 @pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("code", ["en", "de"])
 def test_the_rendered_agent_system_prompt_fits_its_planned_tokens(code: str, target: str) -> None:
