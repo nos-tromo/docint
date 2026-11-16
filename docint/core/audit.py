@@ -643,6 +643,8 @@ def chat_also(workbench: bool) -> tuple[str, ...]:
 def write_disclosures(op: Operation, records: Sequence[DisclosureRecord]) -> None:
     """Write one ``disclose`` child of the operation per hand-over, by reference only.
 
+    The first write that fails stops the rest; how many went unwritten, that one included, is logged by count.
+
     Args:
         op (Operation): The turn's operation, with its primary event written.
         records (Sequence[DisclosureRecord]): The hand-overs, as the ledger settled them.
@@ -652,26 +654,34 @@ def write_disclosures(op: Operation, records: Sequence[DisclosureRecord]) -> Non
         AuditTrailClosed: When the chain is not open.
         RuntimeError: When the operation has no primary event yet.
     """
-    for record in records:
-        criteria: dict[str, object] = {}
-        if record.job_id is not None:
-            criteria["workbench_job"] = record.job_id
-        criteria.update(
-            passages=record.passages,
-            keyword_checks=record.keyword_checks,
-            topic_listings=record.topic_listings,
-            data_bytes=record.data_bytes,
+    written = 0
+    try:
+        for record in records:
+            criteria: dict[str, object] = {}
+            if record.job_id is not None:
+                criteria["workbench_job"] = record.job_id
+            criteria.update(
+                passages=record.passages,
+                keyword_checks=record.keyword_checks,
+                topic_listings=record.topic_listings,
+                data_bytes=record.data_bytes,
+            )
+            if record.incomplete:
+                criteria["incomplete"] = True
+            op.child(
+                "disclose",
+                DISCLOSE_OPERATION,
+                target=Target(kind="chunk", ids=list(record.point_ids), count=len(record.point_ids)),
+                criteria=criteria,
+                recipient=WORKBENCH_RECIPIENT,
+                outcome=record.outcome,
+            )
+            written += 1
+    except Exception:
+        logger.error(
+            "{} disclosure(s) of audited operation '{}' were not written", len(records) - written, op.operation
         )
-        if record.incomplete:
-            criteria["incomplete"] = True
-        op.child(
-            "disclose",
-            DISCLOSE_OPERATION,
-            target=Target(kind="chunk", ids=list(record.point_ids), count=len(record.point_ids)),
-            criteria=criteria,
-            recipient=WORKBENCH_RECIPIENT,
-            outcome=record.outcome,
-        )
+        raise
 
 
 def _write_at_seal(op: Operation, records: Sequence[DisclosureRecord]) -> None:

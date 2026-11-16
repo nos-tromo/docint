@@ -10,6 +10,10 @@ which lands on the same stream) is verified by ``conftest.audit_stream``.
 
 import io
 import json
+import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from collections.abc import Generator, Iterator
@@ -31,7 +35,7 @@ from docint.core.jobs import IngestJobManager
 from docint.core.rag import IngestStats
 from docint.core.search.fulltext import parse_keywords
 from docint.core.state.session_manager import SessionCollectionMismatchError
-from docint.utils.audit_disclose import DisclosureRefused, current_ledger, record_disclosure
+from docint.utils.audit_disclose import Disclosure, DisclosureRefused, current_ledger, record_disclosure
 from docint.utils.audit_event import AuditEmitter, sha256_text
 from docint.utils.audit_forward import CHAT_REASON, forward_headers
 from docint.utils.audit_meter import TransferKey, count_transfer, staged_meter, take_staged
@@ -999,14 +1003,14 @@ def test_the_admin_listing_across_owners_is_an_admin_event(
     assert event["criteria"] == {"owners": 2}
 
 
-def _hand_over(point_ids: tuple[str, ...] = ("1", "2")) -> Any:
+def _hand_over(point_ids: tuple[str, ...] = ("1", "2")) -> Disclosure:
     """Record one ``run_python`` call in the turn's ledger, as the tool does before it sends.
 
     Args:
         point_ids (tuple[str, ...]): The points whose passages the call hands over.
 
     Returns:
-        Any: The call's disclosure handle.
+        Disclosure: The call's disclosure handle.
     """
     return record_disclosure(
         point_ids=list(point_ids), passages=len(point_ids), keyword_checks=1, topic_listings=0, data_bytes=2048
@@ -1300,3 +1304,168 @@ def test_a_client_error_still_records_nothing(
     assert response.status_code == 409
     assert python_rag.forwarded == []
     assert _ops(audit_stream) == []
+
+
+def test_a_disclose_write_that_fails_part_way_counts_what_went_unwritten(
+    client: TestClient, python_rag: _PythonRAG, monkeypatch: pytest.MonkeyPatch, loguru_caplog: pytest.LogCaptureFixture
+) -> None:
+    """The turn fails closed at the call it cannot write; the log counts that call and those after it, by count only.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (pytest.LogCaptureFixture): Loguru's WARNING and ERROR lines.
+    """
+
+    def _three_calls(question: str, **kwargs: Any) -> dict[str, Any]:
+        for point_ids in (("1", "2"), ("3",), ("4",)):
+            _hand_over(point_ids).answered(JOB)
+        return DummyRAG.chat(python_rag, question, **kwargs)
+
+    monkeypatch.setattr(python_rag, "chat", _three_calls)
+
+    with _failing_chain(refuse='"ids":["3"]'):
+        response = client.post("/query", json=_TURN, headers=ALICE)
+
+    assert response.status_code == 500
+    assert "2 disclosure(s) of audited operation 'chat.query' were not written" in loguru_caplog.messages
+
+
+def test_a_streamed_turn_that_fails_after_its_call_discloses_beneath_the_failure(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The stream ends with its error frame; the ``query`` is an ``error`` and the call's ``disclose`` sits beneath it.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    python_rag.fail = True
+
+    frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert frames == [{"error": "Internal server error", "code": "generation_failed"}]
+    query, disclose = _ops(audit_stream)
+    assert (query["operation"], query["outcome"]) == ("chat.query", "error")
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "ok")
+    assert disclose["criteria"]["workbench_job"] == JOB
+    assert "secret detail" not in audit_stream.getvalue()
+
+
+def test_a_client_gone_during_the_corrective_retry_is_no_ok_turn(
+    client: TestClient, rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry's answer reached no one: the turn is a failed, incomplete ``query``, never ``ok`` without sources.
+
+    Args:
+        client (TestClient): The running app.
+        rag (DummyRAG): The RAG double.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(api_module, "STREAM_DISCONNECT_POLL_INTERVAL_S", 0.05)
+    retrying, release, finished = threading.Event(), threading.Event(), threading.Event()
+    weak = "Evidence insufficient."
+
+    def _stream_chat(question: str, *, retrieval_query: str | None = None, **_kwargs: Any) -> Iterator[Any]:
+        """Answer weakly at once; on the retry, wait until the client has gone."""
+        final = {"response": weak, "sources": [{"id": 1}], "session_id": "session-1", "turn_idx": 0}
+        if retrieval_query is None:
+            yield weak
+            yield {**final, "retrieval_mode": "rewrite_compact"}
+            return
+        retrying.set()
+        try:
+            release.wait(5.0)
+        finally:
+            finished.set()
+        yield {**final, "response": "A grounded answer."}
+
+    async def _gone(_self: StarletteRequest) -> bool:
+        """Report the client as gone once the retry has started."""
+        return retrying.is_set()
+
+    rejected = {"validation_checked": True, "validation_mismatch": True, "validation_reason": "unsupported"}
+    monkeypatch.setattr(rag, "stream_chat", _stream_chat)
+    monkeypatch.setattr(api_module, "_validation_payload", lambda **_kwargs: dict(rejected))
+    monkeypatch.setattr(api_module, "_reformulated_query", lambda *_args: "reformulated query")
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", _gone)
+
+    try:
+        frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+    finally:
+        release.set()
+
+    assert finished.wait(5.0)
+    assert frames[-1] == {"retry": {"query": "reformulated query"}}
+    (query,) = _ops(audit_stream)
+    assert (query["operation"], query["outcome"], query["criteria"]["incomplete"]) == ("chat.query", "error", True)
+
+
+#: Imports the app with the environment it is given and asks both chat routes, without a purpose, what they answer.
+_CHAT_PURPOSE_SCRIPT = textwrap.dedent(
+    """
+    import io
+    import json
+    import types
+
+    from fastapi.testclient import TestClient
+
+    import docint.core.api as api
+    from docint.core import audit
+    from docint.utils.env_cfg import load_audit_env
+
+    audit.open_audit_stream = lambda output: io.StringIO()
+    audit.install(audit.open_auditor(load_audit_env(), mode={}, heartbeat_interval_s=0))
+    unowned = types.SimpleNamespace(resolve=lambda owner, name: None)
+    api.rag = types.SimpleNamespace(ensure_collection_owner_manager=lambda: unowned)
+    client = TestClient(api.app, raise_server_exceptions=False)
+    body = {"question": "How many posts name the meeting?", "collection": "docs"}
+    print(json.dumps([client.post(route, json=body).status_code for route in ("/query", "/stream_query")]))
+    """
+)
+
+
+@pytest.mark.parametrize(
+    ("key", "statuses"),
+    [("x" * 40, [428, 428]), ("", [404, 404])],
+    ids=["workbench configured", "workbench not configured"],
+)
+def test_a_chat_turn_needs_a_purpose_to_disclose_only_while_workbench_is_configured(
+    tmp_path: Path, key: str, statuses: list[int]
+) -> None:
+    """``AUDIT_REQUIRE_PURPOSE=disclose`` refuses either chat route without a purpose only while workbench is set.
+
+    What a chat turn may record is read once, when the app is imported, so each case imports it in a process of
+    its own. Without workbench the routes pass the purpose rule and answer 404 for a collection nobody owns.
+
+    Args:
+        tmp_path (Path): A working directory without a ``.env``.
+        key (str): ``WORKBENCH_API_KEY``; empty leaves workbench unconfigured.
+        statuses (list[int]): What ``/query`` and ``/stream_query`` answer.
+    """
+    env = {
+        **os.environ,
+        "AUDIT_REQUIRE_PURPOSE": "disclose",
+        "WORKBENCH_API_KEY": key,
+        "WORKBENCH_API_BASE": "http://workbench-api:8000",
+        "DOCINT_DEFAULT_IDENTITY": "user-a",
+        "DOCINT_EDGE_SECRET": "",
+        "DOCINT_AUTH_HEADER": "X-Auth-User",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", _CHAT_PURPOSE_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == statuses

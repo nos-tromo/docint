@@ -4117,7 +4117,11 @@ async def stream_query(
                     retry_ok = False
 
                 if retry_ok:
-                    payload_out = dict(retry_payload or {})
+                    if retry_payload is None:
+                        # No final payload: the client went away during the retry, as above.
+                        audit.settle_quietly(op, criteria={"incomplete": True})
+                        return
+                    payload_out = dict(retry_payload)
                     payload_out.pop("turn_idx", None)
                     retry_final = str(payload_out.get("response") or payload_out.get("answer") or "") or retry_answer
                     retry_sources = payload_out.get("sources")
@@ -4167,20 +4171,19 @@ async def stream_query(
                         turn_idx,
                         exc,
                     )
-            if payload_out:
-                # The SPA reads the target off this frame; a turn that never
-                # reached the retrieval layer (an empty collection, say) still
-                # answered under the requested target.
-                payload_out.setdefault("retrieval_target", payload.retrieval_target)
-                # Before the frame that carries the sources: a write that
-                # fails lands in the generic handler below instead.
-                _record_chat_turn(
-                    op,
-                    answer=final_answer,
-                    sources=final_sources,
-                    session_id=cast("str | None", payload_out.get("session_id") or payload.session_id),
-                )
-                yield f"data: {json.dumps(payload_out)}\n\n"
+            # The SPA reads the target off this frame; a turn that never
+            # reached the retrieval layer (an empty collection, say) still
+            # answered under the requested target.
+            payload_out.setdefault("retrieval_target", payload.retrieval_target)
+            # Before the frame that carries the sources: a write that
+            # fails lands in the generic handler below instead.
+            _record_chat_turn(
+                op,
+                answer=final_answer,
+                sources=final_sources,
+                session_id=cast("str | None", payload_out.get("session_id") or payload.session_id),
+            )
+            yield f"data: {json.dumps(payload_out)}\n\n"
         except EmbeddingEndpointError:
             # Retrieval could not embed the query, so no generation was ever
             # attempted. Reported apart from `generation_failed`, which reads

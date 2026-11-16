@@ -25,7 +25,13 @@ from typing_extensions import override
 from docint.core import audit
 from docint.core.audit_targets import chunk_target, entity_key, entity_target, report_items_target, unit_target
 from docint.core.auth.principal import Principal
-from docint.utils.audit_disclose import DisclosureLedger, DisclosureRefused, current_ledger, record_disclosure
+from docint.utils.audit_disclose import (
+    Disclosure,
+    DisclosureLedger,
+    DisclosureRefused,
+    current_ledger,
+    record_disclosure,
+)
 from docint.utils.audit_event import Actor, AuditEmitter, AuditWriteError, Target, verify_chain
 from docint.utils.audit_forward import forward_headers
 from docint.utils.audit_meter import (
@@ -620,11 +626,11 @@ def _chat(stream: io.StringIO) -> audit.Operation:
     return audit.Operation(_auditor(stream), _context(), "query", "chat.query", container="alpha")
 
 
-def _record_call() -> Any:
+def _record_call() -> Disclosure:
     """Record one ``run_python`` call in the bound ledger, as the tool does before it sends.
 
     Returns:
-        Any: The call's disclosure handle.
+        Disclosure: The call's disclosure handle.
     """
     return record_disclosure(point_ids=["1", "2"], passages=2, keyword_checks=1, topic_listings=0, data_bytes=2048)
 
