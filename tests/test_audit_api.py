@@ -25,7 +25,7 @@ import pytest
 from conftest import run_ingest
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
-from test_api import DummyRAG, _sse_frames
+from test_api import ANALYSIS_ID, STORED_ANALYSIS, DummyRAG, _sse_frames
 from typing_extensions import override
 
 import docint.core.api as api_module
@@ -1469,3 +1469,40 @@ def test_a_chat_turn_needs_a_purpose_to_disclose_only_while_workbench_is_configu
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == statuses
+
+
+def test_reading_an_analysis_is_a_query_of_kind_analysis(
+    client: TestClient, rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading an analysis is a ``query`` naming it by id and its session; none of its content is recorded.
+
+    An analysis that is not found records nothing, as a client error.
+
+    Args:
+        client (TestClient): The running app.
+        rag (DummyRAG): The RAG double.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(rag.sessions, "get_session_collection", lambda session_id, owner=None: "alpha")
+    monkeypatch.setattr(
+        rag.sessions,
+        "get_analysis",
+        lambda session_id, analysis_id, owner: STORED_ANALYSIS if analysis_id == ANALYSIS_ID else None,
+    )
+
+    missing = client.get(f"/sessions/session-1/analyses/{'b' * 32}", params={"collection": "alpha"}, headers=ALICE)
+
+    assert missing.status_code == 404
+    assert _ops(audit_stream) == []
+
+    read = client.get(f"/sessions/session-1/analyses/{ANALYSIS_ID}", params={"collection": "alpha"}, headers=ALICE)
+
+    assert read.status_code == 200
+    (event,) = _ops(audit_stream)
+    assert (event["action"], event["operation"], event["outcome"]) == ("query", "session.analysis", "ok")
+    assert event["target"] == {"kind": "analysis", "ids": [ANALYSIS_ID], "count": 1, "container": "alpha"}
+    assert event["criteria"] == {"session_id": "session-1"}
+    trail = audit_stream.getvalue()
+    for content in ("Posts per author", "print(2)", "2 authors", "counts.csv", "Who wrote most about the harbour?"):
+        assert content not in trail

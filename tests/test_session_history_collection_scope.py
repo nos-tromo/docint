@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from agent_fakes import an_analysis
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -224,3 +225,56 @@ def test_history_lookup_does_not_leak_the_scope(
     session_manager.get_session_history("sess-a", "alice")
 
     assert scoped_rag.active_collection == ""
+
+
+#: An analysis id, as ``_finish_agent_turn`` mints one.
+ANALYSIS_ID = "a" * 32
+
+
+def _persist_turn_with_analysis(sm: SessionManager, session_id: str, owner: str) -> None:
+    """Persist one turn that kept an analysis, in a session pinned to the collection.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        session_id (str): Conversation id to write into.
+        owner (str): Owning principal.
+    """
+    with sm._session_scope() as s:
+        conv = sm._load_or_create_convo(s, session_id, owner)
+        conv.collection_name = PINNED_COLLECTION
+        s.commit()
+
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
+    sm._persist_turn(
+        session_id,
+        "Wer schreibt am meisten über den Hafen?",
+        resp_mock,
+        {"response": "user-a [1]."},
+        owner=owner,
+        analyses=[{**an_analysis(), "id": ANALYSIS_ID}],
+    )
+
+
+def test_an_analysis_is_found_only_by_its_owner(session_manager: SessionManager) -> None:
+    """Another owner, another session or an unknown id finds nothing; the owner also learns the pinned collection.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _persist_turn_with_analysis(session_manager, "session-1", "user-a")
+    with session_manager._session_scope() as s:
+        session_manager._load_or_create_convo(s, "session-2", "user-a")
+
+    stored = session_manager.get_analysis("session-1", ANALYSIS_ID, "user-a")
+    found = session_manager.find_analysis(ANALYSIS_ID, "user-a")
+
+    assert stored is not None and stored["id"] == ANALYSIS_ID
+    assert (stored["provenance"]["session_id"], stored["provenance"]["turn_idx"]) == ("session-1", 0)
+    assert found == (stored, PINNED_COLLECTION)
+    assert session_manager.get_analysis("session-1", ANALYSIS_ID, "user-b") is None
+    assert session_manager.find_analysis(ANALYSIS_ID, "user-b") is None
+    assert session_manager.get_analysis("session-2", ANALYSIS_ID, "user-a") is None
+    assert session_manager.get_analysis("session-1", "b" * 32, "user-a") is None
+    assert session_manager.find_analysis("b" * 32, "user-a") is None

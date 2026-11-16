@@ -113,6 +113,7 @@ from docint.core.state.pdf_progress import ProgressCallback
 from docint.core.state.report_pdf_store import ReportPdfStore
 from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
 from docint.core.state.session_manager import SessionCollectionMismatchError
+from docint.core.state.turn_analysis import served_analysis
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
 from docint.core.topics.store import RUN_ID_PATTERN, TopicStore
 from docint.utils import cache_scope
@@ -2166,6 +2167,9 @@ class QueryOut(BaseModel):
     #: an agent turn handed it the message because the endpoint refused tools:
     #: its trail then says ``reason: "tools_unavailable"``.
     agent: dict[str, Any] | None = None
+    #: The analyses an agent turn's ``run_python`` runs kept, in full, each with its stored
+    #: ``id`` and the caller's collection name; empty when it kept none.
+    analyses: list[dict[str, Any]] = []
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -3553,6 +3557,22 @@ def _chat_model_alias() -> str:
 _CHAT_ALSO = audit.chat_also(load_workbench_env().enabled)
 
 
+def _served_analyses(data: Any, collection: str | None) -> list[dict[str, Any]]:
+    """Serve a chat turn's analyses under the caller's collection name.
+
+    Args:
+        data (Any): The turn's payload; its ``analyses`` are as they were stored.
+        collection (str | None): The request's logical collection.
+
+    Returns:
+        list[dict[str, Any]]: Each analysis with ``provenance.collection`` set; empty when the turn kept none.
+    """
+    analyses = data.get("analyses") if isinstance(data, dict) else None
+    if not isinstance(analyses, list):
+        return []
+    return [served_analysis(analysis, collection) for analysis in analyses if isinstance(analysis, dict)]
+
+
 def _record_chat_turn(
     op: Operation,
     *,
@@ -3765,6 +3785,7 @@ def query(
             "visual": data.get("visual") if isinstance(data, dict) else None,
             "answer_mode": data.get("answer_mode") if isinstance(data, dict) else None,
             "agent": data.get("agent") if isinstance(data, dict) else None,
+            "analyses": _served_analyses(data, payload.collection),
             **validation,
         }
     except HTTPException:
@@ -4175,6 +4196,7 @@ async def stream_query(
             # reached the retrieval layer (an empty collection, say) still
             # answered under the requested target.
             payload_out.setdefault("retrieval_target", payload.retrieval_target)
+            payload_out["analyses"] = _served_analyses(payload_out, payload.collection)
             # Before the frame that carries the sources: a write that
             # fails lands in the generic handler below instead.
             _record_chat_turn(
@@ -5375,6 +5397,55 @@ def get_session_history(
     cited = [source for message in messages for source in (message.get("sources") or [])]
     op.record(target=chunk_target(cited), criteria={"session_id": session_id, "messages": len(messages)})
     return {"messages": messages}
+
+
+@app.get("/sessions/{session_id}/analyses/{analysis_id}", tags=["Sessions"])
+def get_session_analysis(
+    session_id: str,
+    analysis_id: str,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "session.analysis")),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
+    """Get one analysis of a session owned by the calling principal, from its own collection.
+
+    Gated exactly like ``GET /sessions/{id}/history``: an analysis that does not exist, belongs to
+    another session or principal, or whose session is pinned to a collection other than the
+    caller's active one is the same 404. Recorded by reference: the analysis id and its session.
+
+    Args:
+        session_id (str): The session the analysis belongs to.
+        analysis_id (str): The analysis's id.
+        collection (str): The caller's active logical collection.
+        principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the analysis is its target.
+
+    Returns:
+        dict[str, Any]: The stored analysis, its ``provenance.collection`` set to ``collection``.
+
+    Raises:
+        HTTPException: 404 when the analysis is not found for this principal in this session and
+            collection; 500 on unexpected errors.
+    """
+    try:
+        sm = rag.ensure_session_manager()
+        owner = principal.effective_owner
+        physical = rag.ensure_collection_owner_manager().resolve(owner, collection)
+        if physical is None or sm.get_session_collection(session_id, owner) != physical:
+            raise HTTPException(status_code=404, detail="Analysis not found.")
+        analysis = sm.get_analysis(session_id, analysis_id, owner)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error reading an analysis")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    op.record(
+        target=Target(kind="analysis", ids=[analysis_id], count=1),
+        criteria={"session_id": session_id},
+    )
+    return served_analysis(analysis, collection)
 
 
 def _collect_session_source_files(session_id: str, principal: str) -> list[tuple[str, tuple[str, Path]]]:

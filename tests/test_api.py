@@ -53,6 +53,7 @@ from docint.core.entities.resolution import ResolutionSummary
 from docint.core.ingest.ingestion_pipeline import NoSupportedFilesError
 from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn, IngestStats
 from docint.core.state.session_manager import SessionManager
+from docint.core.state.turn_analysis import stamp_analysis
 from docint.utils.csv_stream import SEARCH_EXPORT_COLUMNS
 
 
@@ -240,6 +241,19 @@ class DummySessionManager:
         Returns:
             str | None: ``None`` -- the stub never pins, so the endpoint's
                 collection-mismatch pre-flight is a no-op here.
+        """
+        return None
+
+    def get_analysis(self, session_id: str, analysis_id: str, owner: str | None) -> dict[str, Any] | None:
+        """Return a stored analysis (stub: none is stored).
+
+        Args:
+            session_id (str): The ID of the session.
+            analysis_id (str): The analysis's id.
+            owner (str | None): The owning principal.
+
+        Returns:
+            dict[str, Any] | None: ``None``.
         """
         return None
 
@@ -3213,6 +3227,91 @@ def test_session_history_is_read_only_from_its_own_collection(
     unowned = types.SimpleNamespace(resolve=lambda owner, logical: None)
     monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: unowned)
     assert client.get("/sessions/123/history", params={"collection": "docs"}).status_code == 404
+
+
+#: An analysis id, as the session layer mints one.
+ANALYSIS_ID = "a" * 32
+#: An analysis as the session store keeps it: stamped with its id, its question and where it was made.
+STORED_ANALYSIS = stamp_analysis(
+    an_analysis(),
+    analysis_id=ANALYSIS_ID,
+    question="Who wrote most about the harbour?",
+    session_id="session-1",
+    turn_idx=0,
+)
+#: The same analysis served under the caller's name for its collection.
+SERVED_ANALYSIS = {**STORED_ANALYSIS, "provenance": {**STORED_ANALYSIS["provenance"], "collection": "docs"}}
+
+
+def test_an_analysis_is_read_only_from_its_own_session_and_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """An analysis is served only to its owner, through its own session, while that session's collection is active.
+
+    Another owner, another collection, another session and an unknown id are one and the same 404.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    pins = {("session-1", "user-a"): "docs", ("session-2", "user-a"): "docs"}
+    stored = {("session-1", ANALYSIS_ID, "user-a"): STORED_ANALYSIS}
+    sessions = api_module.rag.sessions
+    monkeypatch.setattr(
+        sessions, "get_session_collection", lambda session_id, owner=None: pins.get((session_id, owner))
+    )
+    monkeypatch.setattr(
+        sessions, "get_analysis", lambda session_id, analysis_id, owner: stored.get((session_id, analysis_id, owner))
+    )
+    url = f"/sessions/session-1/analyses/{ANALYSIS_ID}"
+    owner = {"X-Auth-User": "user-a"}
+
+    served = client.get(url, params={"collection": "docs"}, headers=owner)
+
+    assert served.status_code == 200
+    assert served.json() == SERVED_ANALYSIS
+    refused = [
+        client.get(url, params={"collection": "docs"}, headers={"X-Auth-User": "user-b"}),
+        client.get(url, params={"collection": "other"}, headers=owner),
+        client.get(f"/sessions/session-2/analyses/{ANALYSIS_ID}", params={"collection": "docs"}, headers=owner),
+        client.get(f"/sessions/session-1/analyses/{'b' * 32}", params={"collection": "docs"}, headers=owner),
+    ]
+    assert [(response.status_code, response.json()) for response in refused] == [
+        (404, {"detail": "Analysis not found."})
+    ] * 4
+    assert client.get(url, headers=owner).status_code == 422
+
+    unowned = types.SimpleNamespace(resolve=lambda owner, logical: None)
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: unowned)
+    gone = client.get(url, params={"collection": "docs"}, headers=owner)
+    assert (gone.status_code, gone.json()) == (404, {"detail": "Analysis not found."})
+
+
+@pytest.mark.parametrize("path", ["/query", "/stream_query"])
+def test_a_turns_final_frame_and_body_carry_its_analyses(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, path: str
+) -> None:
+    """Both chat routes hand back the turn's analyses in full, each with its id, under the caller's collection name.
+
+    A turn that kept none, a plain one included, carries an empty list.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        path (str): The endpoint under test.
+    """
+    rag = cast(Any, api_module.rag)
+    body = {"question": "Who wrote most about the harbour?", "collection": "docs"}
+
+    def _analyses(final: dict[str, Any]) -> Any:
+        monkeypatch.setattr(rag, "stream_chat", _scripted_stream([], [AGENT_ANSWER, final]))
+        monkeypatch.setattr(rag, "chat", lambda question, **kwargs: dict(final))
+        if path == "/query":
+            return client.post(path, json=body).json()["analyses"]
+        return _stream_frames(client, **body)[-1]["analyses"]
+
+    assert _analyses(_agent_final(analyses=[STORED_ANALYSIS])) == [SERVED_ANALYSIS]
+    assert _analyses(_plain_final()) == []
 
 
 def test_ingest_missing_directory(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
