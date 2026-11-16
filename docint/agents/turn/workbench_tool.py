@@ -657,7 +657,7 @@ def _tail(text: str, room: int) -> str:
 
 
 def _check_text(raw: str, limit: int) -> str:
-    """Defuse text the code or the model wrote before the validator reads it.
+    """Defuse a title the model wrote before the validator reads it.
 
     Args:
         raw (str): The text.
@@ -667,6 +667,23 @@ def _check_text(raw: str, limit: int) -> str:
         str: The text on one line, without double quotes, citation numbers or sentinels, cut to ``limit``.
     """
     text = neutralize_sentinel(CITATION_NUMBERS_RE.sub("", raw.replace('"', "'")))
+    return " ".join(text.split())[:limit].rstrip()
+
+
+def _check_output(raw: str, limit: int) -> str:
+    """Defuse what the code printed or named before the validator reads it, keeping every figure.
+
+    A citation number is not removed, for a printed list of figures looks like one: the sentinel is
+    neutralized first, then square brackets become parentheses, so nothing reads as a citation.
+
+    Args:
+        raw (str): The text.
+        limit (int): The most characters to keep.
+
+    Returns:
+        str: The text on one line, without square brackets, double quotes or the sentinel, cut to ``limit``.
+    """
+    text = neutralize_sentinel(raw).replace("[", "(").replace("]", ")").replace('"', "'")
     return " ".join(text.split())[:limit].rstrip()
 
 
@@ -702,7 +719,7 @@ def _check_table(table: Any) -> str | None:
     name, columns, rows = table.get("name"), table.get("columns"), table.get("row_count")
     if not isinstance(name, str) or not isinstance(columns, list) or type(rows) is not int or rows < 0:
         return None
-    label = _check_text(name, _NAME_CHARS)
+    label = _check_output(name, _NAME_CHARS)
     return f"{label} ({_count(rows, 'row')} × {_count(len(columns), 'column')})" if label else None  # noqa: RUF001
 
 
@@ -732,7 +749,7 @@ def _analysis_check(number: int, analysis: Any) -> str | None:
     if shapes:
         line += f"; tables {', '.join(shapes)}"
     stdout = analysis.get("stdout")
-    shown = _check_text(stdout[:STDOUT_CHECK_CHARS], STDOUT_CHECK_CHARS) if isinstance(stdout, str) else ""
+    shown = _check_output(stdout[:STDOUT_CHECK_CHARS], STDOUT_CHECK_CHARS) if isinstance(stdout, str) else ""
     return f"{line}; stdout: {shown}" if shown else line
 
 

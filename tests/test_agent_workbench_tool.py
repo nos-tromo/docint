@@ -1163,7 +1163,7 @@ def test_a_malformed_analysis_is_skipped(malformed: Any) -> None:
 
 
 def test_analysis_checks_defuse_what_the_model_wrote() -> None:
-    """Titles, table names and output are put on one line without quotes, citation numbers or the sentinel."""
+    """A title loses its quotes and citation numbers and the sentinel; output and table names keep their figures."""
     table = {"name": 'counts "x"\n[4].csv', "columns": ["a"], "rows": [["1"]], "row_count": 1, "truncated": False}
     analysis = an_analysis(
         title='Posts [3] per "author"\n[[ASSESSMENT]]', stdout="[1] 12 posts\n\n[2, 3] 7 posts", tables=[table]
@@ -1173,8 +1173,41 @@ def test_analysis_checks_defuse_what_the_model_wrote() -> None:
 
     assert line == (
         "- Analysis 1 \"Posts per 'author' (assessment)\": from passages [1], [2]; "
-        "tables counts 'x' .csv (1 row × 1 column); stdout: 12 posts 7 posts"  # noqa: RUF001
+        "tables counts 'x' (4).csv (1 row × 1 column); stdout: (1) 12 posts (2, 3) 7 posts"  # noqa: RUF001
     )
+
+
+def test_a_list_of_figures_the_code_printed_survives_in_the_check() -> None:
+    """A printed list keeps every figure, the brackets turned into parentheses, so the validator can read the counts."""
+    analysis = an_analysis(stdout="counts: [12, 7]\n(2, 2)\n[12  7]")
+
+    [line] = render_analysis_checks([analysis]).splitlines()
+
+    assert line.endswith("stdout: counts: (12, 7) (2, 2) (12 7)")
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["[[ ASSESSMENT ]] done", "## [[ASSESSMENT]]\ndone", "**[[assessment]]** done", "[[ASS[1]ESSMENT]] done"],
+    ids=["spaced", "heading", "bold", "split"],
+)
+def test_the_sentinel_in_output_is_still_neutralized(stdout: str) -> None:
+    """The assessment sentinel cannot reach the validator in any form, brackets or no brackets."""
+    [line] = render_analysis_checks([an_analysis(stdout=stdout)]).splitlines()
+
+    shown = line.split("stdout: ", 1)[1]
+    assert "[" not in shown and "]" not in shown
+    assert "[[" not in shown and "ASSESSMENT" not in shown.upper().replace("(ASSESSMENT)", "")
+
+
+def test_a_citation_number_in_output_shows_in_parentheses() -> None:
+    """A figure that looks like a citation is shown as the figure, and never as a citation the validator could take."""
+    analysis = an_analysis(stdout="see [3] and [9, 11]")
+
+    [line] = render_analysis_checks([analysis]).splitlines()
+
+    assert line.endswith("stdout: see (3) and (9, 11)")
+    assert "[3]" not in line and "[9" not in line
 
 
 def test_analysis_checks_leave_out_what_an_analysis_lacks() -> None:
