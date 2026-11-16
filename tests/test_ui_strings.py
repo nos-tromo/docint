@@ -58,6 +58,32 @@ def test_collection_overview_keys_present_both_locales() -> None:
     assert UI_STRINGS["de"]["report_section_collection_overview"] == "Dokumentenübersicht"
 
 
+def test_analysis_report_strings_are_worded_in_both_locales() -> None:
+    """The analyses section's heading and labels, with the placeholders their renderers fill."""
+    expected = {
+        "en": {
+            "report_section_analyses": "Analyses",
+            "report_label_code": "Code",
+            "report_label_output": "Output",
+            "report_label_computed_from": "Computed from",
+            "report_label_workbench_job": "workbench {version}, job {job}",
+            "report_label_table_shape": "{rows} rows × {columns} columns",  # noqa: RUF001
+            "report_label_analysis_untitled": "Analysis",
+        },
+        "de": {
+            "report_section_analyses": "Analysen",
+            "report_label_code": "Code",
+            "report_label_output": "Ausgabe",
+            "report_label_computed_from": "Berechnet aus",
+            "report_label_workbench_job": "workbench {version}, Job {job}",
+            "report_label_table_shape": "{rows} Zeilen × {columns} Spalten",  # noqa: RUF001
+            "report_label_analysis_untitled": "Analyse",
+        },
+    }
+    for lang, strings in expected.items():
+        assert {key: UI_STRINGS[lang][key] for key in strings} == strings
+
+
 _SPA_CATALOGS = Path(__file__).resolve().parents[1] / "frontend" / "src" / "i18n"
 
 
