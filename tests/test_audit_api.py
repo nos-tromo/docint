@@ -1405,6 +1405,47 @@ def test_a_client_gone_during_the_corrective_retry_is_no_ok_turn(
     assert (query["operation"], query["outcome"], query["criteria"]["incomplete"]) == ("chat.query", "error", True)
 
 
+def test_a_retry_that_ends_without_an_answer_keeps_the_first_one_while_the_client_is_there(
+    client: TestClient, rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client is still connected: the final frame is the first answer, as after a retry that raised.
+
+    Args:
+        client (TestClient): The running app.
+        rag (DummyRAG): The RAG double.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    weak = "Evidence insufficient."
+
+    def _stream_chat(question: str, *, retrieval_query: str | None = None, **_kwargs: Any) -> Iterator[Any]:
+        """Answer weakly at once; the retry yields tokens and no final payload."""
+        if retrieval_query is not None:
+            yield "A grounded"
+            return
+        yield weak
+        yield {"response": weak, "sources": [{"id": 1}], "session_id": "session-1", "turn_idx": 0}
+
+    async def _here(_self: StarletteRequest) -> bool:
+        """Report the client as connected."""
+        return False
+
+    rejected = {"validation_checked": True, "validation_mismatch": True, "validation_reason": "unsupported"}
+    monkeypatch.setattr(rag, "stream_chat", _stream_chat)
+    monkeypatch.setattr(api_module, "_validation_payload", lambda **_kwargs: dict(rejected))
+    monkeypatch.setattr(api_module, "_reformulated_query", lambda *_args: "reformulated query")
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", _here)
+
+    frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert {"retry": {"query": "reformulated query"}} in frames
+    assert (frames[-1]["response"], frames[-1]["sources"]) == (weak, [{"id": 1}])
+    assert "retried" not in frames[-1]
+    query, answer = _ops(audit_stream)
+    assert [(e["operation"], e["outcome"]) for e in (query, answer)] == [("chat.query", "ok"), ("chat.answer", "ok")]
+    assert "incomplete" not in query["criteria"]
+
+
 #: Imports the app with the environment it is given and asks both chat routes, without a purpose, what they answer.
 _CHAT_PURPOSE_SCRIPT = textwrap.dedent(
     """

@@ -2144,32 +2144,40 @@ class SessionManager:
 
             return messages
 
-    def _stored_analysis(self, analysis_id: str, owner: str | None) -> tuple[dict[str, Any], str, str | None] | None:
+    def _stored_analysis(
+        self, analysis_id: str, owner: str | None, session_id: str | None = None
+    ) -> tuple[dict[str, Any], str, str | None] | None:
         """Read a stored analysis the caller owns, with its session and the collection that session is pinned to.
+
+        The owner, and the session when one is named, are in the query's own ``WHERE`` clause, so another
+        principal's row is never loaded.
 
         Args:
             analysis_id (str): The analysis's id.
             owner (str | None): The principal asking; ``None`` matches legacy un-owned rows.
+            session_id (str | None): The session it must belong to; ``None`` for any of the owner's.
 
         Returns:
             tuple[dict[str, Any], str, str | None] | None: The analysis, its session id and its physical
             collection; ``None`` when it is missing, unreadable or owned by someone else.
         """
         with self._session_scope() as s:
-            row = (
-                s.query(TurnAnalysis.payload, Conversation.id, Conversation.owner, Conversation.collection_name)
+            query = (
+                s.query(TurnAnalysis.payload, Conversation.id, Conversation.collection_name)
                 .join(Turn, TurnAnalysis.turn_id == Turn.id)
                 .join(Conversation, Turn.conversation_id == Conversation.id)
-                .filter(TurnAnalysis.id == analysis_id)
-                .one_or_none()
+                .filter(TurnAnalysis.id == analysis_id, Conversation.owner == owner)
             )
+            if session_id is not None:
+                query = query.filter(Conversation.id == session_id)
+            row = query.one_or_none()
         if row is None:
             return None
-        raw, session_id, row_owner, collection = row
-        payload = _load_analysis(raw) if row_owner == owner else None
+        raw, found_session, collection = row
+        payload = _load_analysis(raw)
         if payload is None:
             return None
-        return payload, session_id, collection
+        return payload, found_session, collection
 
     def get_analysis(self, session_id: str, analysis_id: str, owner: str | None) -> dict[str, Any] | None:
         """Read an analysis of a session the caller owns, as it was stored.
@@ -2185,10 +2193,8 @@ class SessionManager:
         Returns:
             dict[str, Any] | None: The stored analysis, or ``None``.
         """
-        found = self._stored_analysis(analysis_id, owner)
-        if found is None or found[1] != session_id:
-            return None
-        return found[0]
+        found = self._stored_analysis(analysis_id, owner, session_id)
+        return None if found is None else found[0]
 
     def find_analysis(self, analysis_id: str, owner: str | None) -> tuple[dict[str, Any], str | None] | None:
         """Find an analysis the caller owns by its id alone, with the collection its session is pinned to.

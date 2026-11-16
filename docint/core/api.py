@@ -4137,11 +4137,15 @@ async def stream_query(
                     logger.opt(exception=exc).warning("Corrective retry failed; keeping the first answer")
                     retry_ok = False
 
-                if retry_ok:
-                    if retry_payload is None:
-                        # No final payload: the client went away during the retry, as above.
+                if retry_ok and retry_payload is None:
+                    if await request.is_disconnected():
+                        # No final payload and no client: it went away during the retry, as above.
                         audit.settle_quietly(op, criteria={"incomplete": True})
                         return
+                    logger.warning("Corrective retry ended without an answer; keeping the first answer")
+                    retry_ok = False
+
+                if retry_ok and retry_payload is not None:
                     payload_out = dict(retry_payload)
                     payload_out.pop("turn_idx", None)
                     retry_final = str(payload_out.get("response") or payload_out.get("answer") or "") or retry_answer

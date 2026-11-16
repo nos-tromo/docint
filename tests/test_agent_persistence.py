@@ -653,6 +653,25 @@ def test_analyses_go_with_their_conversation(session_manager: SessionManager) ->
     assert _stored_analyses(session_manager) == []
 
 
+def test_analyses_go_with_their_collection(session_manager: SessionManager) -> None:
+    """Deleting a collection deletes its sessions' analyses too, and no other collection's.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    [stored] = _finish(session_manager, _result(ANALYSIS))["analyses"]
+    with session_manager._session_scope() as s:
+        conv = session_manager._load_or_create_convo(s, "session-1", "user-a")
+        conv.collection_name = "uabc123__docs"
+        s.commit()
+    assert _stored_analyses(session_manager) == [(stored["id"], 0)]
+
+    assert session_manager.delete_sessions_for_collection("uabc123__other") == 0
+    assert _stored_analyses(session_manager) == [(stored["id"], 0)]
+    assert session_manager.delete_sessions_for_collection("uabc123__docs") == 1
+    assert _stored_analyses(session_manager) == []
+
+
 def test_a_stateless_turn_stores_no_analysis(session_manager: SessionManager) -> None:
     """A turn without a session keeps nothing, so its payload names no analysis.
 
