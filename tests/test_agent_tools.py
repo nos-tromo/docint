@@ -10,8 +10,8 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import fields
-from typing import Any
+from dataclasses import fields, replace
+from typing import Any, get_args
 
 import pytest
 from _pytest.logging import LogCaptureFixture
@@ -43,6 +43,7 @@ from docint.agents.assessment.ledger import (
 )
 from docint.agents.assessment.split import SENTINEL
 from docint.agents.turn.calls import FAILED_REPLY, RoundCalls
+from docint.agents.turn.keyword import KeywordMatcher, KeywordResult, KeywordTool
 from docint.agents.turn.passages import (
     HEADER_CHARS,
     LABEL_CHARS,
@@ -56,6 +57,8 @@ from docint.agents.turn.passages import (
 from docint.agents.turn.stream import ToolCall
 from docint.agents.turn.tools import (
     MAX_ARGUMENT_DEPTH,
+    ErrorKind,
+    HasBeginRound,
     PassageReply,
     ReadTool,
     SearchTool,
@@ -69,6 +72,7 @@ from docint.agents.turn.tools import (
     passage_reply,
     trail_detail,
 )
+from docint.agents.turn.topics import TopicLine, TopicsListing, TopicsSource, TopicsTool
 from docint.core.rag import ParentContextPostprocessor
 from docint.utils.text_budget import MATCH_SPANS_KEY
 
@@ -1406,6 +1410,264 @@ def test_a_plain_reply_is_not_remembered_whatever_it_carries() -> None:
 
     assert (type(first), first.informative, first.trail) == (ToolReply, True, COUNT_TRAIL)
     assert (second.text, tool.runs) == (first.text, ["Hafenfest", "Hafenfest"])
+
+
+# --- Facts, rounds and the run_python error kinds ---------------------------------------------
+
+
+def _hafenfest_count(*, unchecked: int = 0) -> KeywordTool:
+    """Build a keyword tool over the text whose every count finds three chunks and the programme.
+
+    Args:
+        unchecked (int): The chunks the index leaves out of the count.
+
+    Returns:
+        KeywordTool: The tool.
+    """
+    result = KeywordResult(
+        nodes=[programme_passage()], matches=3, unchecked=unchecked, keywords=("hafenfest",), writing=False
+    )
+    return KeywordTool(KeywordMatcher(fields=("text",), check=lambda words, field: None, run=lambda w, f: result))
+
+
+def test_a_reply_with_a_trail_is_kept_as_a_fact() -> None:
+    """A tool's answer that carries a trail leaves the step's action, detail and trail as a fact of the turn."""
+    ctx = tool_context()
+
+    ToolRegistry([_hafenfest_count()]).call(tool_call("keyword", words="Hafenfest"), ctx)
+
+    assert ctx.facts == [{"action": "keyword", "detail": "Hafenfest", "field": "text", "matches": 3}]
+
+
+def test_a_topics_listing_is_a_fact_though_it_shows_no_passage() -> None:
+    """A listing is a plain reply the registry never remembers, yet its trail is a fact."""
+    ctx = tool_context()
+    line = TopicLine(topic_id=4, label="Hafenfest und Stände", keywords=("hafenfest", "stände"), size=120)
+    listing = TopicsListing(lines=(line,), total=400)
+    topics = TopicsTool(TopicsSource(listing=lambda: listing, passages=lambda topic_id: None))
+
+    reply = ToolRegistry([topics]).call(tool_call("topics"), ctx)
+
+    assert type(reply) is ToolReply
+    assert ctx.answered == {}
+    assert [fact["action"] for fact in ctx.facts] == ["topics"]
+    assert (ctx.facts[0]["total"], ctx.facts[0]["topics"]) == (400, [[4, "Hafenfest und Stände", 120]])
+
+
+@pytest.mark.parametrize("together", [False, True], ids=["one-after-the-other", "in-one-round"])
+def test_a_reply_answered_from_memory_adds_no_fact(together: bool) -> None:
+    """The same call twice is counted once: the second is answered from memory, at prepare or at finish.
+
+    Args:
+        together (bool): Whether both calls are prepared in one round, so the second is recalled at finish.
+    """
+    ctx = tool_context()
+    registry = ToolRegistry([_hafenfest_count()])
+    calls = [tool_call("keyword", words="Hafenfest"), tool_call("keyword", words="hafenfest")]
+
+    if together:
+        two_phase_round(registry, calls, ctx)
+    else:
+        for call in calls:
+            registry.call(call, ctx)
+
+    assert ctx.facts == [{"action": "keyword", "detail": "Hafenfest", "field": "text", "matches": 3}]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        tool_call("keyframes", file="harbour_walk.webm"),
+        tool_call("keyword"),
+        tool_call("keyword", words="Hafenfest", field="author"),
+    ],
+    ids=["not-offered", "missing-argument", "bad-field"],
+)
+def test_an_error_reply_adds_no_fact(call: ToolCall) -> None:
+    """A call that was not answered is no fact, whether the registry or the tool refused it.
+
+    Args:
+        call (ToolCall): A call whose reply is an error.
+    """
+    ctx = tool_context()
+
+    reply = ToolRegistry([_hafenfest_count()]).call(call, ctx)
+
+    assert reply.error is True
+    assert ctx.facts == []
+
+
+def test_a_reply_without_a_trail_adds_no_fact() -> None:
+    """A search and a read leave no trail, so they leave no fact."""
+    ctx = tool_context()
+    registry = _registry(ScriptedSearch([programme_passage()]))
+
+    registry.call(tool_call("search", query="Hafenfest"), ctx)
+    registry.call(tool_call("read", n=1), ctx)
+
+    assert ctx.facts == []
+
+
+class _Answering:
+    """A tool that answers every call with the one reply it was given."""
+
+    def __init__(self, reply: ToolReply) -> None:
+        """Describe the tool.
+
+        Args:
+            reply (ToolReply): What every call is answered with.
+        """
+        self.name = "answering"
+        self.description = "Answer with a given reply."
+        self.parameters: dict[str, Any] = {"type": "object", "properties": {}}
+        self._reply = reply
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Answer without a fetch.
+
+        Args:
+            arguments (Mapping[str, Any]): Unused.
+            ctx (ToolContext): Unused.
+
+        Returns:
+            ToolReply | ToolWork: The work.
+        """
+        return ToolWork(detail="", fetch=None, answer=lambda fetched, context: self._reply)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        replace(error_reply("answering", "no.", kind="failed"), trail={"field": "text"}),
+        ToolReply(text="Nothing.", found=0, action="answering", detail="", trail={}),
+    ],
+    ids=["error-carrying-a-trail", "empty-trail"],
+)
+def test_an_answer_the_trail_does_not_show_adds_no_fact(reply: ToolReply) -> None:
+    """An error reply is no step even with a trail, and an empty trail is none, as the turn's trail reads them.
+
+    Args:
+        reply (ToolReply): What the tool's answer is.
+    """
+    ctx = tool_context()
+
+    ToolRegistry([_Answering(reply)]).call(tool_call("answering"), ctx)
+
+    assert ctx.facts == []
+
+
+def test_a_facts_head_wins_over_a_trail_that_names_the_same_keys() -> None:
+    """A trail with its own action and detail keys cannot rename the fact: the tool's head stands, the rest is kept."""
+    ctx = tool_context()
+    reply = ToolReply(
+        text="Done.",
+        found=0,
+        action="answering",
+        detail="Hafenfest",
+        trail={"action": "x", "detail": "y", "field": "text"},
+    )
+
+    ToolRegistry([_Answering(reply)]).call(tool_call("answering"), ctx)
+
+    assert ctx.facts == [{"action": "answering", "detail": "Hafenfest", "field": "text"}]
+
+
+@pytest.mark.parametrize("keyword_first", [True, False], ids=["keyword-then-topics", "topics-then-keyword"])
+def test_facts_keep_the_order_of_the_calls(keyword_first: bool) -> None:
+    """Two different fresh calls of one turn leave two facts, in the order they were made, whichever tool comes first.
+
+    Args:
+        keyword_first (bool): Whether the keyword count is called before the topics listing.
+    """
+    ctx = tool_context()
+    line = TopicLine(topic_id=4, label="Hafenfest und Stände", keywords=("hafenfest", "stände"), size=120)
+    listing = TopicsListing(lines=(line,), total=400)
+    topics = TopicsTool(TopicsSource(listing=lambda: listing, passages=lambda topic_id: None))
+    registry = ToolRegistry([_hafenfest_count(), topics])
+    keyword = tool_call("keyword", words="Hafenfest")
+    listed = tool_call("topics")
+    count = {"action": "keyword", "detail": "Hafenfest", "field": "text", "matches": 3}
+    listing_fact = {
+        "action": "topics",
+        "detail": "",
+        "total": 400,
+        "filtered": False,
+        "topics": [[4, "Hafenfest und Stände", 120]],
+    }
+
+    for call in (keyword, listed) if keyword_first else (listed, keyword):
+        registry.call(call, ctx)
+
+    assert ctx.facts == ([count, listing_fact] if keyword_first else [listing_fact, count])
+
+
+class _Rounds:
+    """A tool that notes when a round begins and when it prepares a call, so their order shows."""
+
+    def __init__(self) -> None:
+        """Describe the tool."""
+        self.name = "rounds"
+        self.description = "Note the rounds."
+        self.parameters: dict[str, Any] = {"type": "object", "properties": {}}
+        self.events: list[str] = []
+
+    def begin_round(self) -> None:
+        """Note that a round began."""
+        self.events.append("begin")
+
+    def prepare(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolReply | ToolWork:
+        """Note the call and answer it without a fetch.
+
+        Args:
+            arguments (Mapping[str, Any]): Unused.
+            ctx (ToolContext): Unused.
+
+        Returns:
+            ToolReply | ToolWork: The work.
+        """
+        self.events.append("prepare")
+
+        def _answer(fetched: Any, context: ToolContext) -> ToolReply:
+            """Build the reply.
+
+            Args:
+                fetched (Any): Nothing.
+                context (ToolContext): Unused.
+
+            Returns:
+                ToolReply: A plain reply.
+            """
+            return ToolReply(text="Noted.", found=0, action=self.name, detail="")
+
+        return ToolWork(detail="", fetch=None, answer=_answer)
+
+
+def test_each_round_begins_for_the_tools_that_ask() -> None:
+    """``RoundCalls.prepare`` begins the round once, ahead of its first call, for a tool that has ``begin_round``."""
+    ctx = tool_context()
+    rounds = _Rounds()
+    search = SearchTool(ScriptedSearch())
+    round_calls = RoundCalls(
+        registry=ToolRegistry([search, rounds]),
+        result_chars=ctx.budget.result_chars,
+        max_calls_per_round=4,
+        char_token_ratio=3.5,
+        search_slots=threading.BoundedSemaphore(2),
+    )
+
+    round_calls.prepare([tool_call("rounds"), tool_call("rounds")], ctx)
+    round_calls.prepare([tool_call("rounds")], ctx)
+
+    assert (isinstance(rounds, HasBeginRound), isinstance(search, HasBeginRound)) == (True, False)
+    assert rounds.events == ["begin", "prepare", "prepare", "begin", "prepare"]
+
+
+def test_the_run_python_error_kinds_exist() -> None:
+    """The run_python tool's own refusals have error kinds, beside the ``no_capacity`` and ``no_time`` it reuses."""
+    kinds = set(get_args(ErrorKind))
+
+    assert {"call_limit", "code_failed", "unavailable", "too_much_data"} <= kinds
+    assert {"no_capacity", "no_time"} <= kinds
 
 
 def test_a_reply_is_by_default_no_news_and_carries_no_trail() -> None:

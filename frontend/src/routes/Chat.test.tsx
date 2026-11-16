@@ -11,6 +11,7 @@ import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 import { useSearchUiStore } from '@/stores/searchUi'
 import { useTopicFocusStore } from '@/stores/topicFocus'
+import { ANALYSIS } from '@/test/analysis'
 import type { TopicsOverview } from '@/api/topics'
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
@@ -522,6 +523,50 @@ describe('Chat session-history validation restoration', () => {
       expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
     })
     expect(screen.getByText(/validation passed for the source-backed part/i)).toBeInTheDocument()
+  })
+
+  it('restores a turn’s analyses from session history, and reads each through its own route', async () => {
+    const urls: string[] = []
+    const json = (body: unknown) =>
+      Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((req: RequestInfo | URL) => {
+        const u = typeof req === 'string' ? req : req.toString()
+        urls.push(u)
+        if (u.includes('/analyses/a1')) return json(ANALYSIS)
+        if (u.includes('/sessions/') && u.includes('/history')) {
+          return json({
+            messages: [
+              { role: 'user', content: 'Who posted most?' },
+              {
+                role: 'assistant',
+                content: 'Alice did.',
+                sources: [],
+                analyses: [
+                  {
+                    id: 'a1',
+                    index: 1,
+                    title: 'Posts per author',
+                    tables: [{ name: 'posts.csv', columns: 2, rows: 7 }],
+                    charts: [{ name: 'chart.png', bytes: 12 }]
+                  }
+                ]
+              }
+            ]
+          })
+        }
+        return Promise.resolve(new Response('null', { status: 200 }))
+      })
+    )
+
+    renderChatWithSession('sess-analyses')
+
+    expect(await screen.findByText('Analysis 1 · Posts per author')).toBeInTheDocument()
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(urls.filter((u) => u.includes('/analyses/')).map((u) => u.slice(u.indexOf('/sessions/')))).toEqual([
+      '/sessions/sess-analyses/analyses/a1?collection=docs'
+    ])
   })
 
   it('reloaded turns keep their target chip', async () => {

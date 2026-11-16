@@ -39,6 +39,7 @@ from docint.agents.turn.history import (
 )
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
+from docint.agents.turn.workbench_tool import PythonTurn
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
 from docint.core.retention import ExpiringItem, inherit
 from docint.core.retention_sources import source_expiry
@@ -47,7 +48,9 @@ from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
+from docint.core.state.turn_analysis import TurnAnalysis, analysis_summary, stamp_analysis
 from docint.core.summary.units import source_file_hash
+from docint.utils.env_cfg import load_agent_env
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -142,6 +145,46 @@ def _load_trail(raw: str | None) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return trail if isinstance(trail, dict) else None
+
+
+def _load_analysis(raw: str | None) -> dict[str, Any] | None:
+    """Parse a stored analysis's payload.
+
+    Args:
+        raw (str | None): The stored JSON.
+
+    Returns:
+        dict[str, Any] | None: The analysis, or ``None`` when absent or unreadable.
+    """
+    if not raw:
+        return None
+    try:
+        analysis = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return analysis if isinstance(analysis, dict) else None
+
+
+def _stamped(
+    analyses: Sequence[Mapping[str, Any]], *, question: str, session_id: str, turn_idx: int
+) -> list[dict[str, Any]]:
+    """Stamp a turn's analyses as they are stored, each under the id minted for it.
+
+    Args:
+        analyses (Sequence[Mapping[str, Any]]): The analyses, in order, each with its ``id``.
+        question (str): The message the turn answered.
+        session_id (str): The turn's session.
+        turn_idx (int): The turn's index in it.
+
+    Returns:
+        list[dict[str, Any]]: The stamped analyses (see :func:`~docint.core.state.turn_analysis.stamp_analysis`).
+    """
+    return [
+        stamp_analysis(
+            analysis, analysis_id=str(analysis["id"]), question=question, session_id=session_id, turn_idx=turn_idx
+        )
+        for analysis in analyses
+    ]
 
 
 def _load_topic_focus(raw: str | None) -> dict[str, Any] | None:
@@ -1080,7 +1123,9 @@ class SessionManager:
         an empty one is still a scope. Its reply is an assessment when it carries the sentinel,
         labelled and stored with its boundary; otherwise a lookup, whose trail answers
         ``plain``. Closing it closes the loop, so a suspended round's model slot comes back at
-        once.
+        once. A stored turn (``persist``, with a session and an owner) is also handed what
+        ``run_python`` needs: its owner, its session and its deadline, the turn's start plus
+        ``AGENT_TIME_BUDGET_S``, the loop's own.
 
         Args:
             user_msg (str): The user's message, verbatim.
@@ -1122,6 +1167,12 @@ class SessionManager:
         )
         # A scoped engine fetches exactly the pinned chunks, numbered, whatever the query.
         pinned = list(engine.retrieve(QueryBundle(user_msg))) if scoped else None
+        # Only a stored turn can keep an analysis, so only it is offered ``run_python``.
+        python_turn = (
+            PythonTurn(owner, session_id, turn_started_at + load_agent_env().time_budget_s)
+            if persist and session_id is not None and owner is not None
+            else None
+        )
         turn = self.rag.agent_turn(
             engine,
             retrieval_target=retrieval_target,
@@ -1132,6 +1183,7 @@ class SessionManager:
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
             vector_store_kwargs=vector_store_kwargs,
+            python_turn=python_turn,
         )
         if turn is None:
             # The factory has logged the numbers.
@@ -1245,7 +1297,9 @@ class SessionManager:
         An assessment's sentinel becomes the localized label in the stored text, so history,
         transcripts and report exports show the boundary without knowing the protocol. The
         sources are the turn's evidence in number order. A scoped turn reports
-        ``retrieval_mode="scoped"``, as the client checks; any other agent turn ``agent``.
+        ``retrieval_mode="scoped"``, as the client checks; any other agent turn ``agent``. A
+        stored turn's analyses get their ids here and are stored with it; the payload carries
+        them as stored, which is what the turn's validator reads. A turn not stored keeps none.
 
         Args:
             user_msg (str): The user's message, verbatim.
@@ -1262,7 +1316,8 @@ class SessionManager:
             persist (bool): Whether to write the turn.
 
         Returns:
-            dict[str, Any]: The final payload, ``turn_idx`` included (``None`` if not persisted).
+            dict[str, Any]: The final payload, ``turn_idx`` included (``None`` if not persisted),
+            and ``analyses``, stamped as stored (empty if not persisted).
         """
         mode, labelled = _agent_answer(result.raw_text)
         trail: dict[str, Any] = {"steps": result.steps, "actions": result.actions, "reason": result.reason}
@@ -1292,7 +1347,9 @@ class SessionManager:
             normalized["visual"] = {"images_attached": result.images_attached}
 
         turn_idx: int | None = None
+        analyses: list[dict[str, Any]] = []
         if persist and session_id is not None:
+            minted = [{**analysis, "id": uuid.uuid4().hex} for analysis in result.analyses]
             turn_idx = self._persist_turn(
                 session_id,
                 user_msg,
@@ -1302,7 +1359,9 @@ class SessionManager:
                 replace_idx=replace_turn_idx,
                 agent_trail=trail,
                 answer_mode=mode,
+                analyses=minted,
             )
+            analyses = _stamped(minted, question=user_msg, session_id=session_id, turn_idx=turn_idx)
             if replace_turn_idx is None:
                 self._maybe_update_summary(session_id)
 
@@ -1319,6 +1378,7 @@ class SessionManager:
             "visual": normalized.get("visual"),
             "answer_mode": mode,
             "agent": trail,
+            "analyses": analyses,
             "turn_idx": turn_idx,
         }
         if scoped_node_ids:
@@ -1668,6 +1728,7 @@ class SessionManager:
         replace_idx: int | None = None,
         agent_trail: dict[str, Any] | None = None,
         answer_mode: AnswerMode | None = None,
+        analyses: Sequence[Mapping[str, Any]] = (),
     ) -> int:
         """Persist a user message and the assistant's response in the database.
 
@@ -1697,6 +1758,11 @@ class SessionManager:
                 an assessment. ``None`` stores NULL, so readers infer the mode
                 from the trail; on a replaced turn it also resets the stored
                 mode, as ``agent_trail=None`` resets the trail.
+            analyses (Sequence[Mapping[str, Any]]): The analyses the turn's
+                ``run_python`` runs kept, in order, each with the ``id`` minted
+                for it. Stored stamped (see :func:`_stamped`), with ``user_msg``
+                as their question. A replaced turn's are cleared first, as its
+                citations are.
 
         Returns:
             int: The 0-based index of the persisted turn within the
@@ -1740,6 +1806,7 @@ class SessionManager:
                 # inserted, so the turn never momentarily holds both sets and
                 # replay cannot renumber citations against a stale row.
                 t.citations.clear()
+                t.analyses.clear()
                 s.flush()
             else:
                 next_idx = len(conv.turns)
@@ -1800,6 +1867,13 @@ class SessionManager:
                         page=int(page) if page is not None else None,
                         row=int(row_index) if row_index is not None else None,
                     )
+                )
+
+            for position, stamped in enumerate(
+                _stamped(analyses, question=user_msg, session_id=session_id, turn_idx=next_idx)
+            ):
+                t.analyses.append(
+                    TurnAnalysis(id=stamped["id"], position=position, payload=json.dumps(stamped, ensure_ascii=False))
                 )
 
             self._lower_session_expiry(conv, cited, agent=bool(agent_trail))
@@ -2008,7 +2082,10 @@ class SessionManager:
             list[dict[str, Any]]: A list of message dictionaries, or an
                 empty list when the session is missing or not owned by
                 ``owner``. An assistant entry carries the turn's
-                ``retrieval_target`` when one was recorded.
+                ``retrieval_target`` when one was recorded, and ``analyses``,
+                one summary each (see
+                :func:`~docint.core.state.turn_analysis.analysis_summary`), when
+                the turn kept any.
         """
         with self._session_scope() as s:
             conv = s.query(Conversation).filter_by(id=session_id).first()
@@ -2056,9 +2133,82 @@ class SessionManager:
                         msg_entry["agent"] = trail
                     if t.retrieval_target:
                         msg_entry["retrieval_target"] = t.retrieval_target
+                    analyses = [
+                        analysis_summary(payload, row.position + 1)
+                        for row in t.analyses
+                        if (payload := _load_analysis(row.payload)) is not None
+                    ]
+                    if analyses:
+                        msg_entry["analyses"] = analyses
                     messages.append(msg_entry)
 
             return messages
+
+    def _stored_analysis(
+        self, analysis_id: str, owner: str | None, session_id: str | None = None
+    ) -> tuple[dict[str, Any], str, str | None] | None:
+        """Read a stored analysis the caller owns, with its session and the collection that session is pinned to.
+
+        The owner, and the session when one is named, are in the query's own ``WHERE`` clause, so another
+        principal's row is never loaded.
+
+        Args:
+            analysis_id (str): The analysis's id.
+            owner (str | None): The principal asking; ``None`` matches legacy un-owned rows.
+            session_id (str | None): The session it must belong to; ``None`` for any of the owner's.
+
+        Returns:
+            tuple[dict[str, Any], str, str | None] | None: The analysis, its session id and its physical
+            collection; ``None`` when it is missing, unreadable or owned by someone else.
+        """
+        with self._session_scope() as s:
+            query = (
+                s.query(TurnAnalysis.payload, Conversation.id, Conversation.collection_name)
+                .join(Turn, TurnAnalysis.turn_id == Turn.id)
+                .join(Conversation, Turn.conversation_id == Conversation.id)
+                .filter(TurnAnalysis.id == analysis_id, Conversation.owner == owner)
+            )
+            if session_id is not None:
+                query = query.filter(Conversation.id == session_id)
+            row = query.one_or_none()
+        if row is None:
+            return None
+        raw, found_session, collection = row
+        payload = _load_analysis(raw)
+        if payload is None:
+            return None
+        return payload, found_session, collection
+
+    def get_analysis(self, session_id: str, analysis_id: str, owner: str | None) -> dict[str, Any] | None:
+        """Read an analysis of a session the caller owns, as it was stored.
+
+        Owner-scoped like :meth:`get_session_history`: an analysis of another session or
+        another principal, or one that does not exist, yields ``None`` (no existence leak).
+
+        Args:
+            session_id (str): The session it must belong to.
+            analysis_id (str): The analysis's id.
+            owner (str | None): The principal asking; ``None`` matches legacy un-owned rows.
+
+        Returns:
+            dict[str, Any] | None: The stored analysis, or ``None``.
+        """
+        found = self._stored_analysis(analysis_id, owner, session_id)
+        return None if found is None else found[0]
+
+    def find_analysis(self, analysis_id: str, owner: str | None) -> tuple[dict[str, Any], str | None] | None:
+        """Find an analysis the caller owns by its id alone, with the collection its session is pinned to.
+
+        Args:
+            analysis_id (str): The analysis's id.
+            owner (str | None): The principal asking; ``None`` matches legacy un-owned rows.
+
+        Returns:
+            tuple[dict[str, Any], str | None] | None: The stored analysis and its session's physical
+            collection (``None`` for an unpinned legacy session); ``None`` when not found for ``owner``.
+        """
+        found = self._stored_analysis(analysis_id, owner)
+        return None if found is None else (found[0], found[2])
 
     def get_prior_turn(self, session_id: str, owner: str | None) -> PriorTurn | None:
         """Read the last exchange of a session the caller owns.

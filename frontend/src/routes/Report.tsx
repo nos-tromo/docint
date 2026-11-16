@@ -46,18 +46,20 @@ import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
 import { hateCategoryLabel, hateConfidenceLabel } from '@/lib/hateCategoryLabel'
+import { isPngDataUri } from '@/lib/analysis'
 import { hasImageParts, type ImageParts } from '@/lib/reportSnapshots'
 import { markdownPreview } from '@/lib/markdownPreview'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
-// The summary and the topics lead the document, matching the server
-// renderer's SECTION_ORDER.
+// The summary and the topics lead the document, then the chat answers and the analyses
+// computed from them, matching the server renderer's SECTION_ORDER.
 function sections(t: Translate): Array<{ type: ArtifactType; label: string }> {
   return [
     { type: 'summary', label: t('report.section_summaries') },
     { type: 'topics', label: t('report.section_topics') },
     { type: 'chat_answer', label: t('report.section_chat_answers') },
+    { type: 'analysis', label: t('report.section_analyses') },
     { type: 'entity_finding', label: t('report.section_entity_findings') },
     { type: 'hate_speech_finding', label: t('report.section_hate_findings') }
   ]
@@ -261,6 +263,8 @@ function itemTitle(item: ReportItem, t: Translate): string {
         t('report.default_hate_finding')
       )
     }
+    case 'analysis':
+      return truncate(str(s, 'title'), 120) || t('report.default_analysis')
     case 'topics': {
       const count = Array.isArray(s.topics) ? s.topics.length : 0
       return t(count === 1 ? 'report.topics_title_one' : 'report.topics_title_other', { count })
@@ -270,9 +274,31 @@ function itemTitle(item: ReportItem, t: Translate): string {
   }
 }
 
-function itemBody(item: ReportItem): string {
+/** An analysis's tables as one line each: the name and the shape, never the cells. */
+function tableShapes(snapshot: Record<string, unknown>, t: Translate): string {
+  const tables = Array.isArray(snapshot.tables) ? snapshot.tables : []
+  return tables
+    .flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return []
+      const { name, columns, column_count: columnCount, rows, row_count: rowCount } = entry as Record<string, unknown>
+      const count = typeof rowCount === 'number' ? rowCount : Array.isArray(rows) ? rows.length : 0
+      const kept = Array.isArray(columns) ? columns.length : 0
+      return [
+        t('report.analysis_table_shape', {
+          name: typeof name === 'string' ? truncate(name, 80) : '',
+          rows: count,
+          columns: typeof columnCount === 'number' ? Math.max(columnCount, kept) : kept
+        })
+      ]
+    })
+    .join('\n')
+}
+
+function itemBody(item: ReportItem, t: Translate): string {
   const s = item.snapshot
   switch (item.artifact_type) {
+    case 'analysis':
+      return tableShapes(s, t)
     case 'chat_answer':
       return truncate(markdownPreview(str(s, 'model_response')))
     case 'entity_finding':
@@ -305,6 +331,7 @@ function itemImageParts(item: ReportItem): ImageParts | null {
 
 /** An item's body: an image finding's labelled parts, else its text. */
 function ItemBody({ item }: { item: ReportItem }) {
+  const t = useT()
   const parts = itemImageParts(item)
   if (parts) {
     return (
@@ -313,7 +340,7 @@ function ItemBody({ item }: { item: ReportItem }) {
       </div>
     )
   }
-  const body = itemBody(item)
+  const body = itemBody(item, t)
   return body ? <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">{body}</p> : null
 }
 
@@ -332,6 +359,21 @@ interface EvidenceFigure {
 }
 
 /**
+ * An analysis's charts, captioned by name. Only a base64 PNG data URI is drawn: the chart is what the
+ * sandbox wrote from retrieved passages, so what the server stored is not trusted past that.
+ */
+function analysisFigures(snapshot: Record<string, unknown>): EvidenceFigure[] {
+  const charts = Array.isArray(snapshot.charts) ? snapshot.charts : []
+  return charts.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const { name, data_uri: dataUri } = entry as { name?: unknown; data_uri?: unknown }
+    if (!isPngDataUri(dataUri)) return []
+    const label = typeof name === 'string' ? name : ''
+    return [{ thumb: { data_uri: dataUri, kind: 'image' as const }, caption: label, filename: label }]
+  })
+}
+
+/**
  * The frozen figures of one item, each captioned the way the exports caption
  * it: a chat answer can carry several images at once and side by side they are
  * indistinguishable, so the caption repeats the citation number the answer
@@ -339,6 +381,7 @@ interface EvidenceFigure {
  */
 function itemFigures(item: ReportItem): EvidenceFigure[] {
   const s = item.snapshot
+  if (item.artifact_type === 'analysis') return analysisFigures(s)
   if (item.artifact_type !== 'chat_answer') {
     return isRenderableThumbnail(s.thumbnail)
       ? [{ thumb: s.thumbnail, caption: '', filename: str(s, 'filename') }]
@@ -382,8 +425,10 @@ function EvidenceStrip({ figures, t }: { figures: EvidenceFigure[]; t: Translate
   if (figures.length === 0) return null
   return (
     <div className="flex flex-wrap gap-3">
-      {figures.map(({ thumb, caption, filename }) => (
-        <figure key={filename} className="max-w-[12rem] space-y-1">
+      {figures.map(({ thumb, caption, filename }, i) => (
+        // Two figures may share a name, and the strip is never reordered.
+        // eslint-disable-next-line @eslint-react/no-array-index-key
+        <figure key={`${i}:${filename}`} className="max-w-[12rem] space-y-1">
           {/* Enlarged from the frozen bytes the snapshot carries, never from
               the source store: a report is meant to outlive the collection it
               was drawn from, so its evidence must not need one. */}

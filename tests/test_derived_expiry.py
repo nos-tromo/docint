@@ -166,6 +166,30 @@ def test_report_item_sources() -> None:
     assert report_item_sources("hate_speech_finding", {"chunk_id": ""}) == (set(), set(), True)
     assert report_item_sources("summary", {"collection": "docs"}) == (set(), set(), True)
     assert report_item_sources("topics", {"run_id": "r"}) == (set(), set(), True)
+    named = {"provenance": {"sources": [{"file_hash": "a"}, {"file_hash": "b"}]}}
+    assert report_item_sources("analysis", named) == ({"a", "b"}, set(), False)
+    assert report_item_sources("analysis", {"provenance": {"sources": [{"file_hash": None}]}}) == (set(), set(), True)
+    assert report_item_sources("analysis", {"provenance": {"sources": []}}) == (set(), set(), True)
+    assert report_item_sources("analysis", {}) == (set(), set(), True)
+    mixed: dict[str, Any] = {"provenance": {"sources": [{"file_hash": "a"}, {"file_hash": None}]}}
+    assert report_item_sources("analysis", mixed) == ({"a"}, set(), True)
+    quiet: dict[str, Any] = {"sources": [{"file_hash": "a"}], "inputs": {"keyword_checks": 0, "topic_listings": 0}}
+    assert report_item_sources("analysis", {"provenance": quiet}) == ({"a"}, set(), False)
+    assert report_item_sources("analysis", {"provenance": {"sources": [{"file_hash": "a"}]}}) == ({"a"}, set(), False)
+    half: dict[str, Any] = {"sources": [{"file_hash": "a"}], "inputs": {"keyword_checks": 0}}
+    assert report_item_sources("analysis", {"provenance": half}) == ({"a"}, set(), False)
+    malformed_or_listing: list[Any] = [
+        {"keyword_checks": 2, "topic_listings": 0},
+        {"keyword_checks": 0, "topic_listings": 1},
+        {"keyword_checks": "2", "topic_listings": 0},
+        {"keyword_checks": 0, "topic_listings": None},
+        {"keyword_checks": True, "topic_listings": 0},
+        [],
+        "inputs",
+    ]
+    for inputs in malformed_or_listing:
+        listed = {"provenance": {"sources": [{"file_hash": "a"}], "inputs": inputs}}
+        assert report_item_sources("analysis", listed) == ({"a"}, set(), True), inputs
 
 
 def _reports(rag: MagicMock, sessions: SessionManager) -> Any:
@@ -200,6 +224,46 @@ def test_report_item_inherits_its_sources(stores: tuple[MagicMock, DocumentReten
     assert _report_expiry(reports, report_id) == NOW - 10 * DAY + 365 * DAY
     reports.add_item(report_id, "alice", artifact_type="entity_finding", dedupe_key="e:1", snapshot={"chunk_id": "p1"})
     assert _report_expiry(reports, report_id) == NOW - 200 * DAY + 365 * DAY
+
+
+def test_an_analysis_item_inherits_the_documents_it_drew_on(
+    stores: tuple[MagicMock, DocumentRetentionManager, SessionManager],
+) -> None:
+    """An analysis takes the deadline of the documents its passages came from; with none named, the oldest's."""
+    rag, _, sessions = stores
+    reports = _reports(rag, sessions)
+    named = int(reports.create_report(title="r1", owner="alice", collection_name="docs")["id"])
+    reports.add_item(
+        named,
+        "alice",
+        artifact_type="analysis",
+        dedupe_key="analysis:1",
+        snapshot={"provenance": {"sources": [{"file_hash": "new"}]}},
+    )
+    assert _report_expiry(reports, named) == NOW - 10 * DAY + 365 * DAY
+    unnamed = int(reports.create_report(title="r2", owner="alice", collection_name="docs")["id"])
+    reports.add_item(
+        unnamed,
+        "alice",
+        artifact_type="analysis",
+        dedupe_key="analysis:2",
+        snapshot={"provenance": {"sources": [{"file_hash": None}]}},
+    )
+    assert _report_expiry(reports, unnamed) == NOW - 300 * DAY + 365 * DAY
+    listed = int(reports.create_report(title="r3", owner="alice", collection_name="docs")["id"])
+    reports.add_item(
+        listed,
+        "alice",
+        artifact_type="analysis",
+        dedupe_key="analysis:3",
+        snapshot={
+            "provenance": {
+                "sources": [{"file_hash": "new"}],
+                "inputs": {"passages": 1, "keyword_checks": 1, "topic_listings": 0},
+            }
+        },
+    )
+    assert _report_expiry(reports, listed) == NOW - 300 * DAY + 365 * DAY
 
 
 def test_summary_item_and_overview_take_the_oldest(

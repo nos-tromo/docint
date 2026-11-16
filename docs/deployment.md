@@ -72,9 +72,10 @@ the frontend port is published for local development.
 - Mounts the `docling-cache`, `sessions-storage`, and
   `source-preview-cache` volumes.
 - Attaches to the `docint-net` network, to `inference-net` with the alias
-  `docint-backend` (to reach the vLLM router), and to `data-net` with the
+  `docint-backend` (to reach the vLLM router), to `data-net` with the
   alias `docint-backend` (to reach the `data-plane` project's Qdrant at
-  `http://qdrant:6333`).
+  `http://qdrant:6333`), and to `workbench-net` with the same alias (to reach
+  workbench's api at `http://workbench-api:8000` for `run_python`).
 
 ### `frontend`
 
@@ -158,12 +159,15 @@ idempotently before the stack starts.
 - `data-net` — **external** network declared with
   `name: ${DATA_NET:-data-net}`. The backend attaches to it to reach
   the `data-plane` project's Qdrant at `http://qdrant:6333`.
+- `workbench-net` — **external** network declared with
+  `name: ${WORKBENCH_NET:-workbench-net}`. The backend attaches to it to reach
+  workbench's api; the frontend never joins it.
 - `edge-net` — **external** network declared with
   `name: ${EDGE_NET:-edge-net}`. The *frontend* attaches to it with the alias
   `docint-frontend`, which is how the `edge-plane` gateway reaches the SPA.
   The backend never joins it.
 
-All three external networks must exist before starting the stack. `make
+All four external networks must exist before starting the stack. `make
 network` creates them idempotently:
 
 ```bash
@@ -172,6 +176,7 @@ make network
 docker network create inference-net
 docker network create data-net
 docker network create edge-net
+docker network create workbench-net
 ```
 
 ## Dockerfiles
@@ -232,6 +237,7 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `INFERENCE_NET` | Name of the shared external inference network (default `inference-net`). |
 | `DATA_NET` | Name of the shared external data network (default `data-net`). |
 | `EDGE_NET` | Name of the shared external edge network the frontend joins (default `edge-net`). |
+| `WORKBENCH_NET` | Name of the shared external network the backend joins to reach workbench (default `workbench-net`). |
 | `DOCINT_HOST_PORT` | Host port for the React SPA under `make up-dev` (default `8080`). |
 | `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
 | `DOCINT_API_MAX_BODY_SIZE` | Per-request cap nginx enforces on the JSON API locations (default `64m`), sized for the report batch add. Frontend-only — nothing advertises it. Raise it alongside `REPORT_BATCH_MAX_ITEMS` when a section's findings run into the tens of thousands. |

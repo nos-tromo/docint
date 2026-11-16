@@ -58,7 +58,7 @@ extra context a new user needs to understand what they just started.
 2. **Create the shared networks and volumes** (idempotent):
 
    ```bash
-   make network    # external inference-net + data-net + edge-net
+   make network    # external inference-net + data-net + edge-net + workbench-net
    make volumes    # external cache + state volumes
    ```
 

@@ -3,6 +3,7 @@ Assess if the answer is faithful to the retrieved sources and if the sources fit
 A statement marked "Inference:" or "Schlussfolgerung:" that follows from the cited sources counts as grounded.
 A statement of how many indexed chunks contain some words, including that none does, counts as grounded when a listed keyword check gives that count; a check marked "collection being written" counted only the chunks stored so far, so it grounds a statement that none does only as none so far, never as the words being absent.
 A statement of how many chunks a topic holds, or of its share of the collection, counts as grounded when a listed topic check gives that count or share; a check marked "within the turn's filters" counted only the chunks the turn's filters select, so it grounds a share of those chunks, never of the whole collection.
+A figure the answer states (a count, a sum, a share, a table cell) counts as grounded when a listed analysis check gives it: the code computed it from the passages the check names, so the answer cites those passages, not the figure.
 Return JSON only with this schema:
 {{
   "summary_grounded": true|false,

@@ -25,6 +25,7 @@ from loguru import logger
 
 from docint import __version__
 from docint.core.auth.principal import Principal, resolve_principal
+from docint.utils.audit_disclose import DisclosureLedger, DisclosureRecord, binding
 from docint.utils.audit_event import Actor, AiCall, AuditEmitter, AuditWriteError, Purpose, Target
 from docint.utils.audit_forward import Forwarded, forwarding
 from docint.utils.audit_meter import TransferMeter, metering
@@ -619,6 +620,123 @@ def metered(
             if op.event_id is not None:
                 op.transfers(meter, prefix=prefix)
             raise
+
+
+#: The operation of a chat turn's hand-over to workbench: one ``disclose`` per ``run_python`` call.
+DISCLOSE_OPERATION = "chat.workbench"
+#: Where a ``run_python`` call's data goes.
+WORKBENCH_RECIPIENT = "workbench:run_python"
+
+
+def chat_also(workbench: bool) -> tuple[str, ...]:
+    """Return the further actions a chat turn may record, for the purpose rule.
+
+    Args:
+        workbench (bool): Whether workbench is configured, so a turn can hand data to it.
+
+    Returns:
+        tuple[str, ...]: ``("ai_call", "disclose")`` while it is, else ``("ai_call",)``.
+    """
+    return ("ai_call", "disclose") if workbench else ("ai_call",)
+
+
+def write_disclosures(op: Operation, records: Sequence[DisclosureRecord]) -> None:
+    """Write one ``disclose`` child of the operation per hand-over, by reference only.
+
+    The first write that fails stops the rest; how many went unwritten, that one included, is logged by count.
+
+    Args:
+        op (Operation): The turn's operation, with its primary event written.
+        records (Sequence[DisclosureRecord]): The hand-overs, as the ledger settled them.
+
+    Raises:
+        AuditWriteError: When an event could not be written.
+        AuditTrailClosed: When the chain is not open.
+        RuntimeError: When the operation has no primary event yet.
+    """
+    written = 0
+    try:
+        for record in records:
+            criteria: dict[str, object] = {}
+            if record.job_id is not None:
+                criteria["workbench_job"] = record.job_id
+            criteria.update(
+                passages=record.passages,
+                keyword_checks=record.keyword_checks,
+                topic_listings=record.topic_listings,
+                data_bytes=record.data_bytes,
+            )
+            if record.incomplete:
+                criteria["incomplete"] = True
+            op.child(
+                "disclose",
+                DISCLOSE_OPERATION,
+                target=Target(kind="chunk", ids=list(record.point_ids), count=len(record.point_ids)),
+                criteria=criteria,
+                recipient=WORKBENCH_RECIPIENT,
+                outcome=record.outcome,
+            )
+            written += 1
+    except Exception:
+        logger.error(
+            "{} disclosure(s) of audited operation '{}' were not written", len(records) - written, op.operation
+        )
+        raise
+
+
+def _write_at_seal(op: Operation, records: Sequence[DisclosureRecord]) -> None:
+    """Write what the turn left in its ledger, beneath its primary or failure event; never raise.
+
+    Args:
+        op (Operation): The turn's operation.
+        records (Sequence[DisclosureRecord]): What the seal took.
+    """
+    if not records:
+        return
+    settle_quietly(op, criteria={"incomplete": True})
+    if op.event_id is None:
+        logger.error(
+            "{} disclosure(s) of audited operation '{}' have no event to go beneath", len(records), op.operation
+        )
+        return
+    try:
+        write_disclosures(op, records)
+    except Exception:
+        logger.exception("Could not record the disclosures of audited operation '{}'", op.operation)
+
+
+@contextmanager
+def disclosing(op: Operation) -> Iterator[DisclosureLedger]:
+    """Bind a fresh disclosure ledger for a chat turn, and seal it however the turn ends.
+
+    On every exit the ledger is sealed, so a call that starts later is refused and sends nothing.
+    What the route did not write is written then: the operation is settled as failed if nothing
+    settled it, and each disclosure goes beneath its primary or failure event. A write that fails
+    there is logged, never raised over the turn's own outcome. With nothing recorded the operation
+    is left to its route, so a client error still records nothing.
+
+    The seal comes before the binding's reset. A cancelled stream can close its generator from
+    another context, where the reset fails; that failure is logged and changes nothing.
+
+    Args:
+        op (Operation): The turn's operation.
+
+    Yields:
+        DisclosureLedger: The bound ledger.
+    """
+    ledger = DisclosureLedger()
+    bound = binding(ledger)
+    bound.__enter__()
+    try:
+        yield ledger
+    finally:
+        try:
+            _write_at_seal(op, ledger.seal())
+        finally:
+            try:
+                bound.__exit__(None, None, None)
+            except ValueError as exc:
+                logger.debug("The disclosure ledger's binding was reset outside its context ({})", type(exc).__name__)
 
 
 def actor_for(principal: Principal) -> Actor:

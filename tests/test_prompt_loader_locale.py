@@ -546,6 +546,27 @@ def test_a_topics_line_is_one_line_naming_only_topics(code: str) -> None:
 
 
 @pytest.mark.parametrize("code", ["en", "de"])
+def test_the_run_python_line_exists_in_every_locale(code: str) -> None:
+    """The run_python line is one line of plain text in each locale, naming the files, the folder and the tool.
+
+    Its braces list the keys of ``passages.json`` and are not a placeholder: the line is never formatted, so
+    the same keys reach the model in both locales.
+
+    Args:
+        code (str): The locale.
+    """
+    text = _prompt("agent_tools_python", code)
+
+    assert "\n" not in text, f"{code}/agent_tools_python.txt is more than one line"
+    assert "`" not in text, f"{code}/agent_tools_python.txt quotes in backticks"
+    assert text.startswith("- run_python(code, passages, title):"), f"{code}/agent_tools_python.txt opens otherwise"
+    for named in ("passages.json", "keyword_checks.json", "topics.json", "out/", "CSV", "PNG", "[n]"):
+        assert named in text, f"{code}/agent_tools_python.txt does not name {named}"
+    assert "{n, text, file, page, time, author, network, kind}" in text
+    assert _placeholders(text) == set()
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
 def test_the_keyword_guide_makes_a_count_a_fact_not_a_source(code: str) -> None:
     """The guide keeps a count out of the citations and a zero out of any claim of absence, in the locale's words.
 
@@ -845,6 +866,25 @@ def test_the_validators_take_a_share_from_a_listed_topic_check_as_grounded(code:
     assert len(lines) == 1, f"{code}/{name}.txt names the topic checks on {len(lines)} lines"
     assert FILTERED_MARK in lines[0], f"{code}/{name}.txt does not name {FILTERED_MARK!r} on its topic check line"
     assert "keyword check" not in lines[0].casefold()
+
+
+@pytest.mark.parametrize("name", VALIDATOR_PROMPTS)
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_validator_accepts_a_figure_an_analysis_check_gives(name: str, code: str) -> None:
+    """A computed figure cites the passages its code ran on, so each validator has one line accepting it.
+
+    The line names no keyword or topic check, so theirs stay the only lines that do; the English one speaks of a
+    listed analysis check, and the German one names the heading the checks come under, as it names the others.
+
+    Args:
+        code (str): The locale.
+        name (str): The validator prompt.
+    """
+    lines = [line for line in _prompt(name, code).splitlines() if "analysis check" in line.casefold()]
+
+    assert len(lines) == 1, f"{code}/{name}.txt names the analysis checks on {len(lines)} lines"
+    assert "keyword check" not in lines[0].casefold() and "topic check" not in lines[0].casefold()
+    assert {"en": "a listed analysis check", "de": "„Analysis checks“"}[code] in lines[0]
 
 
 @pytest.mark.parametrize("target", TARGETS)

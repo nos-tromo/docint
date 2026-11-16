@@ -14,6 +14,9 @@ PDF, so layout is defined once.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import csv
 import html
 import io
 import json
@@ -31,7 +34,7 @@ from docint.utils.env_cfg import language_endonym
 from docint.utils.ui_strings import ui_string
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from markdown_it.renderer import RendererHTML
     from markdown_it.rules_block import StateBlock
@@ -44,14 +47,16 @@ ARTIFACT_ENTITY = "entity_finding"
 ARTIFACT_HATE = "hate_speech_finding"
 ARTIFACT_SUMMARY = "summary"
 ARTIFACT_TOPICS = "topics"
+ARTIFACT_ANALYSIS = "analysis"
 
-# Render order: Summaries -> Topics -> Chat -> Entities -> Hate-speech (the
-# summary and the topics lead the document — they set the context for the
-# findings that follow).
+# Render order: Summaries -> Topics -> Chat -> Analyses -> Entities -> Hate-speech
+# (the summary and the topics lead the document — they set the context for the
+# findings that follow; an analysis is computed from the chat's evidence).
 SECTION_ORDER: tuple[tuple[str, str], ...] = (
     (ARTIFACT_SUMMARY, "report_section_summaries"),
     (ARTIFACT_TOPICS, "report_section_topics"),
     (ARTIFACT_CHAT, "report_section_chat"),
+    (ARTIFACT_ANALYSIS, "report_section_analyses"),
     (ARTIFACT_ENTITY, "report_section_entities"),
     (ARTIFACT_HATE, "report_section_hate_speech"),
 )
@@ -62,6 +67,7 @@ SECTION_ANCHOR: dict[str, str] = {
     ARTIFACT_SUMMARY: "sec-summaries",
     ARTIFACT_TOPICS: "sec-topics",
     ARTIFACT_CHAT: "sec-chat",
+    ARTIFACT_ANALYSIS: "sec-analyses",
     ARTIFACT_ENTITY: "sec-entities",
     ARTIFACT_HATE: "sec-hate",
 }
@@ -117,6 +123,17 @@ CHAT_ANSWER_COLUMNS: tuple[str, ...] = ("session_id", "turn_idx", "question", "a
 SUMMARY_COLUMNS: tuple[str, ...] = ("collection", "summary")
 TOPICS_COLUMNS: tuple[str, ...] = ("collection", "run_id", "topic", "label", "keywords", "chunks", "share", "summary")
 COLLECTION_OVERVIEW_COLUMNS: tuple[str, ...] = ("filename", "type", "pages", "rows", "nodes", "hash")
+ANALYSES_COLUMNS: tuple[str, ...] = (
+    "session_id",
+    "turn_idx",
+    "title",
+    "question",
+    "job_id",
+    "workbench_version",
+    "sources",
+    "tables",
+    "charts",
+)
 
 
 class PdfEngineUnavailableError(RuntimeError):
@@ -850,6 +867,240 @@ def _md_topics(snap: dict[str, Any], note: str | None) -> list[str]:
     return lines
 
 
+#: What an analysis chart may be: a base64 PNG, the only image its tool keeps. Nothing a renderer
+#: embeds can then name another resource or break out of a Markdown image's parentheses. The route
+#: that adds an analysis to a report applies the same pattern.
+PNG_DATA_URI = re.compile(r"data:image/png;base64,[A-Za-z0-9+/]+={0,2}")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+#: A cell that is wholly a plain number: it cannot be a formula, so a table's CSV keeps it as it is.
+#: The digit runs are not split between two classes, so a failed match is linear in the cell's length.
+_PLAIN_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+#: What opens a link, an image, a code span or a tag in Markdown.
+_MD_SPECIAL = re.compile(r"([\\\[\]<>`])")
+
+
+@dataclass(frozen=True)
+class _AnalysisTable:
+    """One stored table as every format renders it: text cells, every row as wide as the header."""
+
+    name: str
+    columns: list[str]
+    rows: list[list[str]]
+    row_count: int
+    truncated: bool = False
+    column_count: int = 0
+
+    @property
+    def shape(self) -> str:
+        """The table's localized shape, from the rows and columns the run had."""
+        columns = max(self.column_count, len(self.columns))
+        return ui_string("report_label_table_shape").format(rows=self.row_count, columns=columns)
+
+    @property
+    def cut(self) -> str:
+        """What a table stored cut says about itself, localized: the rows shown, else that cells or columns were cut.
+
+        Returns:
+            str: ``""`` for a whole table.
+        """
+        if len(self.rows) < self.row_count:
+            return ui_string("report_label_table_cut").format(shown=len(self.rows))
+        return ui_string("report_label_table_trimmed") if self.truncated else ""
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    """A stored object as a dict; anything else is empty, so a malformed snapshot renders what it can."""
+    return value if isinstance(value, dict) else {}
+
+
+def _plain(value: Any) -> str:
+    """A stored text field as its string; anything that is not text is no text."""
+    return value if isinstance(value, str) else ""
+
+
+def _cell_text(value: Any) -> str:
+    """A stored table cell as the text a CSV would carry."""
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def _fence(text: str, *, info: str = "") -> tuple[str, str]:
+    """The opening and closing line of a Markdown code fence that ``text`` cannot end.
+
+    Args:
+        text (str): What the fence encloses.
+        info (str): The opening line's info string, such as ``python``.
+
+    Returns:
+        tuple[str, str]: The opening fence, a backtick run one longer than the longest run in ``text``
+        and at least three, followed by ``info``; and the closing fence.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    ticks = "`" * max(3, longest + 1)
+    return f"{ticks}{info}", ticks
+
+
+def _md_escape(text: str) -> str:
+    """Backslash-escape what would turn stored text into a link, an image, a code span or a tag."""
+    return _MD_SPECIAL.sub(r"\\\1", text)
+
+
+def _analysis_title(snap: dict[str, Any]) -> str:
+    """An analysis's title on one line, or the localized name for an untitled one."""
+    return _one_line(_plain(snap.get("title"))) or ui_string("report_label_analysis_untitled")
+
+
+def _analysis_tables(snap: dict[str, Any]) -> list[_AnalysisTable]:
+    """The tables an analysis kept that can be rendered; anything malformed is skipped.
+
+    A table needs a header. A row that is not a list is dropped, a short one is padded to the header's
+    width and a long one cut to it, and every cell is made text.
+    """
+    stored = snap.get("tables")
+    tables: list[_AnalysisTable] = []
+    for table in stored if isinstance(stored, list) else []:
+        if not isinstance(table, dict) or not isinstance(table.get("columns"), list) or not table["columns"]:
+            continue
+        columns = [_cell_text(cell) for cell in table["columns"]]
+        rows: list[list[str]] = []
+        for row in table.get("rows") if isinstance(table.get("rows"), list) else []:
+            if isinstance(row, list):
+                cells = [_cell_text(cell) for cell in row[: len(columns)]]
+                rows.append(cells + [""] * (len(columns) - len(cells)))
+        count = _whole(table.get("row_count"))
+        tables.append(
+            _AnalysisTable(
+                name=_one_line(_plain(table.get("name"))),
+                columns=columns,
+                rows=rows,
+                row_count=max(count, len(rows)) if count is not None and count >= 0 else len(rows),
+                truncated=table.get("truncated") is True,
+                column_count=_whole(table.get("column_count")) or 0,
+            )
+        )
+    return tables
+
+
+def _chart_png(uri: str) -> bytes | None:
+    """Decode a chart's PNG data URI; ``None`` when its base64 cannot be read or is not a PNG."""
+    try:
+        png = base64.b64decode(uri.partition(",")[2], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return png if png.startswith(_PNG_SIGNATURE) else None
+
+
+def _analysis_charts(snap: dict[str, Any]) -> list[tuple[str, str]]:
+    """The charts an analysis kept that may be embedded, as ``(name, data URI)``.
+
+    The snapshot is stored JSON, so each chart is checked here too: its URI against
+    :data:`PNG_DATA_URI`, its base64 padded as the route that took the analysis in demands, and its
+    decoded bytes starting with the PNG signature. Any other chart is dropped in every format.
+    """
+    stored = snap.get("charts")
+    charts: list[tuple[str, str]] = []
+    for chart in stored if isinstance(stored, list) else []:
+        uri = _mapping(chart).get("data_uri")
+        if (
+            isinstance(uri, str)
+            and PNG_DATA_URI.fullmatch(uri)
+            and not len(uri.partition(",")[2]) % 4
+            and _chart_png(uri) is not None
+        ):
+            charts.append((_one_line(_plain(chart.get("name"))), uri))
+    return charts
+
+
+def _analysis_source_lines(snap: dict[str, Any], text: Callable[[str], str]) -> list[str]:
+    """One line per source the analysis was computed from: its citation number, file and page.
+
+    Args:
+        snap (dict[str, Any]): The analysis.
+        text (Callable[[str], str]): Prepares the file and page for the format; the number stays as it is.
+
+    Returns:
+        list[str]: The lines, in the order the passages were handed over.
+    """
+    sources = _mapping(snap.get("provenance")).get("sources")
+    lines: list[str] = []
+    for src in sources if isinstance(sources, list) else []:
+        if not isinstance(src, dict):
+            continue
+        index = src.get("citation_index")
+        number = f"[{index}]" if isinstance(index, int) and not isinstance(index, bool) else ""
+        line = f"{number} {text(_one_line(_source_oneline(src, include_score=False)))}".strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _analysis_workbench(snap: dict[str, Any]) -> str:
+    """Which workbench and which job computed the analysis; ``""`` when the snapshot names neither."""
+    workbench = _mapping(_mapping(snap.get("provenance")).get("workbench"))
+    version, job = _one_line(_plain(workbench.get("version"))), _one_line(_plain(workbench.get("job_id")))
+    if not version and not job:
+        return ""
+    return ui_string("report_label_workbench_job").format(version=version or "?", job=job or "?")
+
+
+def _analysis_provenance(snap: dict[str, Any], text: Callable[[str], str]) -> str:
+    """The one provenance line: what it was computed from, and by which workbench job.
+
+    Args:
+        snap (dict[str, Any]): The analysis.
+        text (Callable[[str], str]): Prepares stored text for the format, as in :func:`_analysis_source_lines`.
+
+    Returns:
+        str: The line, or ``""`` when the snapshot names nothing.
+    """
+    parts: list[str] = []
+    sources = _analysis_source_lines(snap, text)
+    if sources:
+        parts.append(f"{ui_string('report_label_computed_from')}: {'; '.join(sources)}")
+    workbench = _analysis_workbench(snap)
+    if workbench:
+        parts.append(text(workbench))
+    return "  ·  ".join(parts)
+
+
+def _md_row(cells: Sequence[str]) -> str:
+    """One GFM table row; each cell is escaped and kept on the row (:func:`_md_cell`)."""
+    return "| " + " | ".join(_md_cell(_md_escape(cell)) for cell in cells) + " |"
+
+
+def _md_analysis(snap: dict[str, Any], note: str | None, number: int) -> list[str]:
+    """Markdown for one analysis: title, question, code, output, tables, charts and its provenance line.
+
+    Everything stored is escaped; the code and the output sit in fences no backtick run inside can end.
+    """
+    snap = _mapping(snap)
+    lines = [f"### #{number} · {_md_escape(_analysis_title(snap))}", ""]
+    question = _one_line(_plain(snap.get("question")))
+    if question:
+        lines += [f"**{ui_string('report_label_question')}:** {_md_escape(question)}", ""]
+    for label_key, key, info in (("report_label_code", "code", "python"), ("report_label_output", "stdout", "")):
+        text = _plain(snap.get(key)).rstrip("\n")
+        if text.strip():
+            opening, closing = _fence(text, info=info)
+            lines += [f"**{ui_string(label_key)}:**", "", opening, text, closing, ""]
+    for table in _analysis_tables(snap):
+        name = f"**{_md_escape(table.name)}**" if table.name else ""
+        label = " · ".join(part for part in (name, table.shape, table.cut) if part)
+        lines += [label, "", _md_row(table.columns), "| " + " | ".join(["---"] * len(table.columns)) + " |"]
+        lines += [*(_md_row(row) for row in table.rows), ""]
+    for name, uri in _analysis_charts(snap):
+        lines += [f"![{_md_escape(name)}]({uri})", ""]
+    provenance = _analysis_provenance(snap, _md_escape)
+    if provenance:
+        lines += [f"*{provenance}*", ""]
+    if note:
+        lines += [f"*{ui_string('report_label_note')}: {note.strip()}*", ""]
+    return lines
+
+
 def _md_collection_overview(overview: dict[str, Any]) -> list[str]:
     """Markdown for the trailing document-overview section (strip + manifest table)."""
     strip = "  ·  ".join(
@@ -880,9 +1131,10 @@ def _md_collection_overview(overview: dict[str, Any]) -> list[str]:
     return lines
 
 
-#: Sections whose items are numbered findings: each carries ``#n`` and the
-#: contents entry counts them.
-_NUMBERED_SECTIONS: frozenset[str] = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
+#: Sections of boxed findings, which need only space between them.
+_FINDING_SECTIONS: frozenset[str] = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
+#: Sections whose items are numbered: each carries ``#n`` and the contents entry counts them.
+_NUMBERED_SECTIONS: frozenset[str] = _FINDING_SECTIONS | {ARTIFACT_ANALYSIS}
 
 Section = tuple[str, str, list[dict[str, Any]]]
 
@@ -911,6 +1163,8 @@ def _md_item(artifact_type: str, snap: dict[str, Any], note: str | None, number:
     """Markdown for one item of a section, ``number`` being its 1-based place there."""
     if artifact_type == ARTIFACT_CHAT:
         return _md_chat(snap, note)
+    if artifact_type == ARTIFACT_ANALYSIS:
+        return _md_analysis(snap, note, number)
     if artifact_type == ARTIFACT_ENTITY:
         return _md_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
@@ -1137,6 +1391,27 @@ figure.evidence.lead img { max-width: 62mm; max-height: 90mm; }
 .topic .item-title, .topic-meta { break-after: avoid; }
 .topic-meta { color: #666; font-size: 8.5pt; margin: 0 0 3pt; }
 .topic-summary { margin: 0; orphans: 2; widows: 2; }
+/* Analyses: the code and its output as preformatted text, tables like an answer's, charts at a
+   readable size, one muted provenance line. A table past the report's cell budget is its CSV, set the same way. */
+.analysis-question { margin: 0 0 4pt; }
+pre.code, pre.out, pre.csv {
+  margin: 2pt 0 6pt; padding: 4pt 6pt; background: #f7f7f7; border: 1px solid #e6e6e6;
+  font-family: 'DejaVu Sans Mono', 'Liberation Mono', monospace; font-size: 7.5pt; line-height: 1.3;
+  white-space: pre-wrap; overflow-wrap: break-word;
+}
+.analysis-table-name { font-weight: 600; font-size: 9pt; color: #333; margin: 6pt 0 2pt; break-after: avoid; }
+table.analysis { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 2pt 0 6pt; font-size: 9pt; }
+table.analysis th, table.analysis td {
+  border: 1px solid #e6e6e6; padding: 2pt 5pt; text-align: left; vertical-align: top; overflow-wrap: break-word;
+}
+table.analysis th { background: #f7f7f7; font-weight: 600; }
+table.analysis tr { break-inside: avoid; }
+table.analysis thead.tall { display: table-row-group; }
+table.analysis thead.tall tr { break-inside: auto; }
+.analysis-charts { margin: 4pt 0 0; }
+.analysis-charts figure.evidence { display: block; width: auto; margin: 0 0 6pt; }
+.analysis-charts figure.evidence img { max-width: 100%; max-height: 110mm; }
+.provenance { color: #555; font-size: 8.5pt; margin: 4pt 0 0; overflow-wrap: break-word; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
 /* Dense on purpose: the manifest lists every document of the collection, often
    hundreds of single-line rows. */
@@ -1681,6 +1956,84 @@ def _html_topics(snap: dict[str, Any], note: str | None) -> str:
     return "".join(parts)
 
 
+def _table_cell(value: str) -> str:
+    """A table cell as a spreadsheet shows it: a plain number as it is, any other text guarded."""
+    return value if _PLAIN_NUMBER.fullmatch(value) else _csv_text(value)
+
+
+def _table_csv(
+    columns: Sequence[str], rows: Sequence[Sequence[str]], *, guard: bool, lineterminator: str = "\r\n"
+) -> str:
+    """Serialize a stored table as CSV text.
+
+    Args:
+        columns (Sequence[str]): The header.
+        rows (Sequence[Sequence[str]]): The rows.
+        guard (bool): Whether every cell, the header's too, goes through :func:`_csv_text`, as a file a
+            spreadsheet opens must, except a cell that is wholly a plain number, which stays a number;
+            text shown in a report is left as stored.
+        lineterminator (str): How a row ends.
+
+    Returns:
+        str: The CSV text, quoted as the ``excel`` dialect quotes.
+    """
+    cell: Callable[[str], str] = _table_cell if guard else str
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator=lineterminator)
+    writer.writerow([cell(value) for value in columns])
+    writer.writerows([cell(value) for value in row] for row in rows)
+    return buffer.getvalue()
+
+
+def _html_analysis_table(table: _AnalysisTable, budget: _TableBudget) -> str:
+    """HTML for one analysis table: a name and shape line, then a table or, past the budget, its CSV.
+
+    A table of at most :data:`_TABLE_MAX_COLUMNS` columns whose cells (rows times columns) the report's
+    one :class:`_TableBudget` still has room for is a ``<table>`` and is charged to it. Any other table
+    is its CSV in a ``<pre>``, and the budget stays as it was.
+    """
+    caption = " · ".join(part for part in (table.name, table.shape, table.cut) if part)
+    parts = [f'<div class="analysis-table-name">{_esc(caption)}</div>']
+    cost = len(table.rows) * len(table.columns)
+    if len(table.columns) <= _TABLE_MAX_COLUMNS and cost <= budget.cells_left:
+        budget.cells_left -= cost
+        tall = ' class="tall"' if _head_height_pt(table.columns) > _HEAD_REPEAT_MAX_PT else ""
+        head = "".join(f"<th>{_esc(column)}</th>" for column in table.columns)
+        body = "".join("<tr>" + "".join(f"<td>{_esc(cell)}</td>" for cell in row) + "</tr>" for row in table.rows)
+        parts.append(f'<table class="analysis"><thead{tall}><tr>{head}</tr></thead><tbody>{body}</tbody></table>')
+    else:
+        text = _table_csv(table.columns, table.rows, guard=False, lineterminator="\n")
+        parts.append(f'<pre class="csv">{_esc(text)}</pre>')
+    return "".join(parts)
+
+
+def _html_analysis(snap: dict[str, Any], note: str | None, number: int, table_budget: _TableBudget) -> str:
+    """HTML for one analysis: title, question, code, output, tables, charts and its provenance line.
+
+    Everything stored is escaped. Tables draw on the report's one cell budget (:func:`_html_analysis_table`);
+    a chart is drawn only if it is a PNG data URI (:func:`_analysis_charts`).
+    """
+    snap = _mapping(snap)
+    parts = [f'<div class="item-title">#{number} · {_esc(_analysis_title(snap))}</div>']
+    question = _one_line(_plain(snap.get("question")))
+    if question:
+        label = f'<span class="label">{ui_string("report_label_question")}:</span>'
+        parts.append(f'<div class="analysis-question">{label} {_esc(question)}</div>')
+    for label_key, key, css_class in (("report_label_code", "code", "code"), ("report_label_output", "stdout", "out")):
+        text = _plain(snap.get(key)).rstrip("\n")
+        if text.strip():
+            parts.append(f'<div class="label">{ui_string(label_key)}:</div><pre class="{css_class}">{_esc(text)}</pre>')
+    parts += [_html_analysis_table(table, table_budget) for table in _analysis_tables(snap)]
+    figures = [_html_evidence_figure(uri, name, name) for name, uri in _analysis_charts(snap)]
+    if figures:
+        parts.append(f'<div class="analysis-charts">{"".join(figures)}</div>')
+    provenance = _analysis_provenance(snap, str)
+    if provenance:
+        parts.append(f'<div class="provenance">{_esc(provenance)}</div>')
+    parts.append(_html_note(note))
+    return "".join(parts)
+
+
 def _html_collection_overview(overview: dict[str, Any]) -> str:
     """HTML for the trailing document-overview section (strip + manifest table)."""
     strip_items = [
@@ -1716,6 +2069,8 @@ def _html_item(
     """HTML for one item of a section, ``number`` being its 1-based place there."""
     if artifact_type == ARTIFACT_CHAT:
         return _html_chat(snap, note, table_budget)
+    if artifact_type == ARTIFACT_ANALYSIS:
+        return _html_analysis(snap, note, number, table_budget)
     if artifact_type == ARTIFACT_ENTITY:
         return _html_entity(snap, note, number)
     if artifact_type == ARTIFACT_HATE:
@@ -1802,7 +2157,7 @@ def render_html(report: dict[str, Any]) -> str:
         for artifact_type, heading_key, items in sections:
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
-            item_class = "item" if artifact_type in _NUMBERED_SECTIONS else "item item-prose"
+            item_class = "item" if artifact_type in _FINDING_SECTIONS else "item item-prose"
             for number, item in enumerate(items, start=1):
                 rendered = _html_item(
                     artifact_type, item.get("snapshot") or {}, item.get("note"), number, collection, table_budget
@@ -1971,6 +2326,95 @@ def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _member_name(folder: str, raw: str, fallback: str, suffix: str, taken: set[str]) -> str:
+    """The archive path of one analysis file: a safe stem and a fixed extension, never a name already used.
+
+    The stored name only contributes its stem, so a name cut or crafted to end in ``.bat`` or ``.html``
+    still unpacks as ``.csv`` or ``.png``. Two names that collide once made safe, or that differ only in
+    case or Unicode normalization and would collide when unpacked on a case-insensitive disk, get
+    `` (2)``, `` (3)`` and so on on the stem.
+
+    Args:
+        folder (str): The analysis's folder, ``analysis-<n>``.
+        raw (str): The name as stored; untrusted, possibly a path.
+        fallback (str): The stem used when nothing survives making it safe.
+        suffix (str): The fixed extension, dot included.
+        taken (set[str]): The folded names already in the folder; this one is added.
+
+    Returns:
+        str: ``folder/stem + suffix``, which holds no ``..`` and cannot be absolute.
+    """
+    from docint.core.extract.bundle import _NAME_MAX, _stem
+
+    room = _NAME_MAX - len(suffix)
+    stem = _stem(raw, fallback)[:room].strip().strip(".").strip() or fallback
+    name, count = f"{stem}{suffix}", 1
+    while unicodedata.normalize("NFC", name).casefold() in taken:
+        count += 1
+        counter = f" ({count})"
+        name = f"{stem[: max(1, room - len(counter))].rstrip()}{counter}{suffix}"
+    taken.add(unicodedata.normalize("NFC", name).casefold())
+    return f"{folder}/{name}"
+
+
+def _analysis_files(snap: dict[str, Any], number: int) -> tuple[list[tuple[str, bytes, str]], list[tuple[str, bytes]]]:
+    """The files one analysis adds to the archive: its tables as CSV and its charts as PNG.
+
+    Args:
+        snap (dict[str, Any]): The analysis.
+        number (int): Its place among the report's analyses, from 1.
+
+    Returns:
+        tuple[list[tuple[str, bytes, str]], list[tuple[str, bytes]]]: ``(path, content, cut)`` for each table,
+        ``cut`` saying so when the table was stored cut, and ``(path, content)`` for each chart. A table's cells
+        pass :func:`_table_cell`; the paths end in ``.csv`` and ``.png`` whatever the names stored.
+    """
+    from docint.utils.csv_stream import UTF8_BOM
+
+    folder, taken = f"analysis-{number}", set[str]()
+    tables = [
+        (
+            _member_name(folder, table.name, "table", ".csv", taken),
+            UTF8_BOM + _table_csv(table.columns, table.rows, guard=True).encode("utf-8"),
+            table.cut,
+        )
+        for table in _analysis_tables(snap)
+    ]
+    charts: list[tuple[str, bytes]] = []
+    for name, uri in _analysis_charts(snap):
+        png = _chart_png(uri)
+        if png is not None:
+            charts.append((_member_name(folder, name, "chart", ".png", taken), png))
+    return tables, charts
+
+
+def _analysis_csv_row(snap: dict[str, Any], tables: Sequence[str], charts: Sequence[str]) -> dict[str, Any]:
+    """The ``analyses.csv`` row of one analysis; its text cells go through :func:`_csv_text`.
+
+    Args:
+        snap (dict[str, Any]): The analysis.
+        tables (Sequence[str]): The archive paths of its tables, each followed by what it says when stored cut.
+        charts (Sequence[str]): The archive paths of its charts.
+
+    Returns:
+        dict[str, Any]: The row, keyed by :data:`ANALYSES_COLUMNS`.
+    """
+    provenance = _mapping(snap.get("provenance"))
+    workbench = _mapping(provenance.get("workbench"))
+    turn = _whole(provenance.get("turn_idx"))
+    return {
+        "session_id": _csv_text(_plain(provenance.get("session_id"))),
+        "turn_idx": turn if turn is not None else "",
+        "title": _csv_text(_one_line(_plain(snap.get("title")))),
+        "question": _csv_text(_plain(snap.get("question"))),
+        "job_id": _csv_text(_plain(workbench.get("job_id"))),
+        "workbench_version": _csv_text(_plain(workbench.get("version"))),
+        "sources": _csv_text("; ".join(_analysis_source_lines(snap, str))),
+        "tables": _csv_text("; ".join(tables)),
+        "charts": _csv_text("; ".join(charts)),
+    }
+
+
 def report_csv_bundle(report: dict[str, Any]) -> bytes:
     """Build a ZIP of per-type CSVs containing only the report's selected rows.
 
@@ -1981,6 +2425,8 @@ def report_csv_bundle(report: dict[str, Any]) -> bytes:
     :func:`_overview_snapshot`), an additional ``collection-overview.csv``
     manifest is included, carrying the *full* file hash (unlike the truncated
     display copy in the Markdown/HTML renderers) for evidentiary integrity.
+    Analyses add ``analyses.csv`` (one row each) and, per analysis, an
+    ``analysis-<n>/`` folder holding its tables as CSV and its charts as PNG.
     """
     from docint.utils.csv_stream import (
         HATE_SPEECH_COLUMNS,
@@ -2010,6 +2456,18 @@ def report_csv_bundle(report: dict[str, Any]) -> bytes:
         if chat:
             rows = (_chat_csv_row(i.get("snapshot") or {}) for i in chat)
             zf.writestr("chat-answers.csv", b"".join(stream_csv(rows, CHAT_ANSWER_COLUMNS)))
+
+        analyses = grouped.get(ARTIFACT_ANALYSIS) or []
+        if analyses:
+            analysis_rows = []
+            for number, item in enumerate(analyses, start=1):
+                snap = _mapping(item.get("snapshot"))
+                tables, charts = _analysis_files(snap, number)
+                for path, content in (*((path, content) for path, content, _ in tables), *charts):
+                    zf.writestr(path, content)
+                listed = [f"{path} ({cut})" if cut else path for path, _, cut in tables]
+                analysis_rows.append(_analysis_csv_row(snap, listed, [path for path, _ in charts]))
+            zf.writestr("analyses.csv", b"".join(stream_csv(analysis_rows, ANALYSES_COLUMNS)))
 
         summaries = grouped.get(ARTIFACT_SUMMARY) or []
         if summaries:

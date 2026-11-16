@@ -1,4 +1,4 @@
-"""Session, conversation, turn, citation, and report state management.
+"""Session, conversation, turn, citation, analysis, and report state management.
 
 Re-exporting every ORM model here guarantees each one is registered on
 ``Base.metadata`` whenever the package is imported, so
@@ -14,6 +14,7 @@ from docint.core.state.report import Report
 from docint.core.state.report_item import ReportItem
 from docint.core.state.retention_state import RetentionState
 from docint.core.state.turn import Turn
+from docint.core.state.turn_analysis import TurnAnalysis
 
 __all__ = [
     "Base",
@@ -25,4 +26,5 @@ __all__ = [
     "ReportItem",
     "RetentionState",
     "Turn",
+    "TurnAnalysis",
 ]

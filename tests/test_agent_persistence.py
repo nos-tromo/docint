@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,8 +12,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from agent_fakes import (
+    ANALYSIS_LINE,
     KEYWORD_CALLS,
     KEYWORD_STEPS,
+    an_analysis,
     answer_round,
     call_round,
     keyword_match,
@@ -23,15 +26,21 @@ from agent_fakes import (
 from assessment_fakes import bad_request
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from test_api import PASSING_VERDICT, _PromptRecorder
 
+import docint.core.api as api_module
 from docint.agents.assessment.ledger import EvidenceLedger
 from docint.agents.assessment.split import SENTINEL
+from docint.agents.generation import ANALYSIS_CHECKS_HEADING
+from docint.agents.turn.loop import AgentResult
 from docint.agents.types import AnswerMode, PriorTurn
 from docint.core.rag import AGENT_LEDGER_CAP, AgentTurn
 from docint.core.retrieval.visual import RetrievalTarget
 from docint.core.state.base import Base
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.turn import Turn
+from docint.core.state.turn_analysis import STORED_STDOUT_CHARS, TurnAnalysis
+from docint.utils.text_budget import cut_marker
 
 QUESTION = "How many boats were counted at the pier?"
 ANSWER = "Eleven boats were counted [1]."
@@ -506,3 +515,230 @@ def test_export_writes_the_answer_mode(session_manager: SessionManager, tmp_path
     assert message["answer_mode"] == "assessment"
     assert message["agent"] == ASSESSMENT_TRAIL
     assert json.loads((out / "session.json").read_text(encoding="utf-8"))["schema_version"] == "1.1.0"
+
+
+#: The chart an analysis keeps, as the run_python tool keeps it: its name, a PNG data URI and its size.
+CHART = {"name": "chart.png", "data_uri": "data:image/png;base64,iVBORw0KGgo=", "bytes": 48213}
+#: An analysis of the counts table with one chart.
+ANALYSIS = an_analysis(charts=[CHART])
+
+
+def _result(*analyses: dict[str, Any]) -> AgentResult:
+    """Build what the loop produces for a lookup whose tools kept these analyses.
+
+    Args:
+        *analyses (dict[str, Any]): The analyses, in the order they were made.
+
+    Returns:
+        AgentResult: The result.
+    """
+    return AgentResult(raw_text=ANSWER, nodes=[], steps=1, actions=[], reason=None, analyses=list(analyses))
+
+
+def _finish(
+    sm: SessionManager, result: AgentResult, *, persist: bool = True, replace_turn_idx: int | None = None
+) -> dict[str, Any]:
+    """Finish an agent turn of ``user-a`` in ``session-1``, as the session layer does once the loop has answered.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        result (AgentResult): What the loop produced.
+        persist (bool): Whether the turn is stored; a stateless turn has no session.
+        replace_turn_idx (int | None): A turn to write over.
+
+    Returns:
+        dict[str, Any]: The turn's final payload.
+    """
+    return sm._finish_agent_turn(
+        QUESTION,
+        result,
+        scoped_node_ids=None,
+        coverage_unit="documents",
+        metadata_filters_active=False,
+        metadata_filter_rules=None,
+        retrieval_target="all",
+        session_id="session-1" if persist else None,
+        owner="user-a",
+        replace_turn_idx=replace_turn_idx,
+        turn_started_at=time.monotonic(),
+        persist=persist,
+    )
+
+
+def _stored_analyses(sm: SessionManager) -> list[tuple[str, int]]:
+    """Read every stored analysis row's id and position.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+
+    Returns:
+        list[tuple[str, int]]: The rows, by position.
+    """
+    with sm._session_scope() as s:
+        return [(row.id, row.position) for row in s.query(TurnAnalysis).order_by(TurnAnalysis.position)]
+
+
+def test_a_turns_analyses_are_stored_with_it(session_manager: SessionManager) -> None:
+    """Each analysis gets its own id, its question and its place; the stored row is what the turn served.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    second = an_analysis(title="Posts per network")
+
+    final = _finish(session_manager, _result(ANALYSIS, second))
+
+    stored, other = final["analyses"]
+    assert len(stored["id"]) == 32 and int(stored["id"], 16) >= 0 and stored["question"] == QUESTION
+    assert (stored["provenance"]["session_id"], stored["provenance"]["turn_idx"]) == ("session-1", 0)
+    assert session_manager.get_analysis("session-1", stored["id"], "user-a") == stored
+    assert session_manager.get_analysis("session-1", other["id"], "user-a") == other
+    assert _stored_analyses(session_manager) == [(stored["id"], 0), (other["id"], 1)]
+    assert {key: stored[key] for key in ANALYSIS if key != "provenance"} == {
+        key: value for key, value in ANALYSIS.items() if key != "provenance"
+    }
+    assert stored["provenance"].items() >= ANALYSIS["provenance"].items()
+
+
+def test_a_stored_analysis_keeps_the_head_and_tail_of_a_long_output(session_manager: SessionManager) -> None:
+    """A run's output past ``STORED_STDOUT_CHARS`` is stored as its start and end around the cut marker.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    long = "a" * 10_000 + "b" * 10_000
+    at_cap = "x" * STORED_STDOUT_CHARS
+
+    cut, whole = _finish(session_manager, _result(an_analysis(stdout=long), an_analysis(stdout=at_cap)))["analyses"]
+
+    assert STORED_STDOUT_CHARS == 16_384
+    assert len(cut["stdout"]) <= STORED_STDOUT_CHARS
+    head, marker, tail = cut["stdout"].split("\n")
+    assert head == "a" * len(head) and tail == "b" * len(tail) and len(head) - len(tail) in (0, 1)
+    assert len(head) + len(tail) > 16_000
+    assert marker == cut_marker(len(long) - len(head) - len(tail), len(long))
+    assert whole["stdout"] == at_cap
+    assert session_manager.get_analysis("session-1", cut["id"], "user-a") == cut
+
+
+def test_a_replaced_turn_clears_its_analyses(session_manager: SessionManager) -> None:
+    """A turn written over loses its analyses, as it loses its citations; one written over by a run keeps the new one.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    [first] = _finish(session_manager, _result(ANALYSIS))["analyses"]
+
+    session_manager._persist_turn("session-1", QUESTION, _resp("n1"), {"response": "Fact [1]."}, replace_idx=0)
+
+    assert session_manager.get_analysis("session-1", first["id"], "user-a") is None
+    assert _stored_analyses(session_manager) == []
+
+    [again] = _finish(session_manager, _result(ANALYSIS), replace_turn_idx=0)["analyses"]
+
+    assert _stored_analyses(session_manager) == [(again["id"], 0)]
+    assert again["provenance"]["turn_idx"] == 0
+
+
+def test_analyses_go_with_their_conversation(session_manager: SessionManager) -> None:
+    """Deleting the session, by hand or by retention, deletes its analyses.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    [stored] = _finish(session_manager, _result(ANALYSIS))["analyses"]
+    assert _stored_analyses(session_manager) == [(stored["id"], 0)]
+
+    assert session_manager.delete_session("session-1", "user-a") is True
+    assert _stored_analyses(session_manager) == []
+
+
+def test_analyses_go_with_their_collection(session_manager: SessionManager) -> None:
+    """Deleting a collection deletes its sessions' analyses too, and no other collection's.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    [stored] = _finish(session_manager, _result(ANALYSIS))["analyses"]
+    with session_manager._session_scope() as s:
+        conv = session_manager._load_or_create_convo(s, "session-1", "user-a")
+        conv.collection_name = "uabc123__docs"
+        s.commit()
+    assert _stored_analyses(session_manager) == [(stored["id"], 0)]
+
+    assert session_manager.delete_sessions_for_collection("uabc123__other") == 0
+    assert _stored_analyses(session_manager) == [(stored["id"], 0)]
+    assert session_manager.delete_sessions_for_collection("uabc123__docs") == 1
+    assert _stored_analyses(session_manager) == []
+
+
+def test_a_stateless_turn_stores_no_analysis(session_manager: SessionManager) -> None:
+    """A turn without a session keeps nothing, so its payload names no analysis.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    final = _finish(session_manager, _result(ANALYSIS), persist=False)
+
+    assert final["analyses"] == []
+    assert _stored_analyses(session_manager) == []
+
+
+def test_history_summarizes_each_analysis(session_manager: SessionManager) -> None:
+    """History names each analysis by id, number, title and its tables' and charts' shapes, never their data.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    cut_table = {"name": "posts.csv", "columns": ["author"], "rows": [["user-a"]], "row_count": 700, "truncated": True}
+    [stored, longer] = _finish(session_manager, _result(ANALYSIS, an_analysis(tables=[cut_table])))["analyses"]
+    _finish(session_manager, _result())
+
+    messages = session_manager.get_session_history("session-1", "user-a")
+
+    assert messages[1]["analyses"] == [
+        {
+            "id": stored["id"],
+            "index": 1,
+            "title": "Posts per author",
+            "tables": [{"name": "counts.csv", "columns": 2, "rows": 2}],
+            "charts": [{"name": "chart.png", "bytes": 48213}],
+        },
+        {
+            "id": longer["id"],
+            "index": 2,
+            "title": "Posts per author",
+            "tables": [{"name": "posts.csv", "columns": 1, "rows": 700}],
+            "charts": [],
+        },
+    ]
+    assert "data_uri" not in json.dumps(messages[1]["analyses"])
+    assert "analyses" not in messages[3]
+
+
+def test_a_stored_turns_analyses_reach_its_validator(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final payload's analyses, as stamped, hand the validator the line the analysis gives it.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_ENABLED", "true")
+    validator = _PromptRecorder(PASSING_VERDICT)
+    monkeypatch.setattr(api_module, "rag", SimpleNamespace(text_model_id="invented-chat-model", text_model=validator))
+    final = _finish(session_manager, _result(ANALYSIS))
+
+    api_module._turn_validation(
+        final,
+        question=QUESTION,
+        answer=final["response"],
+        sources=final["sources"],
+        previous_user_input=None,
+        summary_diagnostics=None,
+        retrieval_query=None,
+    )
+
+    [prompt] = validator.prompts
+    assert f"{ANALYSIS_CHECKS_HEADING}\n{ANALYSIS_LINE}\n" in prompt

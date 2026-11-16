@@ -11,6 +11,7 @@ from docint.core.state.base import Base
 if TYPE_CHECKING:
     from docint.core.state.citation import Citation
     from docint.core.state.conversation import Conversation
+    from docint.core.state.turn_analysis import TurnAnalysis
 
 
 class Turn(Base):
@@ -59,4 +60,10 @@ class Turn(Base):
         back_populates="turn",
         cascade="all, delete-orphan",
         order_by="Citation.id",
+    )
+    # The analyses its ``run_python`` runs kept, by their place in the turn: the user sees them as Analysis 1, 2.
+    analyses: Mapped[list["TurnAnalysis"]] = relationship(
+        "TurnAnalysis",
+        cascade="all, delete-orphan",
+        order_by="TurnAnalysis.position",
     )

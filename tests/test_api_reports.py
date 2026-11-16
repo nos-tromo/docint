@@ -6,10 +6,13 @@ returns a *real* :class:`ReportManager` backed by a shared in-memory SQLite DB
 endpoints are exercised against the true manager logic end-to-end.
 """
 
+import base64
 import io
+import json
 import logging
 import threading
 import time
+import uuid
 import zipfile
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
@@ -19,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from agent_fakes import an_analysis, tiny_png
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -30,8 +34,12 @@ from docint.core.jobs import TERMINAL_STATUSES, IngestJobManager
 from docint.core.state import report_render
 from docint.core.state.base import Base
 from docint.core.state.collection_owner_manager import CollectionOwnerManager
+from docint.core.state.conversation import Conversation
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.report_pdf_store import ReportPdfRecord, ReportPdfStore
+from docint.core.state.session_manager import SessionManager
+from docint.core.state.turn import Turn
+from docint.core.state.turn_analysis import TurnAnalysis, served_analysis, stamp_analysis
 
 
 class _ReportRAG:
@@ -50,6 +58,8 @@ class _ReportRAG:
         self._rm._SessionMaker = sessionmaker(bind=engine)
         self._com = CollectionOwnerManager(rag=cast(Any, self))
         self._com._SessionMaker = sessionmaker(bind=engine)
+        self._sm = SessionManager(rag=cast(Any, self))
+        self._sm._SessionMaker = sessionmaker(bind=engine)
 
     def probe_rerank_endpoint(self) -> None:
         """Satisfy the lifespan rerank probe without touching the network."""
@@ -59,14 +69,14 @@ class _ReportRAG:
         """Satisfy the lifespan startup probe without touching the network."""
         return True
 
-    def ensure_session_manager(self) -> SimpleNamespace:
-        """Satisfy the lifespan's eager session-store init without a DB.
+    def ensure_session_manager(self) -> SessionManager:
+        """Return a real session manager on the same in-memory database.
 
         Returns:
-            SimpleNamespace: A stand-in whose ``init_session_store_if_needed``
-            is a no-op.
+            SessionManager: The manager; its store is already initialised, so the
+            lifespan's eager init is a no-op.
         """
-        return SimpleNamespace(init_session_store_if_needed=lambda: None)
+        return self._sm
 
     def reconcile_quantization(self) -> int:
         """Satisfy the lifespan quantization reconcile without touching Qdrant."""
@@ -877,6 +887,272 @@ def test_batch_add_survives_companion_scroll_failure(client: TestClient, monkeyp
 
 
 # ---------------------------------------------------------------------------
+# Adding an analysis — the server builds the snapshot from the stored row
+# ---------------------------------------------------------------------------
+
+#: The title ``agent_fakes.an_analysis`` gives the analysis a test stores.
+STORED_TITLE = "Posts per author"
+CHART_CAP = 512 * 1024
+NOT_FOUND = {"detail": "Analysis not found."}
+
+
+def _png_chart(size: int, name: str = "chart.png") -> dict[str, Any]:
+    """Build a chart whose PNG is ``size`` bytes once decoded.
+
+    Args:
+        size (int): The decoded size, which is at least the 33 bytes of its signature and header.
+        name (str): The chart's file name.
+
+    Returns:
+        dict[str, Any]: The chart as the run_python tool keeps it.
+    """
+    png = tiny_png() + b"\0" * (size - len(tiny_png()))
+    return {"name": name, "data_uri": "data:image/png;base64," + base64.b64encode(png).decode(), "bytes": size}
+
+
+def _stored_analysis(owner: str, physical: str | None, **overrides: Any) -> str:
+    """Store one analysis, with its conversation and turn, as the session layer does.
+
+    Args:
+        owner (str): The session's owner.
+        physical (str | None): The physical collection the session is pinned to; ``None`` for an unpinned one.
+        **overrides (Any): Keys of ``agent_fakes.an_analysis`` to set instead.
+
+    Returns:
+        str: The analysis's id.
+    """
+    analysis_id = uuid.uuid4().hex
+    session_id = f"session-{analysis_id[:8]}"
+    payload = stamp_analysis(
+        an_analysis(**overrides),
+        analysis_id=analysis_id,
+        question="Who wrote most about the harbour?",
+        session_id=session_id,
+        turn_idx=0,
+    )
+    with api_module.rag.ensure_session_manager()._session_scope() as s:
+        turn = Turn(conversation_id=session_id, idx=0, user_text="Q", model_response="A")
+        turn.analyses.append(TurnAnalysis(id=analysis_id, position=0, payload=json.dumps(payload)))
+        s.add(Conversation(id=session_id, owner=owner, collection_name=physical))
+        s.add(turn)
+        s.commit()
+    return analysis_id
+
+
+def _analysis_payload(analysis_id: Any = None, **forged: Any) -> dict[str, Any]:
+    """Build the add request the SPA sends, with whatever else a client might add.
+
+    Args:
+        analysis_id (Any): The id the snapshot names; left out when ``None``.
+        **forged (Any): Further snapshot fields, which the server must ignore.
+
+    Returns:
+        dict[str, Any]: The request body.
+    """
+    snapshot = {**forged} if analysis_id is None else {"analysis_id": analysis_id, **forged}
+    return {"artifact_type": "analysis", "dedupe_key": "anything", "snapshot": snapshot}
+
+
+def _report_items(client: TestClient, report_id: int) -> list[dict[str, Any]]:
+    return cast(list[dict[str, Any]], client.get(f"/reports/{report_id}").json()["items"])
+
+
+def test_an_analysis_is_added_from_its_stored_row(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The item is the stored analysis under the report's collection name; the client's key and fields are ignored."""
+    fake = _wire_images(monkeypatch, {})
+    analysis_id = _stored_analysis("test-operator", _physical(), charts=[_png_chart(2048)])
+    rid = _create(client)["id"]
+
+    response = client.post(
+        f"/reports/{rid}/items",
+        json={
+            "artifact_type": "analysis",
+            "dedupe_key": "anything",
+            "snapshot": {"analysis_id": analysis_id, "title": "forged", "code": "forged", "image_id": "img-1"},
+            "note": "a note",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    item = response.json()
+    stored = api_module.rag.ensure_session_manager().find_analysis(analysis_id, "test-operator")
+    assert stored is not None
+    assert item["artifact_type"] == "analysis" and item["dedupe_key"] == f"analysis:{analysis_id}"
+    assert item["snapshot"] == served_analysis(stored[0], "docs")
+    assert item["snapshot"]["title"] == STORED_TITLE and item["snapshot"]["provenance"]["collection"] == "docs"
+    assert "forged" not in json.dumps(item["snapshot"]) and item["note"] == "a note"
+    assert fake.scrolled_collections == []
+    again = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id))
+    assert again.json()["id"] == item["id"] and len(_report_items(client, rid)) == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "other_owner",
+        "other_collection",
+        "unpinned_session",
+        "unknown_id",
+        "no_id",
+        "id_not_a_string",
+        "charts_not_a_list",
+        "svg_chart",
+        "unpadded_chart",
+        "chart_over_cap",
+        "charts_over_total",
+    ],
+)
+def test_anything_else_is_not_found(client: TestClient, case: str) -> None:
+    """Every refusal is the same 404 with the same body, and the report holds no item afterwards."""
+    _own_collection("docs")
+    _own_collection("other")
+    physical = _physical()
+    svg = {"name": "chart.svg", "data_uri": "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", "bytes": 12}
+    whole = _png_chart(2048)
+    unpadded = {**whole, "data_uri": whole["data_uri"].rstrip("=")}
+    stored: dict[str, Any] | None = {
+        "other_owner": {"owner": "someone-else", "physical": physical},
+        "other_collection": {"owner": "test-operator", "physical": _physical("other")},
+        "unpinned_session": {"owner": "test-operator", "physical": None},
+        "charts_not_a_list": {"owner": "test-operator", "physical": physical, "charts": {}},
+        "svg_chart": {"owner": "test-operator", "physical": physical, "charts": [svg]},
+        "unpadded_chart": {"owner": "test-operator", "physical": physical, "charts": [unpadded]},
+        "chart_over_cap": {"owner": "test-operator", "physical": physical, "charts": [_png_chart(CHART_CAP + 1)]},
+        "charts_over_total": {
+            "owner": "test-operator",
+            "physical": physical,
+            "charts": [_png_chart(CHART_CAP - 1_000, f"c{n}.png") for n in range(3)],
+        },
+    }.get(case)
+    analysis_id: Any = None
+    if stored is not None:
+        analysis_id = _stored_analysis(**stored)
+    elif case == "unknown_id":
+        analysis_id = "f" * 32
+    elif case == "id_not_a_string":
+        analysis_id = 7
+    rid = _create(client)["id"]
+
+    response = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id, title="forged"))
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert _report_items(client, rid) == []
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned", "unpinned"])
+def test_a_collection_that_no_longer_resolves_refuses_the_analysis(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, pinned: bool
+) -> None:
+    """Without a physical collection to compare, nothing matches, not even a session pinned to none."""
+    _own_collection("docs")
+    analysis_id = _stored_analysis("test-operator", _physical() if pinned else None)
+    rid = _create(client)["id"]
+    unowned = SimpleNamespace(resolve=lambda owner, logical: None)
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: unowned)
+
+    response = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id))
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert _report_items(client, rid) == []
+
+
+def test_charts_at_the_caps_are_added(client: TestClient) -> None:
+    """A chart of exactly 512 KiB and charts of exactly 1 MiB together are within the caps."""
+    _own_collection("docs")
+    analysis_id = _stored_analysis(
+        "test-operator", _physical(), charts=[_png_chart(CHART_CAP, "a.png"), _png_chart(CHART_CAP, "b.png")]
+    )
+    rid = _create(client)["id"]
+
+    response = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id))
+
+    assert response.status_code == 200, response.text
+    assert [chart["name"] for chart in response.json()["snapshot"]["charts"]] == ["a.png", "b.png"]
+
+
+def test_a_charts_declared_size_is_not_taken_on_trust(client: TestClient) -> None:
+    """The cap reads the data URI, not the ``bytes`` the stored row claims."""
+    _own_collection("docs")
+    chart = {**_png_chart(CHART_CAP + 1), "bytes": 10}
+    analysis_id = _stored_analysis("test-operator", _physical(), charts=[chart])
+    rid = _create(client)["id"]
+
+    response = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id))
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+
+
+def test_the_batch_route_builds_analyses_the_same_way(client: TestClient) -> None:
+    """One foreign analysis fails the whole batch; two of the caller's are added from their rows."""
+    _own_collection("docs")
+    first = _stored_analysis("test-operator", _physical())
+    second = _stored_analysis("test-operator", _physical(), title="Posts per network")
+    foreign = _stored_analysis("someone-else", _physical())
+    rid = _create(client)["id"]
+
+    refused = client.post(
+        f"/reports/{rid}/items/batch",
+        json={"items": [_analysis_payload(first), _entity_payload("c1"), _analysis_payload(foreign)]},
+    )
+
+    assert (refused.status_code, refused.json()) == (404, NOT_FOUND)
+    assert _report_items(client, rid) == []
+
+    added = client.post(
+        f"/reports/{rid}/items/batch",
+        json={"items": [_analysis_payload(first, title="forged"), _analysis_payload(second), _entity_payload("c1")]},
+    )
+
+    assert added.status_code == 200, added.text
+    assert added.json() == {"added": 3, "skipped": 0, "updated": 0, "item_count": 3}
+    items = _report_items(client, rid)
+    assert [item["dedupe_key"] for item in items] == [f"analysis:{first}", f"analysis:{second}", "entity:c1"]
+    assert [item["snapshot"].get("title") for item in items[:2]] == [STORED_TITLE, "Posts per network"]
+    again = client.post(f"/reports/{rid}/items/batch", json={"items": [_analysis_payload(first)]})
+    assert again.json() == {"added": 0, "skipped": 1, "updated": 0, "item_count": 3}
+
+
+def test_a_batch_reads_a_repeated_analysis_once(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entries that name one analysis share one read of its row, and still dedupe as before."""
+    _own_collection("docs")
+    analysis_id = _stored_analysis("test-operator", _physical())
+    rid = _create(client)["id"]
+    reads: list[str] = []
+    find = SessionManager.find_analysis
+
+    def _counted(self: SessionManager, wanted: str, owner: str | None) -> Any:
+        reads.append(wanted)
+        return find(self, wanted, owner)
+
+    monkeypatch.setattr(SessionManager, "find_analysis", _counted)
+
+    response = client.post(f"/reports/{rid}/items/batch", json={"items": [_analysis_payload(analysis_id)] * 3})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"added": 1, "skipped": 2, "updated": 0, "item_count": 1}
+    assert reads == [analysis_id]
+
+
+@pytest.mark.parametrize("route", ["items", "items/batch"])
+def test_adding_an_analysis_records_references_only(client: TestClient, audit_stream: io.StringIO, route: str) -> None:
+    """The audit event names the item by its server-built key, never the title, code, output or a client field."""
+    _own_collection("docs")
+    analysis_id = _stored_analysis("test-operator", _physical(), charts=[_png_chart(2048)])
+    rid = _create(client)["id"]
+    payload = _analysis_payload(analysis_id, title="forged title")
+    body = payload if route == "items" else {"items": [payload]}
+
+    assert client.post(f"/reports/{rid}/{route}", json=body).status_code == 200
+
+    operation = "report.item_add" if route == "items" else "report.items_add"
+    [event] = [e for e in map(json.loads, audit_stream.getvalue().splitlines()) if e.get("operation") == operation]
+    assert (event["action"], event["outcome"]) == ("modify", "ok")
+    assert event["target"]["ids"] == [f"analysis:{analysis_id}"]
+    for secret in ("forged title", "anything", STORED_TITLE, "print(2)", "2 authors", "counts.csv", "user-a", "iVBOR"):
+        assert secret not in audit_stream.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # PDF as a background job — POST /reports/{id}/pdf, GET …/pdf, GET …/pdf/status
 # ---------------------------------------------------------------------------
 _PROGRESS = logging.getLogger("weasyprint.progress")
@@ -1474,3 +1750,17 @@ def test_admin_moves_another_owners_report_into_that_owners_collection(client: T
     assert [r["id"] for r in listed] == [rid]
     assert resp.status_code == 200, resp.text
     assert _stored_collection(rid, owner="alice") == "docs"
+
+
+def test_the_add_route_and_the_renderers_share_one_png_data_uri_rule() -> None:
+    """A chart the route takes in is a chart the renderers draw: both use the one pattern."""
+    assert api_module.PNG_DATA_URI is report_render.PNG_DATA_URI
+    chart = _png_chart(64)
+    assert api_module._chart_bytes(chart) == 64
+    snapshot = {"title": "t", "charts": [chart]}
+    assert (
+        report_render.render_markdown(
+            {"title": "T", "items": [{"artifact_type": "analysis", "note": None, "snapshot": snapshot}]}
+        ).count("](data:image/png;base64,")
+        == 1
+    )

@@ -20,6 +20,14 @@ duplicate chunks a single entity drags in collapsed. The **Report Builder**
   summary there is one per report (keyed `topics:<collection>`): after the
   topics are rebuilt or extended, take the item out and add it again to freeze
   the new run.
+- **An analysis goes in by its id.** The **+ Report** control on an analysis
+  card (see [Python on the evidence](retrieval-and-agents.md#python-on-the-evidence))
+  sends the id alone: the server builds the snapshot from the stored row, and
+  refuses one that is not the caller's, is from another collection or holds a
+  chart that is not a PNG. Markdown prints its title, question, code, output,
+  tables and inline charts; HTML and PDF the same as tables and figures; JSON
+  the snapshot. Its retention date is collection-wide unless every source is
+  named and no keyword checks or topic listings went in.
 - **"Add all" takes a whole section at once.** The Entities and Hate speech
   headers carry a second control beside their CSV download that adds *every*
   finding in the open section to the active report in one action — the whole
@@ -142,7 +150,7 @@ curl -OJ "http://localhost:8000/reports/1/export.zip?collection=mydocs"   # per-
 ```
 
 Every export leads with the **summaries**, then the **topics**, then chat
-answers, entity findings, and hate-speech findings; entity and hate-speech findings carry their source
+answers, analyses, entity findings, and hate-speech findings; entity and hate-speech findings carry their source
 **reference metadata** (network, author, timestamp, …) alongside the chunk. The
 report name is the single headline and the subheader stays on one line
 (collection · creation date · operator).
@@ -183,6 +191,9 @@ In the Markdown, HTML and PDF exports:
   otherwise lay out as tens of thousands of cells. In the PDF a table's header
   repeats on every page the table reaches, unless it is too tall to: then it
   prints once, as an ordinary row.
+
+The ZIP adds `analyses.csv` and `analysis-<n>/<name>.csv` and `.png` members,
+the extension fixed whatever name was stored.
 
 A finding judged from an image **opens with the picture**, printed at up to
 62 × 90 mm and captioned with its kind (image or video frame). Beside it sit the

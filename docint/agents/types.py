@@ -7,7 +7,17 @@ AnswerMode = Literal["lookup", "assessment"]
 """How a chat turn is answered: a grounded lookup, or with a labelled model assessment."""
 
 AgentAction = Literal[
-    "seed", "carried", "search", "answer", "note", "search_images", "keyframes", "keyword", "topics", "read"
+    "seed",
+    "carried",
+    "search",
+    "answer",
+    "note",
+    "search_images",
+    "keyframes",
+    "keyword",
+    "topics",
+    "read",
+    "run_python",
 ]
 """What one step of an agent turn did: a tool call by the tool's name, or a ``note``, the text a
 round wrote before its calls. ``seed`` opens a scoped turn's trail with its pinned passages, and
@@ -168,6 +178,13 @@ class RetrievalResult:
     Facts about the collection the validator reads beside the sources and the
     keyword checks, so an answer may state a topic's share no passage shows.
     ``None`` or empty for none.
+    """
+    analysis_checks: str | None = None
+    """An agent turn's analyses: one line each with its title, the passages it was computed from and its output.
+
+    Facts the validator reads beside the sources and the other checks, so an
+    answer may state a figure the turn's code computed from the passages the
+    line names. ``None`` or empty for none.
     """
     turn_idx: int | None = None
     """Index of the persisted conversation turn; an internal join key.

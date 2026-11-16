@@ -6,9 +6,12 @@ Every message, query, passage and tool call here is invented.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import re
+import struct
 import types
+import zlib
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 from unittest.mock import MagicMock
@@ -29,6 +32,8 @@ from docint.agents.turn.tools import SearchFn, ToolContext, ToolRegistry, ToolRe
 from docint.agents.turn.toolsets import toolset_for
 from docint.agents.turn.topics import TopicsSource
 from docint.core.search.fields import SEARCH_FIELDS
+from docint.utils.audit_disclose import current_ledger
+from docint.utils.workbench_client import PNG_SIGNATURE, Discovery, InlineFile, OutputFile, RunFailure, RunResult
 
 ScriptedRound = Sequence[dict[str, Any] | Exception] | Exception
 """One scripted model call: the raw chunks it streams, or the error its first pull raises.
@@ -738,3 +743,172 @@ def keyword_coverage(monkeypatch: pytest.MonkeyPatch, lanes: dict[str, tuple[int
 
     monkeypatch.setattr("docint.core.rag.search_index_status", _status)
     return reported
+
+
+#: The job every scripted workbench run names.
+WORKBENCH_JOB = "0" * 32
+#: The table a scripted workbench run returns, as pandas writes it without its index.
+COUNTS_CSV = "author,posts\nuser-a,12\nuser-b,7\n"
+#: The line a validator reads for the analysis :func:`an_analysis` builds.
+ANALYSIS_LINE = (
+    '- Analysis 1 "Posts per author": from passages [1], [2]; '
+    "tables counts.csv (2 rows × 2 columns); stdout: 2 authors"  # noqa: RUF001
+)
+
+
+def an_analysis(**overrides: Any) -> dict[str, Any]:
+    """Build an analysis as the run_python tool keeps it: two passages, the counts table and a summary.
+
+    Args:
+        **overrides (Any): Keys to set instead.
+
+    Returns:
+        dict[str, Any]: The analysis; a fresh one at each call.
+    """
+    analysis: dict[str, Any] = {
+        "schema": 1,
+        "title": "Posts per author",
+        "code": "print(2)",
+        "stdout": "2 authors",
+        "tables": [
+            {
+                "name": "counts.csv",
+                "columns": ["author", "posts"],
+                "rows": [["user-a", "12"], ["user-b", "7"]],
+                "row_count": 2,
+                "truncated": False,
+            }
+        ],
+        "charts": [],
+        "provenance": {
+            "sources": [
+                {"citation_index": 1, "chunk_id": "p1", "file_hash": None, "filename": None, "page": None},
+                {"citation_index": 2, "chunk_id": "p2", "file_hash": None, "filename": None, "page": None},
+            ],
+            "inputs": {"passages": 2, "keyword_checks": 0, "topic_listings": 0},
+            "workbench": {"job_id": WORKBENCH_JOB, "version": "0.2.0", "tool": "run_python"},
+        },
+    }
+    return {**analysis, **overrides}
+
+
+def tiny_png(width: int = 640, height: int = 480) -> bytes:
+    """Build the start of a PNG: its signature and an IHDR chunk naming its size, which is all a chart check reads.
+
+    Args:
+        width (int): The width the IHDR chunk names, in pixels.
+        height (int): The height it names, in pixels.
+
+    Returns:
+        bytes: The signature, then the IHDR chunk with its length and checksum.
+    """
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    body = b"IHDR" + header
+    return PNG_SIGNATURE + struct.pack(">I", len(header)) + body + struct.pack(">I", zlib.crc32(body))
+
+
+def run_result(**overrides: Any) -> RunResult:
+    """Build a run workbench completed: a short summary, the counts table and one chart.
+
+    Args:
+        **overrides (Any): Fields of :class:`RunResult` to set instead.
+
+    Returns:
+        RunResult: The run.
+    """
+    chart = tiny_png()
+    result = RunResult(
+        job_id=WORKBENCH_JOB,
+        stdout="2 authors",
+        stderr="",
+        truncated=False,
+        files=(
+            OutputFile(name="chart.png", mime="image/png", size=len(chart), returned=True),
+            OutputFile(name="counts.csv", mime="text/csv", size=len(COUNTS_CSV), returned=True),
+        ),
+        images=(("chart.png", chart),),
+        texts=(("counts.csv", "text/csv", COUNTS_CSV),),
+        hint=None,
+        server_version="0.2.0",
+    )
+    return dataclasses.replace(result, **overrides)
+
+
+class FakeWorkbench:
+    """A workbench double: answers each call from its script and records the call and the turn's ledger at that moment.
+
+    Attributes:
+        calls (list[dict[str, Any]]): The arguments of every call, in order.
+        ledger_states (list[int]): Per call, how many disclosures were in flight in the bound ledger as it
+            went out; ``-1`` when none was bound.
+        discovery (Discovery | None): What :meth:`discover` answers; ``None`` for a workbench not usable now.
+        discoveries (int): How often :meth:`discover` was asked.
+    """
+
+    def __init__(self, *answers: RunResult | RunFailure) -> None:
+        """Hold the answers, one per call; with none, every call answers :func:`run_result`.
+
+        Args:
+            *answers (RunResult | RunFailure): What each call returns, in order.
+        """
+        self._answers = list(answers)
+        self._scripted = bool(answers)
+        self.calls: list[dict[str, Any]] = []
+        self.ledger_states: list[int] = []
+        self.discovery: Discovery | None = Discovery(60, "0.2.0")
+        self.discoveries = 0
+
+    def discover(self) -> Discovery | None:
+        """Count the discovery and answer it.
+
+        Returns:
+            Discovery | None: ``discovery``.
+        """
+        self.discoveries += 1
+        return self.discovery
+
+    def run_python(
+        self,
+        *,
+        code: str,
+        data: Sequence[InlineFile],
+        time_limit_s: int,
+        owner: str,
+        session_id: str,
+        timeout_s: float,
+    ) -> RunResult | RunFailure:
+        """Record the call and answer it.
+
+        Args:
+            code (str): The code sent.
+            data (Sequence[InlineFile]): The files sent.
+            time_limit_s (int): The run's limit at workbench.
+            owner (str): The owner the call is made for.
+            session_id (str): The chat session.
+            timeout_s (float): The call's deadline.
+
+        Returns:
+            RunResult | RunFailure: The next scripted answer.
+
+        Raises:
+            AssertionError: When a scripted double is called more often than its script has answers.
+        """
+        ledger = current_ledger()
+        # The ledger offers no count of what is in flight, so the double reads its entries.
+        flying = -1 if ledger is None else sum(entry.state == "flying" for entry in ledger._pending)
+        self.ledger_states.append(flying)
+        self.calls.append(
+            {
+                "code": code,
+                "data": list(data),
+                "time_limit_s": time_limit_s,
+                "owner": owner,
+                "session_id": session_id,
+                "timeout_s": timeout_s,
+            }
+        )
+        if not self._scripted:
+            return run_result()
+        if not self._answers:
+            raise AssertionError("workbench was called more often than its script has answers.")
+        return self._answers.pop(0)

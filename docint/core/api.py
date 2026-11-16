@@ -60,6 +60,7 @@ from docint.agents.history import build_prior_turn
 from docint.agents.turn.keyword import KEYWORD_CHECKS_CHARS, render_keyword_checks
 from docint.agents.turn.probe import probe_tools
 from docint.agents.turn.topics import TOPIC_CHECKS_CHARS, render_topic_checks
+from docint.agents.turn.workbench_tool import ANALYSIS_CHECKS_CHARS, CHART_BYTES, CHARTS_BYTES, render_analysis_checks
 from docint.agents.types import AgentProgress
 from docint.cli import ingest as ingest_module
 from docint.core import audit, audit_ingest
@@ -110,11 +111,19 @@ from docint.core.search.index import search_index_status
 from docint.core.state.collection_owner_manager import validate_collection_name
 from docint.core.state.pdf_progress import ProgressCallback
 from docint.core.state.report_pdf_store import ReportPdfStore
-from docint.core.state.report_render import PdfEngineUnavailableError, html_to_pdf, pdf_engine_available, render_pdf
+from docint.core.state.report_render import (
+    PNG_DATA_URI,
+    PdfEngineUnavailableError,
+    html_to_pdf,
+    pdf_engine_available,
+    render_pdf,
+)
 from docint.core.state.session_manager import SessionCollectionMismatchError
+from docint.core.state.turn_analysis import served_analysis
 from docint.core.topics.service import Action, TopicsRefused, progress_payload
 from docint.core.topics.store import RUN_ID_PATTERN, TopicStore
 from docint.utils import cache_scope
+from docint.utils.audit_disclose import current_ledger
 from docint.utils.audit_event import AiCall, Target, sha256_text
 from docint.utils.audit_meter import TransferMeter, in_context, metering, staged_meter, take_staged
 from docint.utils.cursor import InvalidCursorError
@@ -138,6 +147,7 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
     load_summary_env,
     load_topics_env,
+    load_workbench_env,
     resolve_enable_hybrid,
     set_offline_env,
 )
@@ -1441,6 +1451,7 @@ def _validation_payload(
     previous_user_input: str | None = None,
     keyword_checks: str | None = None,
     topic_checks: str | None = None,
+    analysis_checks: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -1461,6 +1472,9 @@ def _validation_payload(
         topic_checks (str | None): An agent turn's topic checks, one line per topic its listing
             showed (see :func:`_trail_topic_checks`), which the validator reads as facts; ``None``
             or empty for none.
+        analysis_checks (str | None): An agent turn's analyses, one line each (see
+            :func:`_analysis_checks`), which the validator reads as facts computed from the passages
+            they name; ``None`` or empty for none.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata dictionary suitable for API responses.
@@ -1487,6 +1501,7 @@ def _validation_payload(
         tool_used=tool_used,
         keyword_checks=keyword_checks,
         topic_checks=topic_checks,
+        analysis_checks=analysis_checks,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question, previous_user_input=previous_user_input))
     return {
@@ -1637,16 +1652,32 @@ def _trail_topic_checks(agent: Any) -> str:
     return render_topic_checks(_trail_steps(agent), max_chars=TOPIC_CHECKS_CHARS)
 
 
+def _analysis_checks(analyses: Any) -> str:
+    """Render the analyses an agent turn's payload holds, for its validator.
+
+    Args:
+        analyses (Any): The payload's ``analyses``, as it was stored or served.
+
+    Returns:
+        str: One line per analysis that can be read, within ``ANALYSIS_CHECKS_CHARS``
+        (see :func:`~docint.agents.turn.workbench_tool.render_analysis_checks`); empty when there is none.
+    """
+    if not isinstance(analyses, list):
+        return ""
+    return render_analysis_checks(analyses, max_chars=ANALYSIS_CHECKS_CHARS)
+
+
 def _assessment_validation(
-    *, question: str, answer: str, sources: list[dict[str, Any]], agent: Any
+    *, question: str, answer: str, sources: list[dict[str, Any]], agent: Any, analyses: Any = None
 ) -> dict[str, bool | str | None]:
-    """Validate only the source-backed part of an assessment turn, beside the turn's keyword and topic checks.
+    """Validate only the source-backed part of an assessment turn, beside the turn's keyword, topic and analysis checks.
 
     Args:
         question (str): The user's question.
         answer (str): The labelled answer text.
         sources (list[dict[str, Any]]): The turn's numbered sources.
         agent (Any): The turn's ``agent`` trail.
+        analyses (Any): The turn's analyses, as its payload carries them; none by default.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata; unchecked when the
@@ -1663,13 +1694,15 @@ def _assessment_validation(
         }
     checks = _trail_keyword_checks(trail)
     topic_checks = _trail_topic_checks(trail)
+    analysis_checks = _analysis_checks(analyses)
     return _validation_payload(
         question=question,
         answer=evidence,
-        sources=cited_sources(evidence, sources, fallback=not (checks or topic_checks)),
+        sources=cited_sources(evidence, sources, fallback=not (checks or topic_checks or analysis_checks)),
         intent="assessment",
         keyword_checks=checks,
         topic_checks=topic_checks,
+        analysis_checks=analysis_checks,
     )
 
 
@@ -1689,10 +1722,10 @@ def _turn_validation(
     An agent lookup is checked against the sources it cites, since its evidence holds every
     passage its tools showed, with the previous user message ahead of the question: the agent
     read the conversation, so a follow-up is only judged right against what it follows. Either
-    agent mode also hands the validator the turn's keyword checks with a known count and its
-    topic checks, as facts an answer may state without citing a passage; an answer that cites
-    none beside such checks is judged against the checks alone, never against passages it does
-    not rely on. A plain lookup is checked as it always was.
+    agent mode also hands the validator the turn's keyword checks with a known count, its
+    topic checks and its analyses, as facts an answer may state without citing a passage; an
+    answer that cites none beside such checks is judged against the checks alone, never against
+    passages it does not rely on. A plain lookup is checked as it always was.
 
     Args:
         data (dict[str, Any]): The turn's payload; ``answer_mode`` names an agent turn's mode.
@@ -1708,17 +1741,21 @@ def _turn_validation(
     """
     mode = data.get("answer_mode")
     if mode == "assessment":
-        return _assessment_validation(question=question, answer=answer, sources=sources, agent=data.get("agent"))
+        return _assessment_validation(
+            question=question, answer=answer, sources=sources, agent=data.get("agent"), analyses=data.get("analyses")
+        )
     if mode == "lookup":
         checks = _trail_keyword_checks(data.get("agent"))
         topic_checks = _trail_topic_checks(data.get("agent"))
+        analysis_checks = _analysis_checks(data.get("analyses"))
         return _validation_payload(
             question=question,
             answer=answer,
-            sources=cited_sources(answer, sources, fallback=not (checks or topic_checks)),
+            sources=cited_sources(answer, sources, fallback=not (checks or topic_checks or analysis_checks)),
             previous_user_input=previous_user_input,
             keyword_checks=checks,
             topic_checks=topic_checks,
+            analysis_checks=analysis_checks,
         )
     return _validation_payload(
         question=question,
@@ -2136,6 +2173,9 @@ class QueryOut(BaseModel):
     #: an agent turn handed it the message because the endpoint refused tools:
     #: its trail then says ``reason: "tools_unavailable"``.
     agent: dict[str, Any] | None = None
+    #: The analyses an agent turn's ``run_python`` runs kept, in full, each with its stored
+    #: ``id`` and the caller's collection name; empty when it kept none.
+    analyses: list[dict[str, Any]] = []
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -3519,6 +3559,26 @@ def _chat_model_alias() -> str:
     return str(getattr(rag, "text_model_id", None) or "unknown")
 
 
+#: What a chat turn may record besides its ``query``, read once at import: a key set later needs a restart.
+_CHAT_ALSO = audit.chat_also(load_workbench_env().enabled)
+
+
+def _served_analyses(data: Any, collection: str | None) -> list[dict[str, Any]]:
+    """Serve a chat turn's analyses under the caller's collection name.
+
+    Args:
+        data (Any): The turn's payload; its ``analyses`` are as they were stored.
+        collection (str | None): The request's logical collection.
+
+    Returns:
+        list[dict[str, Any]]: Each analysis with ``provenance.collection`` set; empty when the turn kept none.
+    """
+    analyses = data.get("analyses") if isinstance(data, dict) else None
+    if not isinstance(analyses, list):
+        return []
+    return [served_analysis(analysis, collection) for analysis in analyses if isinstance(analysis, dict)]
+
+
 def _record_chat_turn(
     op: Operation,
     *,
@@ -3527,13 +3587,14 @@ def _record_chat_turn(
     session_id: str | None,
     answer_operation: str = "chat.answer",
 ) -> None:
-    """Record a finished chat turn: what it showed, then the model call that answered it.
+    """Record a finished chat turn: what it showed, what it handed to workbench, then the model call that answered it.
 
-    The ``query`` event names the sources the answer came with; its
-    ``ai_call`` child is the answer's transfer record, with the hash of the
-    answer and the same sources as the model's evidence. The turn's other
-    model calls (query embedding, rerank, validation) went to the same
-    inference service with the same question and passages.
+    The ``query`` event names the sources the answer came with. Its
+    ``disclose`` children, one per ``run_python`` call in the bound ledger,
+    come next; its ``ai_call`` child is the answer's transfer record, with the
+    hash of the answer and the same sources as the model's evidence. The
+    turn's other model calls (query embedding, rerank, validation) went to the
+    same inference service with the same question and passages.
 
     Args:
         op (Operation): The turn's open ``query`` operation.
@@ -3544,6 +3605,9 @@ def _record_chat_turn(
     """
     target = chunk_target(sources)
     op.record(target=target, criteria={"session_id": session_id})
+    ledger = current_ledger()
+    if ledger is not None:
+        audit.write_disclosures(op, ledger.take())
     if answer:
         op.child(
             "ai_call",
@@ -3562,7 +3626,7 @@ def _record_chat_turn(
 def query(
     payload: QueryIn,
     request: Request,
-    op: Operation = Depends(audited("query", "chat.query", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "chat.query", also=_CHAT_ALSO)),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Handle a query request.
 
@@ -3570,8 +3634,9 @@ def query(
         payload (QueryIn): The query payload containing the question and session ID.
         request (Request): The incoming request used to resolve the calling principal
             for session-backed chats.
-        op (Operation): The audited ``query`` operation; the answer's model
-            call is its ``ai_call`` child.
+        op (Operation): The audited ``query`` operation; each ``run_python``
+            call is its ``disclose`` child and the answer's model call its
+            ``ai_call`` child.
 
     Returns:
         QueryOut: The query response containing the answer, sources, and session ID.
@@ -3598,114 +3663,115 @@ def query(
             principal.effective_owner,
         )
 
-        with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
-            if getattr(rag, "query_engine", None) is None:
-                if getattr(rag, "index", None) is None:
-                    rag.create_index()
-                rag.create_query_engine()
+        with audit.forwarding_of(op.context), audit.disclosing(op):
+            with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
+                if getattr(rag, "query_engine", None) is None:
+                    if getattr(rag, "index", None) is None:
+                        rag.create_index()
+                    rag.create_query_engine()
 
-            data: dict[str, Any]
-            previous_user_input: str | None = None
-            if payload.retrieval_mode == "stateless":
-                # Stateless mode has no session to pin a scope to, so the
-                # request is the only place one can come from.
-                stateless_scope = [str(entry) for entry in payload.scope_chunk_ids or []]
-                data = {}
-                if _agent_turn_allowed(payload.retrieval_target):
-                    # Drained to its final payload.
-                    for item in rag.stream_stateless_agent_turn(
-                        payload.question,
-                        metadata_filters=metadata_filters,
-                        metadata_filter_rules=payload.metadata_filters,
-                        vector_store_kwargs=vector_store_kwargs or None,
-                        scoped_node_ids=stateless_scope or None,
-                        retrieval_target=payload.retrieval_target,
-                    ):
-                        if isinstance(item, dict):
-                            data = item
+                data: dict[str, Any]
+                previous_user_input: str | None = None
+                if payload.retrieval_mode == "stateless":
+                    # Stateless mode has no session to pin a scope to, so the
+                    # request is the only place one can come from.
+                    stateless_scope = [str(entry) for entry in payload.scope_chunk_ids or []]
+                    data = {}
+                    if _agent_turn_allowed(payload.retrieval_target):
+                        # Drained to its final payload.
+                        for item in rag.stream_stateless_agent_turn(
+                            payload.question,
+                            metadata_filters=metadata_filters,
+                            metadata_filter_rules=payload.metadata_filters,
+                            vector_store_kwargs=vector_store_kwargs or None,
+                            scoped_node_ids=stateless_scope or None,
+                            retrieval_target=payload.retrieval_target,
+                        ):
+                            if isinstance(item, dict):
+                                data = item
+                    else:
+                        data = rag.run_query(
+                            payload.question,
+                            metadata_filters=metadata_filters,
+                            metadata_filter_rules=payload.metadata_filters,
+                            vector_store_kwargs=vector_store_kwargs or None,
+                            scoped_node_ids=stateless_scope or None,
+                            retrieval_target=payload.retrieval_target,
+                        )
+                    session_id = payload.session_id
                 else:
-                    data = rag.run_query(
+                    session_id = rag.start_session(
+                        payload.session_id,
+                        owner=principal.effective_owner,
+                    )
+                    # A session pinned to hand-picked chunks answers only from
+                    # them — no vector retrieval at all. Resolved here, once the
+                    # id exists, so a scope carried by the very first turn is used
+                    # for that turn and pinned for the next.
+                    scoped_node_ids = _apply_turn_scope(
+                        session_id,
+                        principal.effective_owner,
+                        payload.scope_chunk_ids,
+                    )
+                    _apply_turn_topic(session_id, principal.effective_owner, payload.topic_focus)
+                    # An agent turn reads its own history, and its fallback binds none on this endpoint.
+                    agent = _agent_turn_allowed(payload.retrieval_target)
+                    if agent and rag.sessions is not None:
+                        # Read before the turn is stored: an agent lookup is validated beside the message it follows.
+                        prior_turn = rag.sessions.get_prior_turn(session_id, owner=principal.effective_owner)
+                        previous_user_input = prior_turn.user_text if prior_turn is not None else None
+                    data = rag.chat(
                         payload.question,
+                        session_id=session_id,
+                        owner=principal.effective_owner,
                         metadata_filters=metadata_filters,
+                        metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
-                        scoped_node_ids=stateless_scope or None,
+                        scoped_node_ids=scoped_node_ids or None,
                         retrieval_target=payload.retrieval_target,
+                        agent=agent,
                     )
-                session_id = payload.session_id
-            else:
-                session_id = rag.start_session(
-                    payload.session_id,
-                    owner=principal.effective_owner,
-                )
-                # A session pinned to hand-picked chunks answers only from
-                # them — no vector retrieval at all. Resolved here, once the
-                # id exists, so a scope carried by the very first turn is used
-                # for that turn and pinned for the next.
-                scoped_node_ids = _apply_turn_scope(
-                    session_id,
-                    principal.effective_owner,
-                    payload.scope_chunk_ids,
-                )
-                _apply_turn_topic(session_id, principal.effective_owner, payload.topic_focus)
-                # An agent turn reads its own history, and its fallback binds none on this endpoint.
-                agent = _agent_turn_allowed(payload.retrieval_target)
-                if agent and rag.sessions is not None:
-                    # Read before the turn is stored: an agent lookup is validated beside the message it follows.
-                    prior_turn = rag.sessions.get_prior_turn(session_id, owner=principal.effective_owner)
-                    previous_user_input = prior_turn.user_text if prior_turn is not None else None
-                data = rag.chat(
-                    payload.question,
-                    session_id=session_id,
-                    owner=principal.effective_owner,
-                    metadata_filters=metadata_filters,
-                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                    scoped_node_ids=scoped_node_ids or None,
-                    retrieval_target=payload.retrieval_target,
-                    agent=agent,
-                )
-            # Within the request's reasoning scope, so a probe asks the agent client the turn used.
-            if _refused_tools(data):
-                _confirm_tools_rejection()
+                # Within the request's reasoning scope, so a probe asks the agent client the turn used.
+                if _refused_tools(data):
+                    _confirm_tools_rejection()
 
-        answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
-        sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
-        retrieval_query_value: str | None = (
-            str(data.get("retrieval_query") or "")
-            if isinstance(data, dict) and data.get("retrieval_query") is not None
-            else None
-        )
-        coverage_unit = (
-            str(data.get("coverage_unit") or "")
-            if isinstance(data, dict) and data.get("coverage_unit") is not None
-            else None
-        )
-        retrieval_mode = (
-            str(data.get("retrieval_mode") or "")
-            if isinstance(data, dict) and data.get("retrieval_mode") is not None
-            else None
-        )
-        summary_diagnostics_query = (
-            data.get("summary_diagnostics")
-            if isinstance(data, dict) and isinstance(data.get("summary_diagnostics"), dict)
-            else None
-        )
-        # `retrieval_mode` here is the session-routing mode
-        # ("session"/"stateless"), not the retrieval tool, so it is not
-        # forwarded as `tool_used`. The orchestrator path populates
-        # `tool_used` directly on the RetrievalResult instead.
-        validation = _turn_validation(
-            data if isinstance(data, dict) else {},
-            question=payload.question,
-            answer=answer,
-            sources=sources,
-            previous_user_input=previous_user_input,
-            summary_diagnostics=summary_diagnostics_query,
-            retrieval_query=retrieval_query_value,
-        )
-        _record_chat_turn(op, answer=answer, sources=sources, session_id=session_id)
+            answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
+            sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
+            retrieval_query_value: str | None = (
+                str(data.get("retrieval_query") or "")
+                if isinstance(data, dict) and data.get("retrieval_query") is not None
+                else None
+            )
+            coverage_unit = (
+                str(data.get("coverage_unit") or "")
+                if isinstance(data, dict) and data.get("coverage_unit") is not None
+                else None
+            )
+            retrieval_mode = (
+                str(data.get("retrieval_mode") or "")
+                if isinstance(data, dict) and data.get("retrieval_mode") is not None
+                else None
+            )
+            summary_diagnostics_query = (
+                data.get("summary_diagnostics")
+                if isinstance(data, dict) and isinstance(data.get("summary_diagnostics"), dict)
+                else None
+            )
+            # `retrieval_mode` here is the session-routing mode
+            # ("session"/"stateless"), not the retrieval tool, so it is not
+            # forwarded as `tool_used`. The orchestrator path populates
+            # `tool_used` directly on the RetrievalResult instead.
+            validation = _turn_validation(
+                data if isinstance(data, dict) else {},
+                question=payload.question,
+                answer=answer,
+                sources=sources,
+                previous_user_input=previous_user_input,
+                summary_diagnostics=summary_diagnostics_query,
+                retrieval_query=retrieval_query_value,
+            )
+            _record_chat_turn(op, answer=answer, sources=sources, session_id=session_id)
         return {
             "answer": answer,
             "sources": sources,
@@ -3725,6 +3791,7 @@ def query(
             "visual": data.get("visual") if isinstance(data, dict) else None,
             "answer_mode": data.get("answer_mode") if isinstance(data, dict) else None,
             "agent": data.get("agent") if isinstance(data, dict) else None,
+            "analyses": _served_analyses(data, payload.collection),
             **validation,
         }
     except HTTPException:
@@ -3740,7 +3807,7 @@ def query(
 async def stream_query(
     payload: QueryIn,
     request: Request,
-    op: Operation = Depends(audited("query", "chat.query", also=("ai_call",))),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "chat.query", also=_CHAT_ALSO)),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Handle a streaming query request.
 
@@ -3968,7 +4035,12 @@ async def stream_query(
                         final_payload = chunk
                 previous_user_input = getattr(stream_state.get("prior_turn"), "user_text", None)
 
-            payload_out = dict(final_payload or {})
+            if final_payload is None:
+                # No final payload: the client went away, or the turn produced nothing.
+                audit.settle_quietly(op, criteria={"incomplete": True})
+                return
+
+            payload_out = dict(final_payload)
             # Read off the first pass, on the loop: only a probe takes a thread, and the retry replaces the payload.
             if _refused_tools(payload_out):
                 await to_thread.run_sync(_confirm_tools_rejection)
@@ -4071,8 +4143,16 @@ async def stream_query(
                     logger.opt(exception=exc).warning("Corrective retry failed; keeping the first answer")
                     retry_ok = False
 
-                if retry_ok:
-                    payload_out = dict(retry_payload or {})
+                if retry_ok and retry_payload is None:
+                    if await request.is_disconnected():
+                        # No final payload and no client: it went away during the retry, as above.
+                        audit.settle_quietly(op, criteria={"incomplete": True})
+                        return
+                    logger.warning("Corrective retry ended without an answer; keeping the first answer")
+                    retry_ok = False
+
+                if retry_ok and retry_payload is not None:
+                    payload_out = dict(retry_payload)
                     payload_out.pop("turn_idx", None)
                     retry_final = str(payload_out.get("response") or payload_out.get("answer") or "") or retry_answer
                     retry_sources = payload_out.get("sources")
@@ -4122,23 +4202,20 @@ async def stream_query(
                         turn_idx,
                         exc,
                     )
-            if payload_out:
-                # The SPA reads the target off this frame; a turn that never
-                # reached the retrieval layer (an empty collection, say) still
-                # answered under the requested target.
-                payload_out.setdefault("retrieval_target", payload.retrieval_target)
-                # Before the frame that carries the sources: a write that
-                # fails lands in the generic handler below instead.
-                _record_chat_turn(
-                    op,
-                    answer=final_answer,
-                    sources=final_sources,
-                    session_id=cast("str | None", payload_out.get("session_id") or payload.session_id),
-                )
-                yield f"data: {json.dumps(payload_out)}\n\n"
-            else:
-                # No final payload: the client went away, or the turn produced nothing.
-                audit.settle_quietly(op, criteria={"incomplete": True})
+            # The SPA reads the target off this frame; a turn that never
+            # reached the retrieval layer (an empty collection, say) still
+            # answered under the requested target.
+            payload_out.setdefault("retrieval_target", payload.retrieval_target)
+            payload_out["analyses"] = _served_analyses(payload_out, payload.collection)
+            # Before the frame that carries the sources: a write that
+            # fails lands in the generic handler below instead.
+            _record_chat_turn(
+                op,
+                answer=final_answer,
+                sources=final_sources,
+                session_id=cast("str | None", payload_out.get("session_id") or payload.session_id),
+            )
+            yield f"data: {json.dumps(payload_out)}\n\n"
         except EmbeddingEndpointError:
             # Retrieval could not embed the query, so no generation was ever
             # attempted. Reported apart from `generation_failed`, which reads
@@ -4170,22 +4247,24 @@ async def stream_query(
             yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
-        """Bind the request's physical collection, then stream the body.
+        """Bind the request's physical collection, purpose and disclosure ledger, then stream the body.
 
-        The collection scope is opened here rather than in the handler so it
-        stays active while Starlette consumes the generator and copies into the
-        anyio worker threads spawned for retrieval/generation. Warming the index
-        also happens inside the scope so the correct collection is materialized.
+        The scopes are opened here rather than in the handler so they stay
+        active while Starlette consumes the generator and copies into the anyio
+        worker threads spawned for retrieval/generation, and so they also close
+        when the stream is cancelled. Warming the index also happens inside the
+        scope so the correct collection is materialized.
 
         Yields:
             str: SSE event lines from the scoped stream body.
         """
         try:
             with rag.collection_scope(physical), rag.reasoning_scope(payload.reasoning):
-                if getattr(rag, "index", None) is None:
-                    await to_thread.run_sync(rag.create_index)
-                async for chunk in _stream_body():
-                    yield chunk
+                with audit.forwarding_of(op.context), audit.disclosing(op):
+                    if getattr(rag, "index", None) is None:
+                        await to_thread.run_sync(rag.create_index)
+                    async for chunk in _stream_body():
+                        yield chunk
         finally:
             # A stream cancelled mid-answer (the client went away) never
             # reaches either outcome above.
@@ -5330,6 +5409,55 @@ def get_session_history(
     return {"messages": messages}
 
 
+@app.get("/sessions/{session_id}/analyses/{analysis_id}", tags=["Sessions"])
+def get_session_analysis(
+    session_id: str,
+    analysis_id: str,
+    collection: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+    op: Operation = Depends(audited("query", "session.analysis")),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
+    """Get one analysis of a session owned by the calling principal, from its own collection.
+
+    Gated exactly like ``GET /sessions/{id}/history``: an analysis that does not exist, belongs to
+    another session or principal, or whose session is pinned to a collection other than the
+    caller's active one is the same 404. Recorded by reference: the analysis id and its session.
+
+    Args:
+        session_id (str): The session the analysis belongs to.
+        analysis_id (str): The analysis's id.
+        collection (str): The caller's active logical collection.
+        principal (Principal): The resolved request principal.
+        op (Operation): The audited ``query`` operation; the analysis is its target.
+
+    Returns:
+        dict[str, Any]: The stored analysis, its ``provenance.collection`` set to ``collection``.
+
+    Raises:
+        HTTPException: 404 when the analysis is not found for this principal in this session and
+            collection; 500 on unexpected errors.
+    """
+    try:
+        sm = rag.ensure_session_manager()
+        owner = principal.effective_owner
+        physical = rag.ensure_collection_owner_manager().resolve(owner, collection)
+        if physical is None or sm.get_session_collection(session_id, owner) != physical:
+            raise HTTPException(status_code=404, detail="Analysis not found.")
+        analysis = sm.get_analysis(session_id, analysis_id, owner)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error reading an analysis")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    op.record(
+        target=Target(kind="analysis", ids=[analysis_id], count=1),
+        criteria={"session_id": session_id},
+    )
+    return served_analysis(analysis, collection)
+
+
 def _collect_session_source_files(session_id: str, principal: str) -> list[tuple[str, tuple[str, Path]]]:
     """Return the unique source files referenced by a session's citations.
 
@@ -5778,6 +5906,63 @@ def delete_report(
     return {"ok": True}
 
 
+def _chart_bytes(chart: Any) -> int | None:
+    """Measure a stored chart, or refuse it.
+
+    Args:
+        chart (Any): One entry of a stored analysis's ``charts``.
+
+    Returns:
+        int | None: The decoded size of its PNG data URI; ``None`` for anything else, or base64 that is not padded.
+    """
+    uri = chart.get("data_uri") if isinstance(chart, Mapping) else None
+    if not isinstance(uri, str) or not PNG_DATA_URI.fullmatch(uri):
+        return None
+    encoded = uri.partition(",")[2]
+    return None if len(encoded) % 4 else len(encoded) // 4 * 3 - encoded.count("=")
+
+
+def _analysis_item(
+    raw: Mapping[str, Any], report: Mapping[str, Any], principal: Principal
+) -> tuple[str, dict[str, Any]]:
+    """Build a report item for a stored analysis, from its stored row alone.
+
+    The request names the analysis by id and nothing else is read from it: the caller must own the
+    analysis, its session must be pinned to the report's collection, and its charts must be PNG data
+    URIs within the caps. Every refusal is the same 404.
+
+    Args:
+        raw (Mapping[str, Any]): The request's snapshot; only ``analysis_id`` is read.
+        report (Mapping[str, Any]): The owned report the item is added to.
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        tuple[str, dict[str, Any]]: The item's dedupe key and its snapshot.
+
+    Raises:
+        HTTPException: 404 when the analysis is not found for the caller in the report's collection, or
+            a chart is not a PNG data URI within the caps.
+    """
+    missing = HTTPException(status_code=404, detail="Analysis not found.")
+    analysis_id = raw.get("analysis_id")
+    if not isinstance(analysis_id, str) or not analysis_id:
+        raise missing
+    owner = principal.effective_owner
+    logical = str(report.get("collection_name") or "")
+    physical = rag.ensure_collection_owner_manager().resolve(owner, logical)
+    found = rag.ensure_session_manager().find_analysis(analysis_id, owner)
+    if physical is None or found is None or found[1] != physical:
+        raise missing
+    stored = found[0]
+    charts = stored.get("charts", [])
+    if not isinstance(charts, list):
+        raise missing
+    sizes = [_chart_bytes(chart) for chart in charts]
+    if any(size is None or size > CHART_BYTES for size in sizes) or sum(size or 0 for size in sizes) > CHARTS_BYTES:
+        raise missing
+    return f"analysis:{analysis_id}", served_analysis(stored, logical)
+
+
 @app.post("/reports/{report_id}/items", tags=["Reports"], dependencies=_REPORT_IN_COLLECTION)
 def add_report_item(
     report_id: int,
@@ -5801,15 +5986,20 @@ def add_report_item(
         dict[str, Any]: The added (or pre-existing) item.
 
     Raises:
-        HTTPException: 404 when the report is missing or not owned.
+        HTTPException: 404 when the report is missing or not owned, or an ``analysis`` is not
+            found for the caller in the report's collection (see :func:`_analysis_item`).
     """
     report = _get_owned_report(report_id, principal.effective_owner, collection)
-    snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
+    if payload.artifact_type == "analysis":
+        dedupe_key, snapshot = _analysis_item(payload.snapshot, report, principal)
+    else:
+        dedupe_key = payload.dedupe_key
+        snapshot = _enrich_snapshot_thumbnails(payload.snapshot, payload.artifact_type, report, principal)
     item = rag.ensure_report_manager().add_item(
         report_id,
         principal.effective_owner,
         artifact_type=payload.artifact_type,
-        dedupe_key=payload.dedupe_key,
+        dedupe_key=dedupe_key,
         snapshot=snapshot,
         note=payload.note,
         collection=collection,
@@ -5817,7 +6007,7 @@ def add_report_item(
     if item is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     op.record(
-        target=Target(kind="report_item", ids=[payload.dedupe_key], count=1),
+        target=Target(kind="report_item", ids=[dedupe_key], count=1),
         criteria={"report_id": report_id, "artifact_type": payload.artifact_type},
     )
     return item
@@ -5856,24 +6046,37 @@ def add_report_items(
         dict[str, Any]: ``{"added", "skipped", "updated", "item_count"}``.
 
     Raises:
-        HTTPException: 404 when the report is missing or not owned.
+        HTTPException: 404 when the report is missing or not owned, or any ``analysis`` item is not
+            found for the caller in the report's collection; nothing is added then.
     """
     report = _get_owned_report(report_id, principal.effective_owner, collection)
+    # An analysis is built from its stored row, and one that cannot be fails the batch before anything is added.
+    entries: list[dict[str, Any]] = []
+    built: dict[str, tuple[str, dict[str, Any]]] = {}
+    for item in payload.items:
+        dedupe_key, snapshot = item.dedupe_key, item.snapshot
+        if item.artifact_type == "analysis":
+            wanted = snapshot.get("analysis_id")
+            if not isinstance(wanted, str) or wanted not in built:
+                dedupe_key, snapshot = _analysis_item(snapshot, report, principal)
+                if isinstance(wanted, str):
+                    built[wanted] = (dedupe_key, snapshot)
+            else:
+                dedupe_key, snapshot = built[wanted]
+        entries.append(
+            {"artifact_type": item.artifact_type, "dedupe_key": dedupe_key, "snapshot": snapshot, "note": item.note}
+        )
     # Enrichment edits the snapshots in place, so the manager stores what the
     # one companion scroll stamped.
-    _enrich_snapshots_thumbnails([(item.snapshot, item.artifact_type) for item in payload.items], report, principal)
+    _enrich_snapshots_thumbnails(
+        [(entry["snapshot"], entry["artifact_type"]) for entry in entries if entry["artifact_type"] != "analysis"],
+        report,
+        principal,
+    )
     result = rag.ensure_report_manager().add_items(
         report_id,
         principal.effective_owner,
-        items=[
-            {
-                "artifact_type": item.artifact_type,
-                "dedupe_key": item.dedupe_key,
-                "snapshot": item.snapshot,
-                "note": item.note,
-            }
-            for item in payload.items
-        ],
+        items=entries,
         collection=collection,
     )
     if result is None:
@@ -5887,7 +6090,7 @@ def add_report_items(
         result["skipped"],
     )
     op.record(
-        target=Target(kind="report_item", ids=[item.dedupe_key for item in payload.items], count=len(payload.items)),
+        target=Target(kind="report_item", ids=[entry["dedupe_key"] for entry in entries], count=len(entries)),
         criteria={
             "report_id": report_id,
             "added": result["added"],

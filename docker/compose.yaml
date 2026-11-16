@@ -113,6 +113,7 @@ services:
       INFERENCE_PROVIDER: ${INFERENCE_PROVIDER:-vllm}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:4000/v1}
       NEXTEXT_API_BASE: ${NEXTEXT_API_BASE:-http://nextext-backend:8000/api/v1}
+      WORKBENCH_API_BASE: ${WORKBENCH_API_BASE:-http://workbench-api:8000}
       RESPONSE_LANGUAGE: ${RESPONSE_LANGUAGE:-en}
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
@@ -158,6 +159,9 @@ services:
         aliases:
           - docint-backend
       inference-net:
+        aliases:
+          - docint-backend
+      workbench-net:
         aliases:
           - docint-backend
     healthcheck:
@@ -242,3 +246,6 @@ networks:
   edge-net:
     external: true
     name: ${EDGE_NET:-edge-net}
+  workbench-net:
+    external: true
+    name: ${WORKBENCH_NET:-workbench-net}

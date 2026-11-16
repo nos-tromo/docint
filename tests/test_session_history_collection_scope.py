@@ -13,7 +13,8 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine
+from agent_fakes import an_analysis
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from docint.core.state.base import Base
@@ -224,3 +225,118 @@ def test_history_lookup_does_not_leak_the_scope(
     session_manager.get_session_history("sess-a", "alice")
 
     assert scoped_rag.active_collection == ""
+
+
+#: An analysis id, as ``_finish_agent_turn`` mints one.
+ANALYSIS_ID = "a" * 32
+
+
+def _persist_turn_with_analysis(sm: SessionManager, session_id: str, owner: str) -> None:
+    """Persist one turn that kept an analysis, in a session pinned to the collection.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+        session_id (str): Conversation id to write into.
+        owner (str): Owning principal.
+    """
+    with sm._session_scope() as s:
+        conv = sm._load_or_create_convo(s, session_id, owner)
+        conv.collection_name = PINNED_COLLECTION
+        s.commit()
+
+    resp_mock = MagicMock()
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
+    sm._persist_turn(
+        session_id,
+        "Wer schreibt am meisten über den Hafen?",
+        resp_mock,
+        {"response": "user-a [1]."},
+        owner=owner,
+        analyses=[{**an_analysis(), "id": ANALYSIS_ID}],
+    )
+
+
+def test_an_analysis_is_found_only_by_its_owner(session_manager: SessionManager) -> None:
+    """Another owner, another session or an unknown id finds nothing; the owner also learns the pinned collection.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _persist_turn_with_analysis(session_manager, "session-1", "user-a")
+    with session_manager._session_scope() as s:
+        session_manager._load_or_create_convo(s, "session-2", "user-a")
+
+    stored = session_manager.get_analysis("session-1", ANALYSIS_ID, "user-a")
+    found = session_manager.find_analysis(ANALYSIS_ID, "user-a")
+
+    assert stored is not None and stored["id"] == ANALYSIS_ID
+    assert (stored["provenance"]["session_id"], stored["provenance"]["turn_idx"]) == ("session-1", 0)
+    assert found == (stored, PINNED_COLLECTION)
+    assert session_manager.get_analysis("session-1", ANALYSIS_ID, "user-b") is None
+    assert session_manager.find_analysis(ANALYSIS_ID, "user-b") is None
+    assert session_manager.get_analysis("session-2", ANALYSIS_ID, "user-a") is None
+    assert session_manager.get_analysis("session-1", "b" * 32, "user-a") is None
+    assert session_manager.find_analysis("b" * 32, "user-a") is None
+
+
+def _statements(sm: SessionManager) -> list[tuple[str, Any]]:
+    """Record the SQL the session manager sends from now on.
+
+    Args:
+        sm (SessionManager): The session manager under test.
+
+    Returns:
+        list[tuple[str, Any]]: Each statement and its parameters, filled in as they are sent.
+    """
+    sent: list[tuple[str, Any]] = []
+
+    def _record(_conn: Any, _cursor: Any, statement: str, parameters: Any, *_rest: Any) -> None:
+        sent.append((statement, parameters))
+
+    maker = sm._SessionMaker
+    assert maker is not None
+    event.listen(maker.kw["bind"], "before_cursor_execute", _record)
+    return sent
+
+
+def test_another_owners_analysis_is_not_read_at_all(session_manager: SessionManager) -> None:
+    """The owner, and for one session its id, are in the query's WHERE clause: a foreign row is never loaded.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    _persist_turn_with_analysis(session_manager, "session-1", "user-a")
+    sent = _statements(session_manager)
+
+    assert session_manager.find_analysis(ANALYSIS_ID, "user-b") is None
+    assert session_manager.get_analysis("session-1", ANALYSIS_ID, "user-b") is None
+
+    assert len(sent) == 2
+    assert all("user-b" in parameters for _statement, parameters in sent)
+    assert "session-1" in sent[1][1] and "session-1" not in sent[0][1]
+
+
+def test_a_legacy_unowned_analysis_is_found_by_no_owner_only(session_manager: SessionManager) -> None:
+    """An analysis of a session with no owner is read for ``None`` and for no one else.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    with session_manager._session_scope() as s:
+        session_manager._load_or_create_convo(s, "session-1", None)
+        s.commit()
+    session_manager._persist_turn(
+        "session-1",
+        "Wer schreibt am meisten über den Hafen?",
+        MagicMock(metadata={}, source_nodes=[]),
+        {"response": "Niemand."},
+        analyses=[{**an_analysis(), "id": ANALYSIS_ID}],
+    )
+
+    found = session_manager.find_analysis(ANALYSIS_ID, None)
+
+    assert found is not None and found[0]["id"] == ANALYSIS_ID
+    assert session_manager.get_analysis("session-1", ANALYSIS_ID, None) == found[0]
+    assert session_manager.find_analysis(ANALYSIS_ID, "user-a") is None
+    assert session_manager.get_analysis("session-1", ANALYSIS_ID, "user-a") is None

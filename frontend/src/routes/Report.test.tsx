@@ -8,6 +8,7 @@ import { useIngestJobsStore } from '@/stores/ingestJobs'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { captureDownloads, fileResponse } from '@/test/downloads'
+import { ANALYSIS, PNG_URI } from '@/test/analysis'
 
 const overview = {
   collection: 'docs',
@@ -1031,5 +1032,129 @@ describe('Report view — reports without a collection', () => {
     expect(screen.getByText('Select a collection to move a report into it.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Move to/ })).not.toBeInTheDocument()
     expect(calls.some((c) => c.startsWith('POST'))).toBe(false)
+  })
+})
+
+describe('Report view — analyses', () => {
+  const analysisItem = (id: number, snapshot: Record<string, unknown> = ANALYSIS as unknown as Record<string, unknown>) => ({
+    id,
+    artifact_type: 'analysis',
+    dedupe_key: `analysis:${snapshot.id ?? 'a1'}`,
+    position: id,
+    note: null,
+    snapshot,
+    created_at: null
+  })
+
+  beforeEach(() => {
+    useReportStore.setState({ activeReportId: 1 })
+    useUiStore.setState({ previewModal: null })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useReportStore.setState({ activeReportId: null })
+  })
+
+  it('renders analyses between chat answers and entity findings, charts as figures', async () => {
+    mockFetch({
+      ...reportDetail,
+      item_count: 3,
+      items: [
+        reportDetail.items[0],
+        analysisItem(20),
+        {
+          id: 21,
+          artifact_type: 'chat_answer',
+          dedupe_key: 'chat:session-1:0',
+          position: 0,
+          note: null,
+          snapshot: { user_text: 'Who posted most?', model_response: 'Alice.', sources: [] },
+          created_at: null
+        }
+      ]
+    })
+    renderReport()
+
+    expect(await screen.findByText('Posts per author')).toBeInTheDocument()
+    const headings = screen
+      .getAllByText(/^(Chat answers|Analyses|Entity findings)$/)
+      .map((element) => element.textContent)
+    expect(headings).toEqual(['Chat answers', 'Analyses', 'Entity findings'])
+    expect(screen.getByText('posts.csv (rows: 7, columns: 2)')).toBeInTheDocument()
+    const figure = screen.getByRole('img', { name: /image evidence/i })
+    expect(figure).toHaveAttribute('src', PNG_URI)
+    expect(screen.getByText('chart.png')).toBeInTheDocument()
+
+    await userEvent.click(figure)
+    expect(useUiStore.getState().previewModal).toEqual({ filename: 'chart.png', data_uri: PNG_URI })
+  })
+
+  it('names an untitled analysis, and shows every table of it', async () => {
+    const snapshot = {
+      ...ANALYSIS,
+      title: '',
+      tables: [
+        ...ANALYSIS.tables,
+        { name: 'tags.csv', columns: ['tag'], rows: [['pier']], row_count: 1, truncated: false }
+      ]
+    }
+    mockFetch({ ...reportDetail, items: [analysisItem(20, snapshot)] })
+    renderReport()
+
+    expect(await screen.findByText('Analysis')).toBeInTheDocument()
+    expect(screen.getByText(/posts\.csv \(rows: 7, columns: 2\)/)).toBeInTheDocument()
+    expect(screen.getByText(/tags\.csv \(rows: 1, columns: 1\)/)).toBeInTheDocument()
+  })
+
+  it('counts the columns a cut table had, not the ones it kept', async () => {
+    const snapshot = {
+      ...ANALYSIS,
+      tables: [{ name: 'wide.csv', columns: ['a', 'b'], column_count: 40, rows: [['1', '2']], row_count: 1, truncated: true }]
+    }
+    mockFetch({ ...reportDetail, items: [analysisItem(20, snapshot)] })
+    renderReport()
+
+    expect(await screen.findByText(/wide\.csv \(rows: 1, columns: 40\)/)).toBeInTheDocument()
+  })
+
+  it('renders only PNG charts, and every field as text', async () => {
+    const hostile = '<img src="x" onerror="alert(1)"><b>bold</b>'
+    const snapshot = {
+      ...ANALYSIS,
+      title: hostile,
+      tables: [{ name: hostile, columns: ['a'], rows: [], row_count: 0, truncated: false }],
+      charts: [
+        { name: 'svg.svg', data_uri: 'data:image/svg+xml;base64,PHN2Zy8+', bytes: 5 },
+        { name: 'photo.jpg', data_uri: 'data:image/jpeg;base64,/9j/4AAQ', bytes: 5 },
+        { name: 'remote.png', data_uri: 'https://example.test/remote.png', bytes: 5 },
+        { name: 'good.png', data_uri: PNG_URI, bytes: 12 }
+      ]
+    }
+    mockFetch({ ...reportDetail, items: [analysisItem(20, snapshot)] })
+    renderReport()
+
+    await screen.findByText(hostile)
+    const images = screen.getAllByRole('img', { name: /image evidence/i })
+    expect(images.map((img) => img.getAttribute('src'))).toEqual([PNG_URI])
+    expect(screen.getByText('good.png')).toBeInTheDocument()
+    expect(document.querySelector('b')).toBeNull()
+    expect(document.querySelector('img[onerror]')).toBeNull()
+  })
+
+  it('keeps two charts of one name apart', async () => {
+    const snapshot = {
+      ...ANALYSIS,
+      charts: [
+        { name: 'chart.png', data_uri: PNG_URI, bytes: 12 },
+        { name: 'chart.png', data_uri: PNG_URI, bytes: 12 }
+      ]
+    }
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockFetch({ ...reportDetail, items: [analysisItem(20, snapshot)] })
+    renderReport()
+
+    expect(await screen.findAllByRole('img', { name: /image evidence/i })).toHaveLength(2)
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/i)
   })
 })

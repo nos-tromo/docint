@@ -188,6 +188,8 @@ class AgentResult:
             counted.
         reasoning (str | None): Every round's reasoning in order, joined by blank lines; ``None``
             when there was none. Never logged.
+        analyses (list[dict[str, Any]]): What the turn's tools kept beyond their replies (see
+            ``ToolContext.artifacts``), in the order they were made; empty for a turn that kept none.
     """
 
     raw_text: str
@@ -197,6 +199,7 @@ class AgentResult:
     reason: str | None
     images_attached: int = 0
     reasoning: str | None = None
+    analyses: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1114,6 +1117,7 @@ class AgentLoop:
             reason=turn.reason,
             images_attached=turn.images.shown,
             reasoning="\n\n".join(turn.reasoning) or None,
+            analyses=list(turn.ctx.artifacts),
         )
 
     def _overflowed(self, turn: _Turn, cause: Exception) -> None:

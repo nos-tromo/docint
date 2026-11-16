@@ -204,4 +204,5 @@ def test_an_agent_step_is_named_by_an_action_the_client_knows() -> None:
         "keyword",
         "topics",
         "read",
+        "run_python",
     }

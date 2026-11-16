@@ -561,6 +561,8 @@ plain lookup.
     the text;
   - where `topics` is offered, its line (`agent_tools_topics.txt`), after the
     keyword lines;
+  - where `run_python` is offered, its line (`agent_tools_python.txt`), the
+    last of the tool lines;
   - the assessment rule while `ASSESSMENT_ENABLED` is on;
   - the conversation's summary block;
 - the offered tool schemas;
@@ -570,8 +572,9 @@ plain lookup.
 The room for tool replies is what these leave of the window, less a 5% margin
 and the answer's reserve: 1024 tokens, or 3072 when reasoning is on. With less
 than 1500 tokens of room no turn is built, and the plain path answers. One
-warning gives the numbers. If `topics` is offered and the room is under 1500,
-the turn is first built again without it (see [Topics](#topics)). If `keyword`
+warning gives the numbers. If `run_python` is offered and the room is under
+1500, the turn is first built again without it, then likewise without `topics`
+(see [Topics](#topics)). If `keyword`
 is offered and the room is still under 1500, the turn is built again with
 `keyword` on the text alone, then without it (see
 [Keyword checks](#keyword-checks)).
@@ -655,9 +658,9 @@ calls, says the round was sent again.
 
 | Target | Tools |
 |---|---|
-| `documents` | `search`, `keyword`, `topics`, `read` |
+| `documents` | `search`, `keyword`, `topics`, `run_python`, `read` |
 | `visual` | `search_images`, `keyframes`, `read` |
-| `all` | `search`, `search_images`, `keyframes`, `keyword`, `topics`, `read` |
+| `all` | `search`, `search_images`, `keyframes`, `keyword`, `topics`, `run_python`, `read` |
 
 `keyword` is offered only where the collection's indexes allow it (see
 [Keyword checks](#keyword-checks)), and `topics` only where the collection has
@@ -685,6 +688,11 @@ an active topic run with topics (see [Topics](#topics)).
 - **`topics([topic])`** lists the active topic run's topics with their sizes
   and shares, or shows one topic's chunks nearest its centre (see
   [Topics](#topics)).
+- **`run_python(code[, passages, title])`** runs the model's Python on the
+  passages shown so far, in workbench's sandbox (see
+  [Python on the evidence](#python-on-the-evidence)). Offered on a turn stored
+  in a session while workbench answers discovery, never on a scoped or visual
+  turn; the first tool given up when the room for tool replies is short.
 - **`read(n)`** shows passage `[n]` again, as much of it as one reply holds.
 
 A reply numbers only what it shows:
@@ -892,8 +900,8 @@ request's collection and filters.
 `TOPICS_ENABLED` is on and the collection's active run has topics. It is
 withheld from a `visual` turn, from a scoped one, which offers no tools, and
 from a turn whose filters cannot be compiled for Qdrant, since its counts and
-passages would then cover other material than the turn searches. It is the
-first tool given up for room: when the room for tool replies is under 1500
+passages would then cover other material than the turn searches. It is given
+up for room after `run_python`: when the room for tool replies is under 1500
 tokens with `topics` offered, the turn is built again without it, before
 `keyword` falls back to the text alone. Where `topics` is offered, the system
 prompt ends its tools guide with the topics line (`agent_tools_topics.txt`). A
@@ -936,6 +944,25 @@ stored listing step adds `total`, `filtered` and `topics`: one
 `[id, label, size]` per topic the listing showed. These are what the validator
 is given as topic checks (see
 [Answer, validation and storage](#answer-validation-and-storage)).
+
+### Python on the evidence
+
+`run_python` runs the model's Python on the passages shown so far, in a sandbox
+with no network. It gets `passages.json` (384 KiB, texts cut to 4000 characters)
+and, when the turn made such checks, `keyword_checks.json` (32 KiB) and
+`topics.json` (64 KiB). It runs once per round and twice per turn, within the
+shorter of `WORKBENCH_TIMEOUT` and the time left less 15 s (under 20 s nothing
+is sent); the run's own limit is that less 12 s, or workbench's cap if lower.
+The reply gives a head line, `stdout`, each table's shape and first five rows,
+the chart names, the tail of `stderr` and the analysis's number. A run that
+wrote a CSV table or a PNG chart is an analysis: two at most are stored per
+turn, `stdout` cut to 16,384 characters. The validator reads each as a computed
+fact, never a source: its title, the passages used, its tables' shapes and 600
+characters of `stdout`, within 1600 in all.
+
+Residual risks: those 600 characters are text the code printed, so their
+structure is defused but not their prose. Stored analyses grow the session
+database, by up to about 1.4 MB each, since charts are data URIs.
 
 ### Evidence and sources
 
@@ -1190,8 +1217,9 @@ answer without a separate source-backed part is labelled but not validated. An
 agent lookup is validated against the sources it cites, with the user's
 previous message shown ahead of the question. Either way the validator sees at
 most six sources: the first six when the answer cites none, or none when the
-turn holds keyword checks with a known count or topic checks, since such an
-answer rests on the checks. Agent turns never take the corrective retry.
+turn holds keyword checks with a known count, topic checks or analysis checks,
+since such an answer rests on the checks. Agent turns never take the corrective
+retry.
 
 In both modes the validator is also given the turn's keyword checks with a
 known count, as facts about the collection rather than sources: one line per

@@ -64,7 +64,7 @@ def allocate_with_floors(lengths: Sequence[int], floors: Sequence[int], budget: 
     return [grant + more for grant, more in zip(granted, extra, strict=True)]
 
 
-def _marker(hidden: int, total: int) -> str:
+def cut_marker(hidden: int, total: int) -> str:
     """Name a gap in a shortened text.
 
     Args:
@@ -92,7 +92,7 @@ def fit_with_marker(text: str, allowance: int) -> tuple[str, bool]:
     """
     if len(text) <= allowance:
         return (text, False)
-    return (f"{text[:allowance]}{_marker(len(text) - allowance, len(text))}", True)
+    return (f"{text[:allowance]}{cut_marker(len(text) - allowance, len(text))}", True)
 
 
 def _word_tail(text: str, allowance: int) -> str:
@@ -138,7 +138,7 @@ def fit_tail_with_marker(text: str, allowance: int) -> tuple[str, bool]:
             break
         kept = line + kept
     shown = kept.lstrip() or _word_tail(text, allowance)
-    marker = _marker(len(text) - len(shown), len(text))
+    marker = cut_marker(len(text) - len(shown), len(text))
     return (f"{marker}\n{shown}" if shown else marker, True)
 
 
@@ -230,9 +230,9 @@ def excerpt(text: str, anchors: Sequence[Sequence[int]], allowance: int) -> tupl
     cursor = 0
     for start, end in regions:
         if start > cursor:
-            parts.append(_marker(start - cursor, len(text)))
+            parts.append(cut_marker(start - cursor, len(text)))
         parts.append(text[start:end])
         cursor = end
     if cursor < len(text):
-        parts.append(_marker(len(text) - cursor, len(text)))
+        parts.append(cut_marker(len(text) - cursor, len(text)))
     return "".join(parts), True

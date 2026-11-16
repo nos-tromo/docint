@@ -1,9 +1,13 @@
 """Tests for report renderers (Markdown / HTML / PDF / JSON / CSV bundle)."""
 
 import base64
+import csv
+import html
 import io
+import itertools
 import json
 import re
+import time
 import zipfile
 from collections.abc import Sequence
 from typing import Any, cast
@@ -30,9 +34,9 @@ from docint.core.state import report_render as R
 from docint.utils.ui_strings import ui_string
 
 
-def _report() -> dict[str, Any]:
-    """A report dict shaped like ReportManager.get_report output."""
-    return {
+def _report(*extra_items: dict[str, Any]) -> dict[str, Any]:
+    """A report dict shaped like ReportManager.get_report output, with any ``extra_items`` after its three."""
+    report: dict[str, Any] = {
         "id": 1,
         "title": "Case Alpha",
         "collection_name": "docs",
@@ -109,6 +113,8 @@ def _report() -> dict[str, Any]:
             },
         ],
     }
+    report["items"].extend(extra_items)
+    return report
 
 
 def _empty() -> dict[str, Any]:
@@ -2116,5 +2122,760 @@ def test_pdf_draws_every_topic_and_its_summary(monkeypatch: pytest.MonkeyPatch) 
     document = html_cls(string=R.render_html(_single_item_report("topics", snapshot))).render()
     drawn = {word for words in words_drawn(document) for word in words}
     assert {f"Topic{i}" for i in range(40)} <= drawn
+    assert len(document.pages) > 1
+    assert text_beyond_the_page(document) == []
+
+
+# --------------------------------------------------------------------------- #
+# Analyses: code, output, tables, charts and one provenance line
+# --------------------------------------------------------------------------- #
+_JOB = "0123456789abcdef0123456789abcdef"
+
+
+def _png_bytes() -> bytes:
+    """A real 8 x 8 PNG, so WeasyPrint draws it."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (0, 128, 255)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+_PNG = _png_bytes()
+_PNG_URI = "data:image/png;base64," + base64.b64encode(_PNG).decode("ascii")
+
+
+def _analysis_snapshot(**over: Any) -> dict[str, Any]:
+    """A served analysis snapshot: one table, one chart, one source (invented data)."""
+    snapshot: dict[str, Any] = {
+        "schema": 1,
+        "id": "a1",
+        "title": "Posts per author",
+        "question": "Who wrote most about the harbour?",
+        "code": "import pandas as pd\nprint(len(pd.DataFrame()))",
+        "stdout": "2 authors",
+        "tables": [
+            {
+                "name": "counts.csv",
+                "columns": ["author", "posts"],
+                "rows": [["user-a", "12"], ["user-b", "7"]],
+                "row_count": 2,
+                "truncated": False,
+            }
+        ],
+        "charts": [{"name": "chart.png", "data_uri": _PNG_URI, "bytes": len(_PNG)}],
+        "provenance": {
+            "session_id": "s1",
+            "turn_idx": 3,
+            "collection": "docs",
+            "sources": [
+                {
+                    "citation_index": 1,
+                    "chunk_id": "p1",
+                    "file_hash": "f" * 64,
+                    "filename": "harbour-report.pdf",
+                    "page": 4,
+                }
+            ],
+            "inputs": {"passages": 1, "keyword_checks": 0, "topic_listings": 0},
+            "workbench": {"job_id": _JOB, "version": "0.2.0", "tool": "run_python"},
+            "created_at": "2026-11-15T10:00:00+00:00",
+        },
+    }
+    snapshot.update(over)
+    return snapshot
+
+
+ANALYSIS_ITEM: dict[str, Any] = {"id": 4, "artifact_type": "analysis", "note": None, "snapshot": _analysis_snapshot()}
+
+
+def _analysis_report(**over: Any) -> dict[str, Any]:
+    """A one-item report holding an analysis whose fields ``over`` replaces."""
+    return _single_item_report("analysis", _analysis_snapshot(**over))
+
+
+def _table(name: str, columns: list[Any], rows: list[Any]) -> dict[str, Any]:
+    """A stored table with the given name, header and rows."""
+    return {"name": name, "columns": columns, "rows": rows, "row_count": len(rows), "truncated": False}
+
+
+def _zip(report: dict[str, Any]) -> zipfile.ZipFile:
+    return zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(report)))
+
+
+def _csv_rows(zf: zipfile.ZipFile, name: str) -> list[list[str]]:
+    return list(csv.reader(io.StringIO(zf.read(name).decode("utf-8-sig"), newline="")))
+
+
+def test_the_analysis_section_sits_between_chat_and_entities() -> None:
+    """The section is registered between chat and entities, anchored, and numbered."""
+    order = [artifact_type for artifact_type, _ in R.SECTION_ORDER]
+    assert order == ["summary", "topics", "chat_answer", "analysis", "entity_finding", "hate_speech_finding"]
+    assert R.SECTION_ANCHOR[R.ARTIFACT_ANALYSIS] == "sec-analyses"
+    assert R.ARTIFACT_ANALYSIS in R._NUMBERED_SECTIONS
+
+
+def test_analyses_render_between_chat_and_entities_numbered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Markdown and HTML place the section between chat and entities, number the item and count it in the contents."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report(ANALYSIS_ITEM)
+    report["show_toc"] = True
+
+    md = R.render_markdown(report)
+    assert md.index("## Chat answers") < md.index("## Analyses") < md.index("## Entity findings")
+    assert "### #1 · Posts per author" in md
+    assert "- Analyses (1)" in md
+
+    htm = R.render_html(report)
+    assert htm.index('id="sec-chat"') < htm.index('id="sec-analyses"') < htm.index('id="sec-entities"')
+    assert '<h2 class="section" id="sec-analyses">Analyses</h2>' in htm
+    assert 'href="#sec-analyses">Analyses (1)</a>' in htm
+    section = htm.split('id="sec-analyses"')[1].split('id="sec-entities"')[0]
+    assert "#1 · Posts per author" in section
+
+
+def test_analyses_are_numbered_in_the_order_they_were_added(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each analysis carries its place in the section."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    second = {**ANALYSIS_ITEM, "id": 5, "snapshot": _analysis_snapshot(title="Second run")}
+    md = R.render_markdown(_report(ANALYSIS_ITEM, second))
+    assert md.index("### #1 · Posts per author") < md.index("### #2 · Second run")
+
+
+def test_md_renders_code_output_tables_charts_and_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Markdown shows the code, the output, each table, each chart and the one provenance line."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_report(ANALYSIS_ITEM))
+    assert "```python\nimport pandas as pd" in md and "| author | posts |" in md and "| user-a | 12 |" in md
+    assert "![chart.png](data:image/png;base64," in md and "harbour-report.pdf" in md and "0.2.0" in md
+    assert "**Question:** Who wrote most about the harbour?" in md
+    assert "**Code:**\n\n```python\nimport pandas as pd\nprint(len(pd.DataFrame()))\n```" in md
+    assert "**Output:**\n\n```\n2 authors\n```" in md
+    assert (
+        "**counts.csv** · 2 rows × 2 columns\n\n"  # noqa: RUF001
+        "| author | posts |\n| --- | --- |\n| user-a | 12 |\n| user-b | 7 |"
+    ) in md
+    assert f"![chart.png]({_PNG_URI})" in md
+    assert f"*Computed from: [1] harbour-report.pdf (Page 4)  ·  workbench 0.2.0, job {_JOB}*" in md
+
+
+def test_a_run_without_a_title_sources_or_output_renders_without_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a snapshot does not hold is left out; an untitled analysis gets the localized name."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _analysis_report(title=" ", stdout="", tables=[], charts=[], provenance={})
+    md = R.render_markdown(report)
+    assert "### #1 · Analysis\n" in md
+    assert "**Output:**" not in md and "Computed from" not in md and "workbench" not in md
+    htm = R.render_html(report)
+    assert "#1 · Analysis" in htm and "Computed from" not in htm
+    assert _csv_rows(_zip(report), "analyses.csv")[1] == ["", "", "", "Who wrote most about the harbour?", *[""] * 5]
+
+
+def test_the_provenance_line_reads_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headings, labels and the shape and provenance lines follow the report's language."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    md = R.render_markdown(_analysis_report())
+    assert "## Analysen" in md and "**Frage:**" in md and "**Code:**" in md and "**Ausgabe:**" in md
+    assert "**counts.csv** · 2 Zeilen × 2 Spalten" in md  # noqa: RUF001
+    assert f"*Berechnet aus: [1] harbour-report.pdf (Seite 4)  ·  workbench 0.2.0, Job {_JOB}*" in md
+    assert "#1 · Analyse" in R.render_markdown(_analysis_report(title=""))
+
+
+def test_md_escapes_a_tables_cells_and_a_charts_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cell stays on its row and cannot open a link or a tag; a chart's name cannot end its alt text."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    table = _table(
+        "t|x.csv",
+        ["a|b", "c"],
+        [["a|b", "x\ny"], ["<img src=x>", "[l](https://example.invalid/p.png)"], ["`q`", "back\\slash"]],
+    )
+    charts = [{"name": "x](y", "data_uri": _PNG_URI, "bytes": 1}]
+    md = R.render_markdown(_analysis_report(tables=[table], charts=charts))
+    assert "| a\\|b | c |" in md
+    assert "| a\\|b | x<br>y |" in md
+    assert "| \\<img src=x\\> | \\[l\\](https://example.invalid/p.png) |" in md
+    assert "| \\`q\\` | back\\\\slash |" in md
+    assert [line for line in md.splitlines() if line.startswith("![")] == [f"![x\\](y]({_PNG_URI})"]
+
+
+def test_md_escapes_the_title_question_and_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Text out of a snapshot or a document's file name opens no link, image or tag in Markdown."""
+    from markdown_it import MarkdownIt
+
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    provenance = _analysis_snapshot()["provenance"]
+    provenance["sources"][0]["filename"] = "![x](https://example.invalid/p.png).pdf"
+    md = R.render_markdown(
+        _analysis_report(
+            title="[t](https://example.invalid/t) <b>\nline",
+            question="![q](https://example.invalid/q.png)",
+            provenance=provenance,
+        )
+    )
+    assert "### #1 · \\[t\\](https://example.invalid/t) \\<b\\> line" in md
+    assert "**Question:** !\\[q\\](https://example.invalid/q.png)" in md
+    assert "!\\[x\\](https://example.invalid/p.png).pdf" in md
+    inline = [t for token in MarkdownIt("commonmark").parse(md) for t in token.children or []]
+    assert [t.type for t in inline if t.type in {"image", "link_open", "html_inline"}] == ["image"]
+
+
+@pytest.mark.parametrize(
+    ("text", "info", "expected"),
+    [
+        ("print(1)", "", ("```", "```")),
+        ("", "", ("```", "```")),
+        ("print(1)", "python", ("```python", "```")),
+        ("a ``` b", "python", ("````python", "````")),
+        ("```\nx\n```", "", ("````", "````")),
+        ("a````b", "", ("`````", "`````")),
+        ("`` ` ````` ``", "", ("``````", "``````")),
+    ],
+)
+def test_a_fence_is_one_backtick_longer_than_the_longest_run_inside(
+    text: str, info: str, expected: tuple[str, str]
+) -> None:
+    """The fence is at least three backticks and outlasts every run in what it encloses."""
+    assert R._fence(text, info=info) == expected
+
+
+def test_md_fences_outlast_the_backticks_inside(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code or output holding a fence cannot end its own block (a Markdown parser reads exactly two)."""
+    from markdown_it import MarkdownIt
+
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    code = "print('```')\n```\nprint('after')"
+    stdout = "````\nnot a block\n````"
+    md = R.render_markdown(_analysis_report(code=code, stdout=stdout, tables=[], charts=[]))
+    assert f"````python\n{code}\n````\n" in md
+    assert f"`````\n{stdout}\n`````\n" in md
+    fences = [token for token in MarkdownIt("commonmark").parse(md) if token.type == "fence"]
+    assert [token.content for token in fences] == [code + "\n", stdout + "\n"]
+
+
+def test_html_renders_a_table_within_the_budget_and_falls_back_past_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A table that fits is a table; a 500 x 32 table is its CSV in a pre block."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_analysis_report())
+    assert '<table class="analysis">' in htm
+    assert "<th>author</th>" in htm and "<td>user-a</td>" in htm and "<td>12</td>" in htm
+    assert "2 rows × 2 columns" in htm and '<pre class="csv">' not in htm  # noqa: RUF001
+
+    wide = _table("wide.csv", [f"c{i}" for i in range(32)], [[str(r * i) for i in range(32)] for r in range(500)])
+    htm = R.render_html(_analysis_report(tables=[wide]))
+    assert '<table class="analysis">' not in htm
+    assert '<pre class="csv">c0,c1,c2,' in htm and "500 rows × 32 columns" in htm  # noqa: RUF001
+
+
+def test_html_a_table_wider_than_the_cap_falls_back_to_its_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The column cap applies: 32 columns render as a table, 33 as CSV."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    columns = [f"c{i}" for i in range(R._TABLE_MAX_COLUMNS)]
+    narrow = R.render_html(_analysis_report(tables=[_table("n.csv", columns, [["1"] * len(columns)])]))
+    assert '<table class="analysis">' in narrow
+    wide = R.render_html(_analysis_report(tables=[_table("w.csv", [*columns, "extra"], [["1"] * (len(columns) + 1)])]))
+    assert '<table class="analysis">' not in wide and '<pre class="csv">' in wide
+
+
+def test_html_falls_back_to_csv_with_quoting_and_without_a_formula_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CSV a report shows is the stored cells, quoted, escaped and not guarded."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    monkeypatch.setattr(R, "_TABLE_CELL_BUDGET", 1)
+    table = _table("q.csv", ["a", "b"], [["=SUM(A1)", 'x,"y"'], ["<s>", "line\nbreak"]])
+    htm = R.render_html(_analysis_report(tables=[table]))
+    expected = html.escape('a,b\n=SUM(A1),"x,""y"""\n<s>,"line\nbreak"\n')
+    assert f'<pre class="csv">{expected}</pre>' in htm
+
+
+def test_one_budget_spans_chat_answers_and_analyses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cells a chat answer's table took are gone for an analysis's table."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    chat = {
+        "id": 1,
+        "artifact_type": "chat_answer",
+        "note": None,
+        "snapshot": {"user_text": "q", "model_response": _markdown_table(30, 332)},  # 9 990 cells
+    }
+    six_rows = _table("six.csv", ["a", "b"], [["x", "y"]] * 6)  # 12 cells; 10 are left
+    analysis = {"id": 2, "artifact_type": "analysis", "note": None, "snapshot": _analysis_snapshot(tables=[six_rows])}
+    report = {"id": 1, "title": "T", "collection_name": "c", "items": [chat, analysis]}
+
+    htm = R.render_html(report)
+    assert htm.count("<table>") == 1
+    assert '<table class="analysis">' not in htm and '<pre class="csv">a,b\nx,y\n' in htm
+
+    alone = R.render_html({**report, "items": [analysis]})
+    assert '<table class="analysis">' in alone and '<pre class="csv">' not in alone
+
+
+def test_html_analysis_tables_spend_the_budget_and_a_fallback_does_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A table that fits is charged; one that falls back leaves the budget as it was."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    monkeypatch.setattr(R, "_TABLE_CELL_BUDGET", 10)
+    tables = [
+        _table("a.csv", ["a", "b"], [["x", "y"]] * 6),  # 12 cells: falls back, the budget stays at 10
+        _table("b.csv", ["a", "b"], [["x", "y"]] * 3),  # 6 cells: fits, 4 are left
+        _table("c.csv", ["a", "b"], [["x", "y"]] * 2),  # 4 cells: fits, none are left
+        _table("d.csv", ["a", "b"], [["x", "y"]]),  # 2 cells: no room
+    ]
+    htm = R.render_html(_analysis_report(tables=tables))
+    assert htm.count('<table class="analysis">') == 2
+    assert htm.count('<pre class="csv">') == 2
+
+
+def test_html_escapes_cells_and_drops_a_chart_that_is_not_a_png(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing stored reaches the HTML as markup, and only a PNG data URI is drawn."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    hostile = "<script>alert(1)</script>"
+    charts = [
+        {"name": "svg", "data_uri": "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", "bytes": 1},
+        {"name": "remote", "data_uri": "https://example.invalid/x.png", "bytes": 1},
+        {"name": "jpeg", "data_uri": "data:image/jpeg;base64,AAAA", "bytes": 1},
+        {"name": "break", "data_uri": 'data:image/png;base64,AAAA" onerror="x', "bytes": 1},
+        {"name": "short", "data_uri": "data:image/png;base64,AAA", "bytes": 1},
+        {"name": "<ok>", "data_uri": _PNG_URI, "bytes": len(_PNG)},
+    ]
+    report = _analysis_report(
+        title="<b>t</b>",
+        question="<i>q</i>",
+        code="</pre>" + hostile,
+        stdout='<img src="file:///etc/hosts">',
+        tables=[_table("<n>.csv", [hostile], [[hostile]])],
+        charts=charts,
+    )
+    htm = R.render_html(report)
+    assert "<script>" not in htm and htm.count("&lt;script&gt;alert(1)&lt;/script&gt;") == 3
+    assert "<b>t</b>" not in htm and "<i>q</i>" not in htm and '<img src="file:' not in htm
+    assert htm.count("<img ") == 1 and htm.count("data:image/png;base64,") == 1
+    assert "image/svg+xml" not in htm and "example.invalid" not in htm and "onerror" not in htm
+    assert 'alt="&lt;ok&gt;"' in htm
+
+
+def test_the_zip_holds_the_analyses_index_their_tables_and_charts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """analyses.csv has one row each; each analysis's tables and charts sit in its folder."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    zf = _zip(_report(ANALYSIS_ITEM))
+    names = zf.namelist()
+    assert {"analyses.csv", "analysis-1/counts.csv", "analysis-1/chart.png"} <= set(names)
+    assert zf.read("analysis-1/chart.png") == _PNG
+    rows = _csv_rows(zf, "analyses.csv")
+    assert (
+        rows[0]
+        == list(R.ANALYSES_COLUMNS)
+        == [
+            "session_id",
+            "turn_idx",
+            "title",
+            "question",
+            "job_id",
+            "workbench_version",
+            "sources",
+            "tables",
+            "charts",
+        ]
+    )
+    assert rows[1] == [
+        "s1",
+        "3",
+        "Posts per author",
+        "Who wrote most about the harbour?",
+        _JOB,
+        "0.2.0",
+        "[1] harbour-report.pdf (Page 4)",
+        "analysis-1/counts.csv",
+        "analysis-1/chart.png",
+    ]
+    assert _csv_rows(zf, "analysis-1/counts.csv") == [["author", "posts"], ["user-a", "12"], ["user-b", "7"]]
+
+
+def test_the_zip_numbers_each_analysis_and_lists_one_row_each() -> None:
+    """Folders and rows follow the order the analyses were added."""
+    second = {**ANALYSIS_ITEM, "id": 5, "snapshot": _analysis_snapshot(title="Second run")}
+    zf = _zip(_report(ANALYSIS_ITEM, second))
+    assert {"analysis-1/counts.csv", "analysis-2/counts.csv", "analysis-2/chart.png"} <= set(zf.namelist())
+    assert [row[2] for row in _csv_rows(zf, "analyses.csv")[1:]] == ["Posts per author", "Second run"]
+
+
+def test_the_zip_guards_every_text_cell_against_formulas() -> None:
+    """Every text cell of every table and of the index is guarded, the header's too."""
+    table = _table("f.csv", ["=cmd", "-x", "ok"], [["=SUM(A1)", "+A1", "@x"], ["\t=1", "plain", "a=b"]])
+    snapshot = _analysis_snapshot(
+        title="=HYPERLINK(1)", question="@q", tables=[table], charts=[], provenance={"session_id": "-s"}
+    )
+    zf = _zip(_single_item_report("analysis", snapshot))
+    assert _csv_rows(zf, "analysis-1/f.csv") == [
+        ["'=cmd", "'-x", "ok"],
+        ["'=SUM(A1)", "'+A1", "'@x"],
+        ["'\t=1", "plain", "a=b"],
+    ]
+    row = _csv_rows(zf, "analyses.csv")[1]
+    assert row[0] == "'-s" and row[2] == "'=HYPERLINK(1)" and row[3] == "'@q"
+
+
+def test_a_cell_that_is_wholly_a_number_stays_a_number_in_the_zip() -> None:
+    """Negative numbers, signs and exponents are data; anything a spreadsheet could read as more is guarded."""
+    numbers = ["-4", "-0.25", "+3", "1e-5", ".5", "5.", "1E+10", "0", "-1"]
+    guarded = ["-2+3", "=1", "@x", "+A1", "--1", "-", "-4\n", "+1e", "-1,5", "-.", "+-1"]
+    table = _table("n.csv", ["-1", "+2", "=3"], [numbers[:3], numbers[3:6], numbers[6:], guarded[:3], guarded[3:6]])
+    table["rows"] += [guarded[6:9], [*guarded[9:], ""]]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=[table], charts=[])))
+    rows = _csv_rows(zf, "analysis-1/n.csv")
+    assert rows[0] == ["-1", "+2", "'=3"]
+    assert [cell for row in rows[1:4] for cell in row] == numbers
+    assert [cell for row in rows[4:] for cell in row if cell] == [f"'{cell}" for cell in guarded]
+
+
+def test_the_number_check_runs_in_linear_time_on_cells_the_sandbox_controls() -> None:
+    """A long digit run ending in a non-digit fails fast: a full 32 x 50 table of them is no CPU sink."""
+    cell = "1" * 499 + "x"
+    columns = [f"c{i}" for i in range(32)]
+    rows = [[cell] * 32 for _ in range(50)]
+    started = time.perf_counter()
+    text = R._table_csv(columns, rows, guard=True)
+    elapsed = time.perf_counter() - started
+    assert text.count(cell) == 32 * 50
+    assert elapsed < 0.5
+    started = time.perf_counter()
+    assert (
+        R._table_cell("1" * 499 + "e") == "1" * 499 + "e"
+        and R._table_cell("-" + "1" * 499 + "x") == "'-" + "1" * 499 + "x"
+    )
+    assert time.perf_counter() - started < 0.05
+
+
+def test_the_number_pattern_matches_what_the_first_one_did() -> None:
+    """The linear pattern is the same language as the ambiguous one it replaced, on every short string."""
+    first = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+    for length in range(7):
+        for chars in itertools.product("+-.0e1x\n", repeat=length):
+            text = "".join(chars)
+            assert bool(R._PLAIN_NUMBER.fullmatch(text)) == bool(first.fullmatch(text)), text
+
+
+@pytest.mark.parametrize(
+    ("name", "member"),
+    [
+        ("../x.csv", "analysis-1/x.csv"),
+        ("/etc/passwd", "analysis-1/passwd.csv"),
+        ("..\\..\\win.csv", "analysis-1/win.csv"),
+        ("a/b/c.csv", "analysis-1/c.csv"),
+        ("..", "analysis-1/_.csv"),
+        ("", "analysis-1/table.csv"),
+        ("na:me?.csv", "analysis-1/na_me_.csv"),
+        ("b", "analysis-1/b.csv"),
+        ("A" * 76 + ".bat" + "-pad.csv", "analysis-1/" + "A" * 76 + ".csv"),
+        ("run.hta", "analysis-1/run.csv"),
+        ("page.html.csv", "analysis-1/page.html.csv"),
+    ],
+)
+def test_the_zip_names_each_member_safely(name: str, member: str) -> None:
+    """No stored name can reach an archive path as a directory, an absolute path or a parent."""
+    snapshot = _analysis_snapshot(tables=[_table(name, ["a"], [["1"]])], charts=[])
+    zf = _zip(_single_item_report("analysis", snapshot))
+    assert [n for n in zf.namelist() if n.startswith("analysis-")] == [member]
+
+
+def test_the_zip_keeps_two_names_that_collide_apart() -> None:
+    """A name taken in the folder, in any case, gets a counter on its stem, before the fixed extension."""
+    tables = [_table(name, ["a"], [[name]]) for name in ("a.csv", "sub/a.csv", "A.csv", "b")]
+    charts = [{"name": name, "data_uri": _PNG_URI, "bytes": 1} for name in ("c.png", "x/c.png", "a.csv")]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=charts)))
+    members = sorted(n for n in zf.namelist() if n.startswith("analysis-"))
+    assert members == sorted(
+        [
+            "analysis-1/a.csv",
+            "analysis-1/a (2).csv",
+            "analysis-1/A (3).csv",
+            "analysis-1/b.csv",
+            "analysis-1/c.png",
+            "analysis-1/c (2).png",
+            "analysis-1/a.png",
+        ]
+    )
+    assert len({n.casefold() for n in members}) == len(members)
+    assert zf.read("analysis-1/a (2).csv").decode("utf-8-sig").splitlines() == ["a", "sub/a.csv"]
+    assert _csv_rows(zf, "analyses.csv")[1][7] == (
+        "analysis-1/a.csv; analysis-1/a (2).csv; analysis-1/A (3).csv; analysis-1/b.csv"
+    )
+
+
+def test_the_zip_keeps_names_that_differ_only_in_unicode_normalization_apart() -> None:
+    """A composed and a decomposed name unpack to one file on a disk that normalizes names."""
+    import unicodedata
+
+    names = [unicodedata.normalize("NFC", "caf\u00e9"), unicodedata.normalize("NFD", "caf\u00e9"), "CAF\u00c9"]
+    tables = [_table(name, ["a"], [[str(i)]]) for i, name in enumerate(names)]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=[])))
+    members = [n for n in zf.namelist() if n.startswith("analysis-")]
+    assert len(members) == 3
+    assert len({unicodedata.normalize("NFC", n).casefold() for n in members}) == 3
+    assert [n.rsplit(" (", 1)[-1] for n in members[1:]] == ["2).csv", "3).csv"]
+
+
+def test_a_counter_never_pushes_a_member_name_past_the_cap() -> None:
+    """Names sharing a long stem get their counters inside the same length limit as the first."""
+    stem = "s" * 120
+    tables = [_table(f"{stem}{i}.csv", ["a"], [[str(i)]]) for i in range(12)]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=[])))
+    members = [n.removeprefix("analysis-1/") for n in zf.namelist() if n.startswith("analysis-")]
+    assert len(members) == 12 and len({m.casefold() for m in members}) == 12
+    assert max(len(m) for m in members) == 80 and all(m.endswith(".csv") for m in members)
+
+
+def test_every_zip_member_ends_in_its_fixed_extension() -> None:
+    """A table is always .csv and a chart always .png, whatever extension or length the stored name had."""
+    tables = [_table(name, ["a"], [["1"]]) for name in ("x.html", "x.svg", "no-extension", "A" * 76 + ".bat-pad.csv")]
+    chart_names = ("x.html", "x.bat", "x.csv", "plot", "A" * 76 + ".html" + "-pad.png", "")
+    charts = [{"name": name, "data_uri": _PNG_URI, "bytes": 1} for name in chart_names]
+    zf = _zip(_single_item_report("analysis", _analysis_snapshot(tables=tables, charts=charts)))
+    members = [n for n in zf.namelist() if n.startswith("analysis-")]
+    assert len(members) == len(tables) + len(charts)
+    assert sorted(m.rsplit(".", 1)[-1] for m in members) == ["csv"] * len(tables) + ["png"] * len(charts)
+    assert "analysis-1/x.png" in members and "analysis-1/x (2).png" in members
+    assert all(len(m.removeprefix("analysis-1/")) <= 80 for m in members)
+    listed = _csv_rows(zf, "analyses.csv")[1]
+    assert all(path.endswith(".csv") for path in listed[7].split("; "))
+    assert all(path.endswith(".png") for path in listed[8].split("; "))
+
+
+def test_the_zip_skips_a_chart_that_is_not_a_png() -> None:
+    """A chart that is not a PNG data URI is neither written nor listed, nor drawn in Markdown."""
+    charts = [
+        {"name": "svg.png", "data_uri": "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", "bytes": 1},
+        {"name": "short.png", "data_uri": "data:image/png;base64,AAA", "bytes": 1},
+        {"name": "ok.png", "data_uri": _PNG_URI, "bytes": 1},
+    ]
+    report = _single_item_report("analysis", _analysis_snapshot(charts=charts))
+    zf = _zip(report)
+    assert [n for n in zf.namelist() if n.endswith(".png")] == ["analysis-1/ok.png"]
+    assert _csv_rows(zf, "analyses.csv")[1][8] == "analysis-1/ok.png"
+    assert R.render_markdown(report).count("](data:image/png") == 1
+
+
+def _cut_table(**over: Any) -> dict[str, Any]:
+    """A stored table that was cut: 3 of 2000 rows kept."""
+    table = _table("big.csv", ["a", "b"], [["1", "2"], ["3", "4"], ["5", "6"]])
+    return {**table, "row_count": 2000, "truncated": True, **over}
+
+
+def test_a_table_stored_cut_says_so_in_md_html_and_the_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caption names the rows shown; the index marks the table's path; a whole table says nothing."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _analysis_report(tables=[_cut_table(), _table("whole.csv", ["a"], [["1"]])])
+    md, htm = R.render_markdown(report), R.render_html(report)
+    assert "**big.csv** · 2000 rows × 2 columns · first 3 shown\n\n| a | b |" in md  # noqa: RUF001
+    assert "**whole.csv** · 1 rows × 1 columns\n\n" in md and md.count("shown") == 1  # noqa: RUF001
+    assert '<div class="analysis-table-name">big.csv · 2000 rows × 2 columns · first 3 shown</div>' in htm  # noqa: RUF001
+    assert '<div class="analysis-table-name">whole.csv · 1 rows × 1 columns</div>' in htm  # noqa: RUF001
+    assert htm.count("shown") == 1
+    cell = _csv_rows(_zip(report), "analyses.csv")[1][7]
+    assert cell == "analysis-1/big.csv (first 3 shown); analysis-1/whole.csv"
+
+
+def test_a_table_is_cut_when_flagged_or_when_it_shows_fewer_rows_than_it_had(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Either sign is enough: the flag alone (a cut cell or column) or a short row list."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    flagged = _table("flagged.csv", ["a"], [["1"], ["2"]])
+    short = {**_table("short.csv", ["a"], [["1"], ["2"]]), "row_count": 9}
+    whole = _table("whole.csv", ["a"], [["1"], ["2"]])
+    md = R.render_markdown(_analysis_report(tables=[{**flagged, "truncated": True}, short, whole]))
+    assert "**flagged.csv** · 2 rows × 1 columns · shown cut" in md  # noqa: RUF001
+    assert "**short.csv** · 9 rows × 1 columns · first 2 shown" in md  # noqa: RUF001
+    assert "**whole.csv** · 2 rows × 1 columns\n" in md and md.count("shown") == 2  # noqa: RUF001
+    assert "shown" not in R.render_markdown(_analysis_report(tables=[{**whole, "truncated": "yes"}]))
+
+
+def test_a_table_cut_in_its_columns_reports_the_columns_it_had(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every row is shown, so the label is "shown cut", and the shape counts the 40 columns the run had."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    wide = {**_table("wide.csv", ["a", "b"], [["1", "2"], ["3", "4"]]), "column_count": 40, "truncated": True}
+    report = _analysis_report(tables=[wide])
+    md, htm = R.render_markdown(report), R.render_html(report)
+    assert "**wide.csv** · 2 rows × 40 columns · shown cut\n\n| a | b |" in md  # noqa: RUF001
+    assert '<div class="analysis-table-name">wide.csv · 2 rows × 40 columns · shown cut</div>' in htm  # noqa: RUF001
+    assert "first" not in md
+    assert _csv_rows(_zip(report), "analyses.csv")[1][7] == "analysis-1/wide.csv (shown cut)"
+
+
+def test_a_table_cut_in_its_rows_and_columns_says_the_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When rows were cut the label names how many are shown, whatever else was cut."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    both = {**_cut_table(), "column_count": 40}
+    md = R.render_markdown(_analysis_report(tables=[both]))
+    assert "**big.csv** · 2000 rows × 40 columns · first 3 shown" in md  # noqa: RUF001
+
+
+@pytest.mark.parametrize("count", [None, 1, True, "40", float("nan")], ids=["none", "below", "bool", "text", "nan"])
+def test_a_column_count_that_cannot_be_trusted_falls_back_to_the_columns_kept(
+    monkeypatch: pytest.MonkeyPatch, count: Any
+) -> None:
+    """An older table, or a count below the columns kept or not a number, is counted by the columns it keeps."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    table = {**_table("t.csv", ["a", "b"], [["1", "2"]]), "column_count": count}
+    assert "**t.csv** · 1 rows × 2 columns\n" in R.render_markdown(_analysis_report(tables=[table]))  # noqa: RUF001
+
+
+def test_a_cut_table_reads_in_german(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The note follows the report's language."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+    report = _analysis_report(tables=[_cut_table()])
+    assert "**big.csv** · 2000 Zeilen × 2 Spalten · die ersten 3 gezeigt" in R.render_markdown(report)  # noqa: RUF001
+    assert "(die ersten 3 gezeigt)" in _csv_rows(_zip(report), "analyses.csv")[1][7]
+    wide = {**_table("wide.csv", ["a"], [["1"]]), "column_count": 40, "truncated": True}
+    assert "**wide.csv** · 1 Zeilen × 40 Spalten · Anzeige gekürzt" in R.render_markdown(  # noqa: RUF001
+        _analysis_report(tables=[wide])
+    )
+
+
+def _png_uri_of(data: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def test_a_chart_whose_bytes_are_not_a_png_is_dropped_in_every_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The URI can look right and carry an SVG, a GIF or noise; only the PNG signature lets a chart through."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    impostors = {
+        "svg.png": b'<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///etc/hosts"/></svg>',
+        "gif.png": b"GIF89a\x01\x00\x01\x00\x00\x00\x00;",
+        "noise.png": b"\x00\x01\x02\x03",
+        "almost.png": _PNG[:7],
+        "empty.png": b"",
+    }
+    charts = [{"name": name, "data_uri": _png_uri_of(data), "bytes": len(data)} for name, data in impostors.items()]
+    charts.append({"name": "ok.png", "data_uri": _PNG_URI, "bytes": len(_PNG)})
+    report = _analysis_report(charts=charts)
+    assert R.render_markdown(report).count("](data:image/png") == 1
+    htm = R.render_html(report)
+    assert htm.count("<img ") == 1 and "<svg" not in htm and "file:///" not in htm
+    zf = _zip(report)
+    assert [n for n in zf.namelist() if n.endswith(".png")] == ["analysis-1/ok.png"]
+    assert _csv_rows(zf, "analyses.csv")[1][8] == "analysis-1/ok.png"
+    assert R._analysis_charts(report["items"][0]["snapshot"]) == [("ok.png", _PNG_URI)]
+
+
+def test_json_keeps_the_stored_snapshot() -> None:
+    """JSON export is the stored snapshot, untouched."""
+    report = _report(ANALYSIS_ITEM)
+    assert json.loads(R.render_json(report))["items"][-1]["snapshot"] == _analysis_snapshot()
+    assert report["items"][-1]["snapshot"] == _analysis_snapshot()
+
+
+@pytest.mark.parametrize("artifact_type", ["Analysis", "ANALYSIS", "analysis ", " analysis", "analysis\n", "analyses"])
+def test_only_the_exact_analysis_type_renders_as_an_analysis(
+    monkeypatch: pytest.MonkeyPatch, artifact_type: str
+) -> None:
+    """A client-made type that differs in case or whitespace is dropped as an unknown type is."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report(artifact_type, _analysis_snapshot())
+    report["show_toc"] = True
+
+    md, htm = R.render_markdown(report), R.render_html(report)
+    assert "Analyses" not in md and "Posts per author" not in md and "```python" not in md
+    assert "sec-analyses" not in htm and "Posts per author" not in htm and '<pre class="' not in htm
+    names = _zip(report).namelist()
+    assert "analyses.csv" not in names and not any(name.startswith("analysis-") for name in names)
+    assert json.loads(R.render_json(report))["items"][0]["artifact_type"] == artifact_type
+
+
+def test_a_malformed_analysis_renders_what_it_can(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wrong types are skipped or made text; no format raises."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snapshot: dict[str, Any] = {
+        "title": 7,
+        "question": ["x"],
+        "code": None,
+        "stdout": 5,
+        "tables": [
+            "junk",
+            {"name": None, "columns": "ab", "rows": []},
+            {"name": "empty.csv", "columns": [], "rows": [["x"]]},
+            {"name": "nested.csv", "columns": ["a", 2, None], "rows": "junk"},
+            {
+                "name": "ok.csv",
+                "columns": ["a", 2, None],
+                "rows": ["junk", [1, None, {"k": 1}, "extra"], ["only"], None],
+                "row_count": "many",
+            },
+        ],
+        "charts": [3, {"name": None, "data_uri": None}, {"name": 5, "data_uri": _PNG_URI}, {"data_uri": ["x"]}],
+        "provenance": {"sources": ["x", {"filename": 5, "page": "p", "citation_index": True}], "workbench": "w"},
+    }
+    report = _single_item_report("analysis", snapshot)
+    md = R.render_markdown(report)
+    assert "### #1 · Analysis" in md and "| a | 2 |  |" in md and "| 1 |  | {'k': 1} |" in md
+    assert "| only |  |  |" in md and f"![]({_PNG_URI})" in md
+    htm = R.render_html(report)
+    assert '<table class="analysis">' in htm and "<td>only</td>" in htm
+    zf = _zip(report)
+    assert _csv_rows(zf, "analysis-1/ok.csv")[:3] == [["a", "2", ""], ["1", "", "{'k': 1}"], ["only", "", ""]]
+    assert "analysis-1/chart.png" in zf.namelist()
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        [1, 2],
+        "text",
+        {"tables": "x", "charts": {"a": 1}, "provenance": []},
+        {"tables": None, "charts": None, "provenance": None, "code": 3, "stdout": 5, "title": ["t"]},
+        {"provenance": {"sources": {"a": 1}, "workbench": {"version": 3, "job_id": None}, "session_id": {}}},
+    ],
+)
+def test_a_wrongly_typed_analysis_never_fails_the_report(snapshot: Any) -> None:
+    """A snapshot of the wrong shape never fails an export."""
+    report = _single_item_report("analysis", snapshot)
+    R.render_markdown(report)
+    R.render_html(report)
+    R.report_csv_bundle(report)
+    assert json.loads(R.render_json(report))["items"][0]["snapshot"] == snapshot
+
+
+def test_the_pdf_fetches_only_data_uris(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The PDF draws the chart and fetches no URL but data URIs; every other chart is dropped before layout."""
+    weasyprint_html()
+    from weasyprint import HTML
+    from weasyprint.urls import URLFetcher
+
+    fetched: list[str] = []
+
+    class Recording(URLFetcher):
+        @override
+        def fetch(self, url: str, headers: Any = None) -> Any:
+            fetched.append(url)
+            return super().fetch(url, headers)
+
+    def document(string: str) -> Any:
+        return HTML(string=string, url_fetcher=Recording(allowed_protocols={"data"}))
+
+    monkeypatch.setattr(R, "_load_weasyprint", lambda: (document, None))
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    charts = [
+        {"name": "file", "data_uri": "file:///etc/hosts", "bytes": 1},
+        {"name": "svg", "data_uri": "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", "bytes": 1},
+        {"name": "chart.png", "data_uri": _PNG_URI, "bytes": len(_PNG)},
+    ]
+    report = _analysis_report(
+        charts=charts, stdout='<img src="file:///etc/hosts"> <link href="https://example.invalid/x.css">'
+    )
+    pdf = R.render_pdf(report)
+    assert pdf.startswith(b"%PDF") and pdf.count(b"/Subtype /Image") == 1
+    assert fetched and all(url.startswith("data:image/png;base64,") for url in fetched)
+
+
+def test_pdf_lays_an_analysis_out_within_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Long code, long output and a wide table stay inside the page."""
+    html_cls = weasyprint_html()
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    code = "\n".join([f"value_{i} = '{'x' * 40}'" for i in range(60)] + ["z = '" + "y" * 400 + "'"])
+    wide = _table(
+        "wide.csv",
+        [f"column{i}" for i in range(6)],
+        [[f"cell{r}-{i}-" + "w" * 30 for i in range(6)] for r in range(40)],
+    )
+    report = _analysis_report(
+        code=code, stdout="line\n" * 80 + "o" * 400, tables=[wide, _table("a.csv", ["a"], [["1"]])]
+    )
+    document = html_cls(string=R.render_html(report)).render()
+    drawn = {word for words in words_drawn(document) for word in words}
+    assert {"Posts", "per", "author", "column0", "column5"} <= drawn
     assert len(document.pages) > 1
     assert text_beyond_the_page(document) == []

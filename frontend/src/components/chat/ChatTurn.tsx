@@ -1,14 +1,25 @@
 import { useId, useState } from 'react'
-import { DisclosureButton, DocumentsIcon, ImageIcon, InfoIcon, LayersIcon, SearchIcon, Spinner, WarningIcon } from '@infra/ui'
-import type { AgentAction, AgentReason, AgentStep, AgentTrail, ChatFinalEvent, Source } from '@/api/types'
+import {
+  DisclosureButton,
+  DocumentsIcon,
+  ImageIcon,
+  InfoIcon,
+  LayersIcon,
+  PlayIcon,
+  SearchIcon,
+  Spinner,
+  WarningIcon
+} from '@infra/ui'
+import type { AgentAction, AgentReason, AgentStep, AgentTrail, Analysis, AnalysisSummary, ChatFinalEvent, Source } from '@/api/types'
 import type { Strings } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { AnalysisCard } from './AnalysisCard'
 import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { MarkdownProse } from '@/components/common/MarkdownProse'
-import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
+import { analysisReportItem, chatAnswerSnapshot } from '@/lib/reportSnapshots'
 import { retrievalTargetUsed, type NamedTarget } from '@/lib/retrievalTargetUsed'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -218,6 +229,10 @@ function stepLabel(step: TrailStep, t: ReturnType<typeof useT>): string {
       return t('chat.agent_trail_read', { n: /\d+/.exec(step.detail)?.[0] ?? step.detail })
     case 'keyword':
       return keywordLabel(step, t)
+    case 'run_python':
+      return step.detail
+        ? t('chat.agent_trail_run_python', { title: step.detail })
+        : t('chat.agent_trail_run_python_untitled')
     case 'topics':
       // A listing names no topic; a read names the one it opened.
       if (!step.detail) return t('chat.agent_trail_topics_list')
@@ -263,6 +278,8 @@ function StepMarker({ action }: { action: AgentAction }) {
       return <SearchIcon className={className} />
     case 'topics':
       return <LayersIcon className={className} />
+    case 'run_python':
+      return <PlayIcon className={className} />
     default:
       return <SearchIcon className={className} />
   }
@@ -379,6 +396,13 @@ function ReasonNotice({ reason }: { reason: AgentReason }) {
   )
 }
 
+/** The analyses a turn kept: in full from its final frame, as summaries from its history. A malformed entry is left out. */
+function analysesOf(turn: ChatTurnData): Array<Analysis | AnalysisSummary> {
+  const analyses = turn.meta?.analyses
+  if (!Array.isArray(analyses)) return []
+  return analyses.filter((entry) => typeof entry === 'object' && entry !== null && typeof entry.id === 'string')
+}
+
 /** Says the answer carries the model's own judgement. */
 function AssessmentNotice({ trail }: { trail: AgentTrail }) {
   const t = useT()
@@ -438,6 +462,7 @@ export function ChatTurn({
   const answerKey =
     assessment && trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
   const targetUsed = retrievalTargetUsed(turn.meta)
+  const analyses = analysesOf(turn)
   return (
     <article className="space-y-3">
       <div className="rounded-md bg-muted px-4 py-2 self-end max-w-2xl ml-auto">
@@ -480,6 +505,15 @@ export function ChatTurn({
             )}
           </div>
         )}
+        {analyses.map((entry, i) => (
+          <AnalysisCard
+            key={entry.id}
+            entry={entry}
+            index={i + 1}
+            sessionId={sessionId || null}
+            inReport={reportDedupeKeys?.has(analysisReportItem(entry.id).dedupe_key) ?? false}
+          />
+        ))}
         {research.length > 0 && <FinishedTrail steps={research} />}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">

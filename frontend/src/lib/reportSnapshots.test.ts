@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  analysisReportItem,
   chatAnswerSnapshot,
   chunkTextOf,
   entityFindingSnapshot,
@@ -209,5 +210,13 @@ describe('reportSnapshots', () => {
       expect(snap).not.toHaveProperty('image_description')
       expect(snap).not.toHaveProperty('image_tags')
     }
+  })
+
+  it('analysisReportItem names the analysis by its id alone', () => {
+    expect(analysisReportItem('a1')).toEqual({
+      artifact_type: 'analysis',
+      dedupe_key: 'analysis:a1',
+      snapshot: { analysis_id: 'a1' }
+    })
   })
 })

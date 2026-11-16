@@ -596,6 +596,15 @@ TOPIC_CHECKS_HEADING = (
     "Topic checks (counts of chunks per topic and their share of the collection; facts about the collection, "
     "not sources):"
 )
+#: A turn's analysis checks as the validator is handed them: one line per analysis the turn's code ran.
+ANALYSIS_CHECKS = (
+    '- Analysis 1 "Posts je Autor": from passages [1], [2]; '
+    "tables counts.csv (2 rows × 2 columns); stdout: 2"  # noqa: RUF001
+)
+#: What heads them in the validator's prompt.
+ANALYSIS_CHECKS_HEADING = (
+    "Analysis checks (results of code run on the passages named; facts computed from those passages, not sources):"
+)
 #: The sources a validator is shown beside an answer that cites them.
 SOURCES: list[dict[str, Any]] = [{"text": "Der Hafenverein plant das Fest im Mai.", "citation_index": 1}]
 #: Coverage diagnostics a summary carries.
@@ -628,11 +637,13 @@ def test_an_answer_without_sources_or_checks_is_a_mismatch_the_model_is_not_aske
     """With nothing to ground it, an answer is mismatched by construction, as before.
 
     Args:
-        checks (str | None): The turn's keyword and topic checks: none.
+        checks (str | None): The turn's keyword, topic and analysis checks: none.
     """
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
-    result = RetrievalResult(answer="Ja.", sources=[], keyword_checks=checks, topic_checks=checks)
+    result = RetrievalResult(
+        answer="Ja.", sources=[], keyword_checks=checks, topic_checks=checks, analysis_checks=checks
+    )
 
     finalized = agent.finalize(result, Turn(user_input="q"))
 
@@ -661,16 +672,18 @@ def test_the_checks_follow_the_summary_diagnostics_and_sit_beside_the_cited_sour
 
 
 @pytest.mark.parametrize("diagnostics", [None, DIAGNOSTICS], ids=["no-diagnostics", "diagnostics"])
+@pytest.mark.parametrize("analysis_checks", [None, ""], ids=["no-analyses", "empty-analyses"])
 @pytest.mark.parametrize("topic_checks", [None, ""], ids=["no-topics", "empty-topics"])
 @pytest.mark.parametrize("checks", [None, ""], ids=["none", "empty"])
 def test_without_keyword_checks_the_prompt_is_byte_identical(
-    checks: str | None, topic_checks: str | None, diagnostics: dict[str, Any] | None
+    checks: str | None, topic_checks: str | None, analysis_checks: str | None, diagnostics: dict[str, Any] | None
 ) -> None:
-    """A turn without a check with a known count, or a topic check, is shown to the validator exactly as before.
+    """A turn without a check with a known count, a topic check or an analysis check is shown as before.
 
     Args:
         checks (str | None): The turn's keyword checks: none.
         topic_checks (str | None): The turn's topic checks: none.
+        analysis_checks (str | None): The turn's analysis checks: none.
         diagnostics (dict[str, Any] | None): Summary diagnostics, which keep their place.
     """
     agent = ResultValidationResponseAgent(enabled=True, llm=None)
@@ -682,6 +695,7 @@ def test_without_keyword_checks_the_prompt_is_byte_identical(
         summary_diagnostics=diagnostics,
         keyword_checks=checks,
         topic_checks=topic_checks,
+        analysis_checks=analysis_checks,
     )
 
     assert prompt == agent._build_prompt(
@@ -695,6 +709,7 @@ def test_without_keyword_checks_the_prompt_is_byte_identical(
     )
     assert CHECKS_HEADING not in prompt
     assert TOPIC_CHECKS_HEADING not in prompt
+    assert ANALYSIS_CHECKS_HEADING not in prompt
 
 
 def test_an_answer_resting_on_topic_checks_alone_is_validated_by_the_model() -> None:
@@ -735,3 +750,40 @@ def test_the_topic_checks_follow_the_keyword_checks_and_sit_beside_the_cited_sou
     sources_at = prompt.index("Retrieved sources:\nSource 1 [")
     assert prompt.index("Summary diagnostics:") < keyword_at < topics_at < sources_at
     assert NO_SOURCES_BESIDE_CHECKS not in prompt
+
+
+def test_analysis_checks_count_in_the_no_sources_guard() -> None:
+    """A figure an analysis computed is a fact to check the answer against, not an answer without evidence."""
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason": "ok"}')
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="Es gibt 2 Autoren [1] [2].", sources=[], analysis_checks=ANALYSIS_CHECKS)
+
+    finalized = agent.finalize(result, Turn(user_input="Wie viele Autoren gibt es?"))
+
+    assert llm.calls == 1
+    assert (finalized.validation_checked, finalized.validation_mismatch) == (True, False)
+    assert finalized.validation_reason is None
+
+
+def test_analysis_checks_show_under_their_own_heading() -> None:
+    """The analysis checks follow the keyword and topic checks under their heading, and stand in for sources."""
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+
+    alone = agent._build_prompt(query="q", answer="2 Autoren [1].", sources=[], analysis_checks=ANALYSIS_CHECKS)
+    beside = agent._build_prompt(
+        query="q",
+        answer="Das Fest ist im Mai [1].",
+        sources=SOURCES,
+        summary_diagnostics=DIAGNOSTICS,
+        keyword_checks=CHECKS,
+        topic_checks=TOPIC_CHECKS,
+        analysis_checks=ANALYSIS_CHECKS,
+    )
+
+    assert alone.endswith(
+        f"{ANALYSIS_CHECKS_HEADING}\n{ANALYSIS_CHECKS}\n\nRetrieved sources:\n{NO_SOURCES_BESIDE_CHECKS}"
+    )
+    topics_at = beside.index(f"{TOPIC_CHECKS_HEADING}\n{TOPIC_CHECKS}\n\n")
+    analyses_at = beside.index(f"{ANALYSIS_CHECKS_HEADING}\n{ANALYSIS_CHECKS}\n\n")
+    assert topics_at < analyses_at < beside.index("Retrieved sources:\nSource 1 [")
+    assert NO_SOURCES_BESIDE_CHECKS not in beside

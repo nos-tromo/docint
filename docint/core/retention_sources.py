@@ -83,6 +83,21 @@ def source_expiry(
     return None if days is None else now + timedelta(days=days)
 
 
+def _lists_collection_wide(inputs: Any) -> bool:
+    """Tell whether an analysis was handed keyword checks or topic listings, which describe the whole collection.
+
+    Args:
+        inputs (Any): The analysis's ``provenance.inputs``.
+
+    Returns:
+        bool: ``True`` when either count is not zero, or ``inputs`` or a count is malformed; a missing count is zero.
+    """
+    if not isinstance(inputs, Mapping):
+        return True
+    counts = [inputs.get(key, 0) for key in ("keyword_checks", "topic_listings")]
+    return any(type(count) is not int or count != 0 for count in counts)
+
+
 def report_item_sources(artifact_type: str, snapshot: Mapping[str, Any]) -> tuple[set[str], set[str], bool]:
     """Read which documents a report item draws on.
 
@@ -108,6 +123,20 @@ def report_item_sources(artifact_type: str, snapshot: Mapping[str, Any]) -> tupl
     if artifact_type in {"entity_finding", "hate_speech_finding"}:
         chunk = str(snapshot.get("chunk_id") or "").strip()
         return set(), ({chunk} if chunk else set()), not chunk
+    if artifact_type == "analysis":
+        raw = snapshot.get("provenance")
+        provenance: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+        sources = provenance.get("sources")
+        found: set[str] = set()
+        collection_wide = False
+        for source in sources if isinstance(sources, list) else []:
+            value = str(source.get("file_hash") or "").strip() if isinstance(source, Mapping) else ""
+            if value:
+                found.add(value)
+            else:
+                collection_wide = True
+        listed = "inputs" in provenance and _lists_collection_wide(provenance["inputs"])
+        return found, set(), collection_wide or not found or listed
     return set(), set(), True
 
 

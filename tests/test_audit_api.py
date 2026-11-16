@@ -10,7 +10,12 @@ which lands on the same stream) is verified by ``conftest.audit_stream``.
 
 import io
 import json
-from collections.abc import Iterator
+import subprocess
+import sys
+import textwrap
+import threading
+import time
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -18,7 +23,8 @@ from typing import Any
 import pytest
 from conftest import run_ingest
 from fastapi.testclient import TestClient
-from test_api import DummyRAG, _sse_frames
+from starlette.requests import Request as StarletteRequest
+from test_api import ANALYSIS_ID, STORED_ANALYSIS, DummyRAG, _sse_frames
 from typing_extensions import override
 
 import docint.core.api as api_module
@@ -27,8 +33,10 @@ from docint.core.entities.resolution import ResolutionSummary
 from docint.core.jobs import IngestJobManager
 from docint.core.rag import IngestStats
 from docint.core.search.fulltext import parse_keywords
+from docint.core.state.session_manager import SessionCollectionMismatchError
+from docint.utils.audit_disclose import Disclosure, DisclosureRefused, current_ledger, record_disclosure
 from docint.utils.audit_event import AuditEmitter, sha256_text
-from docint.utils.audit_forward import forward_headers
+from docint.utils.audit_forward import CHAT_REASON, forward_headers
 from docint.utils.audit_meter import TransferKey, count_transfer, staged_meter, take_staged
 from docint.utils.audit_runtime import PURPOSE_HEADER, encode_purpose
 from docint.utils.hashing import compute_file_hash
@@ -37,12 +45,18 @@ from docint.utils.translate_client import TranslateResult
 ALICE = {"X-Auth-User": "alice"}
 ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
+#: A workbench job id as the client reads it off an answer.
+JOB = "0" * 32
 
 
 class _FailingStream(io.StringIO):
-    """A stream that takes writes until ``fail`` is set, then raises like a full disk."""
+    """A stream that takes writes until ``fail`` is set, then raises like a full disk.
+
+    With ``refuse`` set it refuses only the lines that contain it.
+    """
 
     fail = False
+    refuse: str | None = None
 
     @override
     def write(self, s: str) -> int:
@@ -55,9 +69,9 @@ class _FailingStream(io.StringIO):
             int: Characters written.
 
         Raises:
-            OSError: Once ``fail`` is set.
+            OSError: Once ``fail`` is set, or for a line holding ``refuse``.
         """
-        if self.fail:
+        if self.fail or (self.refuse is not None and self.refuse in s):
             raise OSError("no space left on device")
         return super().write(s)
 
@@ -102,8 +116,11 @@ def client(rag: DummyRAG) -> Iterator[TestClient]:
 
 
 @contextmanager
-def _failing_chain() -> Iterator[_FailingStream]:
+def _failing_chain(refuse: str | None = None) -> Iterator[_FailingStream]:
     """Install, over the running app's chain, one whose stream fails every write.
+
+    Args:
+        refuse (str | None): Fail only the lines holding this text instead.
 
     Yields:
         _FailingStream: The failing stream.
@@ -113,12 +130,14 @@ def _failing_chain() -> Iterator[_FailingStream]:
     emitter.start()
     auditor = audit.Auditor(emitter)
     audit.install(auditor)
-    stream.fail = True
+    stream.fail = refuse is None
+    stream.refuse = refuse
     try:
         yield stream
     finally:
         audit.uninstall(auditor)
         stream.fail = False
+        stream.refuse = None
         auditor.close()
 
 
@@ -981,3 +1000,550 @@ def test_the_admin_listing_across_owners_is_an_admin_event(
     assert (event["action"], event["operation"]) == ("admin", "collections.list_all")
     assert event["target"] == {"kind": "collection", "count": 3}
     assert event["criteria"] == {"owners": 2}
+
+
+def _hand_over(point_ids: tuple[str, ...] = ("1", "2")) -> Disclosure:
+    """Record one ``run_python`` call in the turn's ledger, as the tool does before it sends.
+
+    Args:
+        point_ids (tuple[str, ...]): The points whose passages the call hands over.
+
+    Returns:
+        Disclosure: The call's disclosure handle.
+    """
+    return record_disclosure(
+        point_ids=list(point_ids), passages=len(point_ids), keyword_checks=1, topic_listings=0, data_bytes=2048
+    )
+
+
+class _PythonRAG(DummyRAG):
+    """``test_api``'s RAG double whose chat turns make one ``run_python`` call before they answer.
+
+    The call is recorded the way the tool records it, and the purpose it would state to workbench
+    is kept in ``forwarded``.
+    """
+
+    def __init__(self) -> None:
+        """Answer every call with ``JOB``, and let the turn succeed."""
+        super().__init__()
+        #: The job the call's answer names; ``None`` when no answer came.
+        self.job: str | None = JOB
+        #: Whether the turn fails after its call.
+        self.fail = False
+        self.forwarded: list[dict[str, str]] = []
+
+    def _run_python(self) -> None:
+        """Make the turn's call: state its purpose, record it, settle it.
+
+        Raises:
+            RuntimeError: After the call, when the turn is set to fail.
+        """
+        self.forwarded.append(forward_headers(system_reason=CHAT_REASON))
+        disclosure = _hand_over()
+        if self.job is None:
+            disclosure.unanswered()
+        else:
+            disclosure.answered(self.job)
+        if self.fail:
+            raise RuntimeError("secret detail of a failed turn")
+
+    def chat(self, question: str, **kwargs: Any) -> dict[str, Any]:
+        """Call workbench once, then answer as the double does.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The turn's parameters.
+
+        Returns:
+            dict[str, Any]: The double's answer.
+        """
+        self._run_python()
+        return super().chat(question, **kwargs)
+
+    def stream_chat(self, question: str, **kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Call workbench once, then stream as the double does.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The turn's parameters.
+
+        Yields:
+            str | dict[str, Any]: The double's tokens, then its final payload.
+        """
+        self._run_python()
+        yield from super().stream_chat(question, **kwargs)
+
+
+@pytest.fixture
+def python_rag(rag: DummyRAG, monkeypatch: pytest.MonkeyPatch) -> _PythonRAG:
+    """Put the double whose turns call workbench behind the app, in place of ``rag``.
+
+    Args:
+        rag (DummyRAG): The plain double it replaces.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        _PythonRAG: The double.
+    """
+    double = _PythonRAG()
+    monkeypatch.setattr(api_module, "rag", double)
+    return double
+
+
+_TURN = {"question": "How many posts name the meeting?", "collection": "alpha"}
+
+
+def test_a_turn_that_ran_python_records_one_disclose_per_call(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The call is a ``disclose`` beneath the turn's ``query``, by reference, before the answer's ``ai_call``.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    headers = {**ALICE, "X-Request-ID": "req-0005", PURPOSE_HEADER: encode_purpose("case-0001", "review")}
+
+    assert client.post("/query", json=_TURN, headers=headers).status_code == 200
+
+    query, disclose, answer = _ops(audit_stream)
+    assert [(e["action"], e["operation"]) for e in (query, disclose, answer)] == [
+        ("query", "chat.query"),
+        ("disclose", "chat.workbench"),
+        ("ai_call", "chat.answer"),
+    ]
+    assert disclose["parent_event_id"] == query["event_id"] and disclose["recipient"] == "workbench:run_python"
+    assert disclose["outcome"] == "ok"
+    assert disclose["target"] == {"kind": "chunk", "ids": ["1", "2"], "count": 2, "container": "alpha"}
+    assert {
+        k: disclose["criteria"][k]
+        for k in ("workbench_job", "passages", "keyword_checks", "topic_listings", "data_bytes")
+    } == {"workbench_job": JOB, "passages": 2, "keyword_checks": 1, "topic_listings": 0, "data_bytes": 2048}
+    assert "incomplete" not in disclose["criteria"]
+    assert (disclose["purpose"], disclose["request_id"]) == (query["purpose"], query["request_id"])
+    assert answer["parent_event_id"] == query["event_id"]
+
+
+def test_a_streamed_turn_discloses_before_its_final_frame(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The streamed turn writes the same events; a disclosure that cannot be written withholds the sources.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert "sources" in frames[-1]
+    query, disclose, answer = _ops(audit_stream)
+    assert [(e["action"], e["operation"]) for e in (query, disclose, answer)] == [
+        ("query", "chat.query"),
+        ("disclose", "chat.workbench"),
+        ("ai_call", "chat.answer"),
+    ]
+    assert disclose["parent_event_id"] == query["event_id"]
+
+    with _failing_chain(refuse='"action":"disclose"'):
+        refused = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert refused[-1] == {"error": "Internal server error", "code": "generation_failed"}
+    assert not any("sources" in frame for frame in refused)
+
+
+def test_a_call_that_got_no_answer_is_disclosed_as_an_error(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The data left even though no answer came: an ``error`` disclosure without a job, the turn still ``ok``.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    python_rag.job = None
+
+    assert client.post("/query", json=_TURN, headers=ALICE).status_code == 200
+
+    query, disclose, _answer = _ops(audit_stream)
+    assert query["outcome"] == "ok"
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "error")
+    assert "workbench_job" not in disclose["criteria"]
+    assert "incomplete" not in disclose["criteria"]
+
+
+def test_a_failed_turn_writes_its_disclosures_beneath_the_failure_event(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """A turn that fails after its call: a 500, the ``query`` as failed and the ``disclose`` beneath it.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    python_rag.fail = True
+
+    assert client.post("/query", json=_TURN, headers=ALICE).status_code == 500
+
+    query, disclose = _ops(audit_stream)
+    assert (query["operation"], query["outcome"]) == ("chat.query", "error")
+    assert query["criteria"]["incomplete"] is True
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "ok")
+    assert disclose["criteria"]["workbench_job"] == JOB
+    assert "secret detail" not in audit_stream.getvalue()
+
+
+def test_a_stream_whose_client_went_away_discloses_every_call_sent_and_sends_no_more(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client leaves while a call waits: the call is written at the seal, and the turn's next call is refused.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(api_module, "STREAM_DISCONNECT_POLL_INTERVAL_S", 0.05)
+    refused: list[DisclosureRefused] = []
+    finished = threading.Event()
+
+    def _gone(question: str, **_kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Send one call, wait while the client goes away, then try a second one."""
+        try:
+            _hand_over()
+            ledger = current_ledger()
+            deadline = time.monotonic() + 5.0
+            while ledger is not None and not ledger.sealed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            try:
+                _hand_over(("3",))
+            except DisclosureRefused as exc:
+                refused.append(exc)
+        finally:
+            finished.set()
+        yield {"response": "answer", "sources": [{"id": 3}], "session_id": "generated-session"}
+
+    async def _disconnected(_self: StarletteRequest) -> bool:
+        """Report the client as gone."""
+        return True
+
+    monkeypatch.setattr(python_rag, "stream_chat", _gone)
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", _disconnected)
+
+    with client.stream("POST", "/stream_query", json=_TURN, headers=ALICE) as response:
+        body = "".join(chunk.decode() for chunk in response.iter_raw())
+
+    assert finished.wait(5.0)
+    assert len(refused) == 1
+    assert '"sources"' not in body
+    query, disclose = _ops(audit_stream)
+    assert (query["outcome"], query["criteria"]["incomplete"]) == ("error", True)
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "error")
+    assert disclose["criteria"]["incomplete"] is True
+    assert "workbench_job" not in disclose["criteria"]
+    assert disclose["target"]["ids"] == ["1", "2"]
+
+
+@pytest.mark.parametrize("route", ["/query", "/stream_query"])
+@pytest.mark.parametrize(
+    ("headers", "forwarded"),
+    [
+        (
+            {"X-Request-ID": "req-0006", PURPOSE_HEADER: encode_purpose("case-0001", "review")},
+            {"X-Audit-Purpose": "case_ref=case-0001&reason=review", "X-Request-ID": "req-0006"},
+        ),
+        ({}, {"X-Audit-Purpose": "reason=docint+chat"}),
+    ],
+)
+def test_calls_to_workbench_state_the_turns_purpose(
+    client: TestClient, python_rag: _PythonRAG, route: str, headers: dict[str, str], forwarded: dict[str, str]
+) -> None:
+    """A turn's call to workbench states the turn's purpose and request id, else docint's reason for asking.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        route (str): The chat route.
+        headers (dict[str, str]): The turn's purpose and request id headers.
+        forwarded (dict[str, str]): What the call to workbench states.
+    """
+    response = client.post(route, json=_TURN, headers={**ALICE, **headers})
+
+    assert response.status_code == 200
+    if route == "/stream_query":
+        assert "sources" in _sse_frames(response.text)[-1]
+    assert python_rag.forwarded == [forwarded]
+
+
+def test_a_client_error_still_records_nothing(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session pinned to another collection is a 409 before any call, and the trail stays empty.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    def _pinned(session_id: str | None = None, owner: str | None = None) -> str:
+        raise SessionCollectionMismatchError(session_id="session-0001", pinned="beta", requested="alpha")
+
+    monkeypatch.setattr(python_rag, "start_session", _pinned)
+
+    response = client.post("/query", json={**_TURN, "session_id": "session-0001"}, headers=ALICE)
+
+    assert response.status_code == 409
+    assert python_rag.forwarded == []
+    assert _ops(audit_stream) == []
+
+
+def test_a_disclose_write_that_fails_part_way_counts_what_went_unwritten(
+    client: TestClient, python_rag: _PythonRAG, monkeypatch: pytest.MonkeyPatch, loguru_caplog: pytest.LogCaptureFixture
+) -> None:
+    """The turn fails closed at the call it cannot write; the log counts that call and those after it, by count only.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog (pytest.LogCaptureFixture): Loguru's WARNING and ERROR lines.
+    """
+
+    def _three_calls(question: str, **kwargs: Any) -> dict[str, Any]:
+        for point_ids in (("1", "2"), ("3",), ("4",)):
+            _hand_over(point_ids).answered(JOB)
+        return DummyRAG.chat(python_rag, question, **kwargs)
+
+    monkeypatch.setattr(python_rag, "chat", _three_calls)
+
+    with _failing_chain(refuse='"ids":["3"]'):
+        response = client.post("/query", json=_TURN, headers=ALICE)
+
+    assert response.status_code == 500
+    assert "2 disclosure(s) of audited operation 'chat.query' were not written" in loguru_caplog.messages
+
+
+def test_a_streamed_turn_that_fails_after_its_call_discloses_beneath_the_failure(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The stream ends with its error frame; the ``query`` is an ``error`` and the call's ``disclose`` sits beneath it.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    python_rag.fail = True
+
+    frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert frames == [{"error": "Internal server error", "code": "generation_failed"}]
+    query, disclose = _ops(audit_stream)
+    assert (query["operation"], query["outcome"]) == ("chat.query", "error")
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "ok")
+    assert disclose["criteria"]["workbench_job"] == JOB
+    assert "secret detail" not in audit_stream.getvalue()
+
+
+def test_a_client_gone_during_the_corrective_retry_is_no_ok_turn(
+    client: TestClient, rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry's answer reached no one: the turn is a failed, incomplete ``query``, never ``ok`` without sources.
+
+    Args:
+        client (TestClient): The running app.
+        rag (DummyRAG): The RAG double.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(api_module, "STREAM_DISCONNECT_POLL_INTERVAL_S", 0.05)
+    retrying, release, finished = threading.Event(), threading.Event(), threading.Event()
+    weak = "Evidence insufficient."
+
+    def _stream_chat(question: str, *, retrieval_query: str | None = None, **_kwargs: Any) -> Iterator[Any]:
+        """Answer weakly at once; on the retry, wait until the client has gone."""
+        final = {"response": weak, "sources": [{"id": 1}], "session_id": "session-1", "turn_idx": 0}
+        if retrieval_query is None:
+            yield weak
+            yield {**final, "retrieval_mode": "rewrite_compact"}
+            return
+        retrying.set()
+        try:
+            release.wait(5.0)
+        finally:
+            finished.set()
+        yield {**final, "response": "A grounded answer."}
+
+    async def _gone(_self: StarletteRequest) -> bool:
+        """Report the client as gone once the retry has started."""
+        return retrying.is_set()
+
+    rejected = {"validation_checked": True, "validation_mismatch": True, "validation_reason": "unsupported"}
+    monkeypatch.setattr(rag, "stream_chat", _stream_chat)
+    monkeypatch.setattr(api_module, "_validation_payload", lambda **_kwargs: dict(rejected))
+    monkeypatch.setattr(api_module, "_reformulated_query", lambda *_args: "reformulated query")
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", _gone)
+
+    try:
+        frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+    finally:
+        release.set()
+
+    assert finished.wait(5.0)
+    assert frames[-1] == {"retry": {"query": "reformulated query"}}
+    (query,) = _ops(audit_stream)
+    assert (query["operation"], query["outcome"], query["criteria"]["incomplete"]) == ("chat.query", "error", True)
+
+
+def test_a_retry_that_ends_without_an_answer_keeps_the_first_one_while_the_client_is_there(
+    client: TestClient, rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client is still connected: the final frame is the first answer, as after a retry that raised.
+
+    Args:
+        client (TestClient): The running app.
+        rag (DummyRAG): The RAG double.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    weak = "Evidence insufficient."
+
+    def _stream_chat(question: str, *, retrieval_query: str | None = None, **_kwargs: Any) -> Iterator[Any]:
+        """Answer weakly at once; the retry yields tokens and no final payload."""
+        if retrieval_query is not None:
+            yield "A grounded"
+            return
+        yield weak
+        yield {"response": weak, "sources": [{"id": 1}], "session_id": "session-1", "turn_idx": 0}
+
+    async def _here(_self: StarletteRequest) -> bool:
+        """Report the client as connected."""
+        return False
+
+    rejected = {"validation_checked": True, "validation_mismatch": True, "validation_reason": "unsupported"}
+    monkeypatch.setattr(rag, "stream_chat", _stream_chat)
+    monkeypatch.setattr(api_module, "_validation_payload", lambda **_kwargs: dict(rejected))
+    monkeypatch.setattr(api_module, "_reformulated_query", lambda *_args: "reformulated query")
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", _here)
+
+    frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert {"retry": {"query": "reformulated query"}} in frames
+    assert (frames[-1]["response"], frames[-1]["sources"]) == (weak, [{"id": 1}])
+    assert "retried" not in frames[-1]
+    query, answer = _ops(audit_stream)
+    assert [(e["operation"], e["outcome"]) for e in (query, answer)] == [("chat.query", "ok"), ("chat.answer", "ok")]
+    assert "incomplete" not in query["criteria"]
+
+
+#: Imports the app with the environment it is given and asks both chat routes, without a purpose, what they answer.
+_CHAT_PURPOSE_SCRIPT = textwrap.dedent(
+    """
+    import io
+    import json
+    import types
+
+    from fastapi.testclient import TestClient
+
+    import docint.core.api as api
+    from docint.core import audit
+    from docint.utils.env_cfg import load_audit_env
+
+    audit.open_audit_stream = lambda output: io.StringIO()
+    audit.install(audit.open_auditor(load_audit_env(), mode={}, heartbeat_interval_s=0))
+    unowned = types.SimpleNamespace(resolve=lambda owner, name: None)
+    api.rag = types.SimpleNamespace(ensure_collection_owner_manager=lambda: unowned)
+    client = TestClient(api.app, raise_server_exceptions=False)
+    body = {"question": "How many posts name the meeting?", "collection": "docs"}
+    print(json.dumps([client.post(route, json=body).status_code for route in ("/query", "/stream_query")]))
+    """
+)
+
+
+@pytest.mark.parametrize(
+    ("key", "statuses"),
+    [("x" * 40, [428, 428]), ("", [404, 404])],
+    ids=["workbench configured", "workbench not configured"],
+)
+def test_a_chat_turn_needs_a_purpose_to_disclose_only_while_workbench_is_configured(
+    tmp_path: Path, key: str, statuses: list[int]
+) -> None:
+    """``AUDIT_REQUIRE_PURPOSE=disclose`` refuses either chat route without a purpose only while workbench is set.
+
+    What a chat turn may record is read once, when the app is imported, so each case imports it in a process of
+    its own. Without workbench the routes pass the purpose rule and answer 404 for a collection nobody owns.
+
+    Args:
+        tmp_path (Path): A working directory without a ``.env``.
+        key (str): ``WORKBENCH_API_KEY``; empty leaves workbench unconfigured.
+        statuses (list[int]): What ``/query`` and ``/stream_query`` answer.
+    """
+    # Only what the import needs: a developer's exported WORKBENCH_* or AUDIT_* variables cannot flip it.
+    env = {
+        "HOME": str(tmp_path),
+        "AUDIT_REQUIRE_PURPOSE": "disclose",
+        "WORKBENCH_API_KEY": key,
+        "WORKBENCH_API_BASE": "http://workbench-api:8000",
+        "DOCINT_DEFAULT_IDENTITY": "user-a",
+        "DOCINT_EDGE_SECRET": "",
+        "DOCINT_AUTH_HEADER": "X-Auth-User",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", _CHAT_PURPOSE_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == statuses
+
+
+def test_reading_an_analysis_is_a_query_of_kind_analysis(
+    client: TestClient, rag: DummyRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading an analysis is a ``query`` naming it by id and its session; none of its content is recorded.
+
+    An analysis that is not found records nothing, as a client error.
+
+    Args:
+        client (TestClient): The running app.
+        rag (DummyRAG): The RAG double.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(rag.sessions, "get_session_collection", lambda session_id, owner=None: "alpha")
+    monkeypatch.setattr(
+        rag.sessions,
+        "get_analysis",
+        lambda session_id, analysis_id, owner: STORED_ANALYSIS if analysis_id == ANALYSIS_ID else None,
+    )
+
+    missing = client.get(f"/sessions/session-1/analyses/{'b' * 32}", params={"collection": "alpha"}, headers=ALICE)
+
+    assert missing.status_code == 404
+    assert _ops(audit_stream) == []
+
+    read = client.get(f"/sessions/session-1/analyses/{ANALYSIS_ID}", params={"collection": "alpha"}, headers=ALICE)
+
+    assert read.status_code == 200
+    (event,) = _ops(audit_stream)
+    assert (event["action"], event["operation"], event["outcome"]) == ("query", "session.analysis", "ok")
+    assert event["target"] == {"kind": "analysis", "ids": [ANALYSIS_ID], "count": 1, "container": "alpha"}
+    assert event["criteria"] == {"session_id": "session-1"}
+    trail = audit_stream.getvalue()
+    for content in ("Posts per author", "print(2)", "2 authors", "counts.csv", "Who wrote most about the harbour?"):
+        assert content not in trail

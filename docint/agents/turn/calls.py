@@ -132,6 +132,9 @@ class RoundCalls:
         reply, as one whose ``finish`` raises is, and counted as failed: the round's other calls
         still run.
 
+        The round begins first, for the tools that count rounds (see
+        :meth:`~docint.agents.turn.tools.ToolRegistry.begin_round`).
+
         Args:
             calls (Sequence[ToolCall]): The round's calls, as the model made them.
             ctx (ToolContext): The turn's context, read and never written.
@@ -139,6 +142,7 @@ class RoundCalls:
         Returns:
             PreparedRound: The prepared calls, and how many could not be prepared.
         """
+        self._registry.begin_round()
         prepared: list[PreparedCall] = []
         failed = 0
         for position, call in enumerate(calls):

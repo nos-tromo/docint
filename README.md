@@ -34,7 +34,7 @@ rerank, NER, CLIP, OCR, transcription, topic fits) leaves over HTTP.
 
 ```bash
 cp .env.example .env      # then point it at your inference endpoint
-make network              # external inference-net + data-net + edge-net
+make network              # external inference-net + data-net + edge-net + workbench-net
 make volumes              # external cache + state volumes
 make build
 make up-dev               # http://localhost:8080 (DOCINT_HOST_PORT to override)
