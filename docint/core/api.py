@@ -5952,7 +5952,7 @@ def _analysis_item(
     if physical is None or found is None or found[1] != physical:
         raise missing
     stored = found[0]
-    charts = stored.get("charts") or []
+    charts = stored.get("charts", [])
     if not isinstance(charts, list):
         raise missing
     sizes = [_chart_bytes(chart) for chart in charts]
@@ -6050,10 +6050,17 @@ def add_report_items(
     report = _get_owned_report(report_id, principal.effective_owner, collection)
     # An analysis is built from its stored row, and one that cannot be fails the batch before anything is added.
     entries: list[dict[str, Any]] = []
+    built: dict[str, tuple[str, dict[str, Any]]] = {}
     for item in payload.items:
         dedupe_key, snapshot = item.dedupe_key, item.snapshot
         if item.artifact_type == "analysis":
-            dedupe_key, snapshot = _analysis_item(snapshot, report, principal)
+            wanted = snapshot.get("analysis_id")
+            if not isinstance(wanted, str) or wanted not in built:
+                dedupe_key, snapshot = _analysis_item(snapshot, report, principal)
+                if isinstance(wanted, str):
+                    built[wanted] = (dedupe_key, snapshot)
+            else:
+                dedupe_key, snapshot = built[wanted]
         entries.append(
             {"artifact_type": item.artifact_type, "dedupe_key": dedupe_key, "snapshot": snapshot, "note": item.note}
         )

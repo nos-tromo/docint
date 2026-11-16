@@ -910,12 +910,12 @@ def _png_chart(size: int, name: str = "chart.png") -> dict[str, Any]:
     return {"name": name, "data_uri": "data:image/png;base64," + base64.b64encode(png).decode(), "bytes": size}
 
 
-def _stored_analysis(owner: str, physical: str, **overrides: Any) -> str:
+def _stored_analysis(owner: str, physical: str | None, **overrides: Any) -> str:
     """Store one analysis, with its conversation and turn, as the session layer does.
 
     Args:
         owner (str): The session's owner.
-        physical (str): The physical collection the session is pinned to.
+        physical (str | None): The physical collection the session is pinned to; ``None`` for an unpinned one.
         **overrides (Any): Keys of ``agent_fakes.an_analysis`` to set instead.
 
     Returns:
@@ -991,9 +991,11 @@ def test_an_analysis_is_added_from_its_stored_row(client: TestClient, monkeypatc
     [
         "other_owner",
         "other_collection",
+        "unpinned_session",
         "unknown_id",
         "no_id",
         "id_not_a_string",
+        "charts_not_a_list",
         "svg_chart",
         "unpadded_chart",
         "chart_over_cap",
@@ -1011,6 +1013,8 @@ def test_anything_else_is_not_found(client: TestClient, case: str) -> None:
     stored: dict[str, Any] | None = {
         "other_owner": {"owner": "someone-else", "physical": physical},
         "other_collection": {"owner": "test-operator", "physical": _physical("other")},
+        "unpinned_session": {"owner": "test-operator", "physical": None},
+        "charts_not_a_list": {"owner": "test-operator", "physical": physical, "charts": {}},
         "svg_chart": {"owner": "test-operator", "physical": physical, "charts": [svg]},
         "unpadded_chart": {"owner": "test-operator", "physical": physical, "charts": [unpadded]},
         "chart_over_cap": {"owner": "test-operator", "physical": physical, "charts": [_png_chart(CHART_CAP + 1)]},
@@ -1030,6 +1034,23 @@ def test_anything_else_is_not_found(client: TestClient, case: str) -> None:
     rid = _create(client)["id"]
 
     response = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id, title="forged"))
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert _report_items(client, rid) == []
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned", "unpinned"])
+def test_a_collection_that_no_longer_resolves_refuses_the_analysis(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, pinned: bool
+) -> None:
+    """Without a physical collection to compare, nothing matches, not even a session pinned to none."""
+    _own_collection("docs")
+    analysis_id = _stored_analysis("test-operator", _physical() if pinned else None)
+    rid = _create(client)["id"]
+    unowned = SimpleNamespace(resolve=lambda owner, logical: None)
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: unowned)
+
+    response = client.post(f"/reports/{rid}/items", json=_analysis_payload(analysis_id))
 
     assert (response.status_code, response.json()) == (404, NOT_FOUND)
     assert _report_items(client, rid) == []
@@ -1089,6 +1110,27 @@ def test_the_batch_route_builds_analyses_the_same_way(client: TestClient) -> Non
     assert [item["snapshot"].get("title") for item in items[:2]] == [STORED_TITLE, "Posts per network"]
     again = client.post(f"/reports/{rid}/items/batch", json={"items": [_analysis_payload(first)]})
     assert again.json() == {"added": 0, "skipped": 1, "updated": 0, "item_count": 3}
+
+
+def test_a_batch_reads_a_repeated_analysis_once(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entries that name one analysis share one read of its row, and still dedupe as before."""
+    _own_collection("docs")
+    analysis_id = _stored_analysis("test-operator", _physical())
+    rid = _create(client)["id"]
+    reads: list[str] = []
+    find = SessionManager.find_analysis
+
+    def _counted(self: SessionManager, wanted: str, owner: str | None) -> Any:
+        reads.append(wanted)
+        return find(self, wanted, owner)
+
+    monkeypatch.setattr(SessionManager, "find_analysis", _counted)
+
+    response = client.post(f"/reports/{rid}/items/batch", json={"items": [_analysis_payload(analysis_id)] * 3})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"added": 1, "skipped": 2, "updated": 0, "item_count": 1}
+    assert reads == [analysis_id]
 
 
 @pytest.mark.parametrize("route", ["items", "items/batch"])
