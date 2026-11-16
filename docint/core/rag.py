@@ -74,6 +74,7 @@ from docint.utils.env_cfg import (
     load_summary_env,
     load_topics_client_env,
     load_topics_env,
+    load_workbench_env,
     resolve_enable_hybrid,
 )
 from docint.utils.translate_client import translate as translate_text
@@ -150,6 +151,7 @@ from docint.agents.turn.passages import passage_label
 from docint.agents.turn.tools import ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
 from docint.agents.turn.topics import KEYWORDS_SHOWN, TopicLine, TopicPassages, TopicsListing, TopicsSource
+from docint.agents.turn.workbench_tool import PythonTurn, WorkbenchPythonTool
 from docint.core import collection_writes
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -301,6 +303,7 @@ from docint.utils.retry import (
 from docint.utils.text_budget import MATCH_SPANS_KEY, WINDOW_JOIN
 from docint.utils.timefmt import format_short
 from docint.utils.topics_client import TopicsClient
+from docint.utils.workbench_client import workbench_client
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -9453,6 +9456,7 @@ class RAG:
         window: ConversationWindow,
         keyword_fields: Sequence[str] | None = None,
         topics: bool = False,
+        python: bool = False,
     ) -> str:
         """Render an agent turn's system prompt.
 
@@ -9463,6 +9467,7 @@ class RAG:
             keyword_fields (Sequence[str] | None): The fields the turn's keyword tool offers, the
                 text first; ``None`` (or empty) when the turn offers no keyword tool.
             topics (bool): Whether the turn offers the topics tool.
+            python (bool): Whether the turn offers the run_python tool.
 
         Returns:
             str: ``agent_system`` with the target's tools guide, the assessment rule while
@@ -9470,7 +9475,8 @@ class RAG:
             is given, the guide is followed by the keyword line (``agent_tools_keyword``) and,
             when more than the text is offered, by a line naming the fields
             (``agent_tools_keyword_fields``). With ``topics``, the topics line
-            (``agent_tools_topics``) comes last. Without either the prompt is the target's alone.
+            (``agent_tools_topics``) follows, and with ``python`` the run_python line
+            (``agent_tools_python``) comes last. Without any of them the prompt is the target's alone.
         """
         rule = self._agent_prompt("agent_assessment_rule") if load_assessment_env().enabled else ""
         guide = self._agent_prompt(f"agent_tools_{retrieval_target}")
@@ -9481,6 +9487,8 @@ class RAG:
                 guide = f"{guide}\n{fields_line}"
         if topics:
             guide = f"{guide}\n{self._agent_prompt('agent_tools_topics')}"
+        if python:
+            guide = f"{guide}\n{self._agent_prompt('agent_tools_python')}"
         return self._agent_prompt("agent_system").format(
             tools_guide=guide,
             assessment_rule=rule,
@@ -9577,6 +9585,52 @@ class RAG:
                 return built
             reason = built
         logger.debug("The topics tool was withheld from an agent turn: {}", reason)
+        return None
+
+    def _agent_python_tool(
+        self,
+        retrieval_target: str,
+        *,
+        scoped: bool,
+        python_turn: PythonTurn | None,
+    ) -> WorkbenchPythonTool | None:
+        """Offer an agent turn the ``run_python`` tool, where its analyses can be stored and workbench is discovered.
+
+        Only a stored turn (``python_turn``) is offered it, since an analysis of a turn that is not
+        stored would never be seen again; a scoped turn answers in one round without tools, and a
+        visual turn answers from pictures. Discovery blocks the caller, up to its own limit, and is
+        cached, so this runs on the turn's worker thread, as :meth:`agent_turn` does. A withheld offer
+        is logged once at DEBUG by its reason, or as ``fault`` with the exception's type alone; the
+        client says by itself, once per change, when workbench is or is not discovered.
+
+        Args:
+            retrieval_target (str): Which evidence the turn may answer from.
+            scoped (bool): Whether the turn answers a pinned scope.
+            python_turn (PythonTurn | None): The stored turn the tool works for; ``None`` when the
+                turn is not stored.
+
+        Returns:
+            WorkbenchPythonTool | None: A tool for this turn, its timeout read now; ``None`` when withheld.
+        """
+        reason: str
+        if python_turn is None:
+            reason = "not_stored"
+        elif scoped:
+            reason = "scoped"
+        elif retrieval_target == "visual":
+            reason = "visual"
+        else:
+            try:
+                client = workbench_client()
+                discovery = None if client is None else client.discover()
+                timeout = load_workbench_env().timeout
+            except Exception as exc:
+                logger.debug("The run_python tool was withheld from an agent turn: fault ({})", type(exc).__name__)
+                return None
+            if client is not None and discovery is not None:
+                return WorkbenchPythonTool(client, discovery, python_turn, timeout_s=timeout)
+            reason = "not_configured" if client is None else "not_discovered"
+        logger.debug("The run_python tool was withheld from an agent turn: {}", reason)
         return None
 
     def _topics_source(
@@ -10213,6 +10267,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None,
         metadata_filters_active: bool,
         vector_store_kwargs: dict[str, Any] | None,
+        python_turn: PythonTurn | None = None,
     ) -> AgentTurn | None:
         """Build one agent turn over this request's engine, or none when its budget leaves no room.
 
@@ -10224,16 +10279,18 @@ class RAG:
         visual retriever compiles it. An unscoped ``all`` or ``documents`` turn is also offered
         ``keyword`` where the collection's indexes allow it (:meth:`_agent_keyword_matcher`),
         and ``topics`` where its collection has an active topic run (:meth:`_agent_topics`),
-        each with its lines in the system prompt. A tool's I/O runs on a search thread in a copy of
-        the request's context, so :meth:`collection_scope` holds there. The budget is measured
-        on the rendered system prompt, the offered schemas (none on a pinned scope, whose round
-        offers no tools), the window's messages, each with its envelope, and the message. When
-        the tools leave the turn less room for tool replies than it needs, the turn is built
-        again without topics, then with keyword on the text alone, and when even that does
-        not fit, without keyword; each rebuild changes the tools, prompt and budget alike, and
-        its INFO line gives the numbers. Only a visual turn shows the model the pictures it
-        finds, and only an unscoped turn asks a first round that looked nothing up again, with
-        the search note (``agent_search_first``).
+        and, for a stored turn (``python_turn``) while workbench is discovered,
+        ``run_python`` (:meth:`_agent_python_tool`), each with its lines in the system prompt.
+        A tool's I/O runs on a search thread in a copy of the request's context, so
+        :meth:`collection_scope` holds there. The budget is measured on the rendered system
+        prompt, the offered schemas (none on a pinned scope, whose round offers no tools), the
+        window's messages, each with its envelope, and the message. When the tools leave the
+        turn less room for tool replies than it needs, the turn is built again without
+        ``run_python``, then without topics, then with keyword on the text alone, and when even
+        that does not fit, without keyword; each rebuild changes the tools, prompt and budget
+        alike, and its INFO line gives the numbers. Only a visual turn shows the model the
+        pictures it finds, and only an unscoped turn asks a first round that looked nothing up
+        again, with the search note (``agent_search_first``).
 
         Args:
             engine (Any): The turn's query engine.
@@ -10248,6 +10305,8 @@ class RAG:
             metadata_filters_active (bool): Whether the request carries filters.
             vector_store_kwargs (dict[str, Any] | None): Native query kwargs, carrying the
                 request's compiled filter when it has one.
+            python_turn (PythonTurn | None): The stored turn ``run_python`` would work for;
+                ``None`` for a turn that is not stored, which is offered no such tool.
 
         Returns:
             AgentTurn | None: The turn, its ledger empty; ``None`` when the budget leaves less
@@ -10281,15 +10340,19 @@ class RAG:
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
         )
+        python_tool = self._agent_python_tool(retrieval_target, scoped=scoped, python_turn=python_turn)
         history_tokens = sum(message_cost(sent.content or "", ratio) for sent in window.messages())
         message_tokens = estimate_tokens(message, ratio)
 
-        def _offer(keyword: KeywordMatcher | None, topics: TopicsSource | None) -> tuple[ToolRegistry, str, TurnBudget]:
+        def _offer(
+            keyword: KeywordMatcher | None, topics: TopicsSource | None, python: WorkbenchPythonTool | None
+        ) -> tuple[ToolRegistry, str, TurnBudget]:
             """Build the turn's tools, its system prompt and the budget measured on both.
 
             Args:
                 keyword (KeywordMatcher | None): The keyword match to offer; ``None`` for none.
                 topics (TopicsSource | None): The topics to offer; ``None`` for none.
+                python (WorkbenchPythonTool | None): The run_python tool to offer; ``None`` for none.
 
             Returns:
                 tuple[ToolRegistry, str, TurnBudget]: The tools, the rendered system prompt and
@@ -10302,11 +10365,16 @@ class RAG:
                 list_keyframes=functools.partial(self._agent_list_keyframes, qdrant_filter=companion_filter),
                 keyword=keyword,
                 topics=topics,
+                python=python,
             )
-            # The keyword and topics lines only where the tools really offer them.
+            # The keyword, topics and run_python lines only where the tools really offer them.
             fields = keyword.fields if keyword is not None and "keyword" in registry.names else None
             system_prompt = self._agent_system_prompt(
-                retrieval_target, window, keyword_fields=fields, topics="topics" in registry.names
+                retrieval_target,
+                window,
+                keyword_fields=fields,
+                topics="topics" in registry.names,
+                python="run_python" in registry.names,
             )
             budget = TurnBudget(
                 ctx_window=int(self.openai_ctx_window),
@@ -10320,7 +10388,16 @@ class RAG:
             )
             return registry, system_prompt, budget
 
-        registry, system_prompt, budget = _offer(matcher, topics_source)
+        registry, system_prompt, budget = _offer(matcher, topics_source, python_tool)
+        if "run_python" in registry.names and not budget.available:
+            logger.info(
+                "The run_python tool was withheld from an agent turn: {} tokens of room with it, "
+                "under the {} one needs",
+                budget.round_room,
+                MIN_ROUND_ROOM,
+            )
+            python_tool = None
+            registry, system_prompt, budget = _offer(matcher, topics_source, python_tool)
         if "topics" in registry.names and not budget.available:
             logger.info(
                 "The topics tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
@@ -10328,7 +10405,7 @@ class RAG:
                 MIN_ROUND_ROOM,
             )
             topics_source = None
-            registry, system_prompt, budget = _offer(matcher, topics_source)
+            registry, system_prompt, budget = _offer(matcher, topics_source, python_tool)
         if matcher is not None and len(matcher.fields) > 1 and "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was offered on the text alone in an agent turn: {} tokens of room with its {} "
@@ -10338,14 +10415,14 @@ class RAG:
                 MIN_ROUND_ROOM,
             )
             matcher = KeywordMatcher(fields=(DEFAULT_KEYWORD_FIELD,), check=matcher.check, run=matcher.run)
-            registry, system_prompt, budget = _offer(matcher, topics_source)
+            registry, system_prompt, budget = _offer(matcher, topics_source, python_tool)
         if "keyword" in registry.names and not budget.available:
             logger.info(
                 "The keyword tool was withheld from an agent turn: {} tokens of room with it, under the {} one needs",
                 budget.round_room,
                 MIN_ROUND_ROOM,
             )
-            registry, system_prompt, budget = _offer(None, topics_source)
+            registry, system_prompt, budget = _offer(None, topics_source, python_tool)
         if not budget.available:
             logger.warning(
                 "An agent turn would have {} tokens of room for tool replies, under the {} one needs; none is built",

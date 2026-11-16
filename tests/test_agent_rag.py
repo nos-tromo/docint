@@ -5,11 +5,13 @@ Every message, passage, clip, filter and collection here is invented.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import threading
+import time
 import types
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
@@ -22,6 +24,7 @@ import openai
 import pytest
 from agent_fakes import (
     CLIP,
+    FakeWorkbench,
     KeywordClient,
     chunk,
     keyword_coverage,
@@ -48,7 +51,9 @@ from docint.agents.turn.loop import AgentResult
 from docint.agents.turn.probe import PROBE_SYSTEM_PROMPT, PROBE_TOOL, probe_tools
 from docint.agents.turn.tools import ReadTool, SearchTool, ToolContext, ToolRegistry
 from docint.agents.turn.toolsets import toolset_for
+from docint.agents.turn.workbench_tool import PythonTurn
 from docint.core import collection_writes
+from docint.core.api import _aiter_sync_gen
 from docint.core.ingest.preprocess import PreprocessPool, preprocess_key
 from docint.core.rag import (
     AGENT_LEDGER_CAP,
@@ -67,9 +72,11 @@ from docint.core.search.index import image_companion_name
 from docint.core.topics.gather import and_filters, eligible_filter
 from docint.core.topics.model import TopicInfo, TopicTable
 from docint.core.topics.store import TopicRun
+from docint.utils.audit_disclose import DisclosureLedger, binding
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.prompt_loader import load_localized_prompt
+from docint.utils.workbench_client import Discovery
 
 MESSAGE = "Wann öffnen die Stände beim Hafenfest, und hat jemand das Wetter am Sonntag erwähnt?"
 #: The physical name a request's collection scope binds.
@@ -791,6 +798,7 @@ def _turn(
     metadata_filter_rules: list[dict[str, Any]] | None = None,
     metadata_filters_active: bool = False,
     vector_store_kwargs: dict[str, Any] | None = None,
+    python_turn: PythonTurn | None = None,
 ) -> AgentTurn:
     """Build an agent turn the budget has room for.
 
@@ -805,6 +813,7 @@ def _turn(
         metadata_filter_rules (list[dict[str, Any]] | None): The request's raw filter rules.
         metadata_filters_active (bool): Whether the request carries filters.
         vector_store_kwargs (dict[str, Any] | None): Native query kwargs, the compiled filter in them.
+        python_turn (PythonTurn | None): The stored turn run_python works for; ``None`` for a turn that is not stored.
 
     Returns:
         AgentTurn: The turn.
@@ -819,6 +828,7 @@ def _turn(
         metadata_filter_rules=metadata_filter_rules,
         metadata_filters_active=metadata_filters_active,
         vector_store_kwargs=vector_store_kwargs,
+        python_turn=python_turn,
     )
     assert turn is not None
     return turn
@@ -4068,3 +4078,298 @@ def test_carried_passages_match_a_topic_rule_through_their_payload(monkeypatch: 
     topic_reads = [read for read in store.retrieved if read["with_payload"] == ["docint_topic", "docint_topic_run"]]
     assert [(read["collection_name"], read["ids"]) for read in topic_reads] == [(PHYSICAL, [SECTION_ID, 7])] * 2
     assert [scored.node.node_id for scored in plain] == [FRAME_ID]
+
+
+#: The line that says a turn was built without run_python for want of room, up to its numbers.
+NO_ROOM_FOR_PYTHON = "The run_python tool was withheld from an agent turn: "
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    """Run the async tests on asyncio only (trio is not a dependency).
+
+    Returns:
+        str: The backend.
+    """
+    return "asyncio"
+
+
+def _stored_turn() -> PythonTurn:
+    """Build the stored turn run_python works for, its deadline well ahead.
+
+    Returns:
+        PythonTurn: The turn.
+    """
+    return PythonTurn("user-a", "session-1", time.monotonic() + 600.0)
+
+
+def _workbench_ready(monkeypatch: pytest.MonkeyPatch) -> FakeWorkbench:
+    """Make the process-wide workbench client a double that has discovered ``run_python``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        FakeWorkbench: The double.
+    """
+    workbench = FakeWorkbench()
+    monkeypatch.setattr("docint.core.rag.workbench_client", lambda: workbench)
+    return workbench
+
+
+@pytest.mark.parametrize("target", ["all", "documents"])
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_a_stored_text_turn_is_offered_run_python_where_workbench_is_discovered(
+    monkeypatch: pytest.MonkeyPatch, code: str, target: str
+) -> None:
+    """The tool is offered and its schema paid for, and the prompt carries its line after the topics line.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+        target (str): The retrieval target.
+    """
+    rag = _rag(monkeypatch, code=code)
+    _workbench_ready(monkeypatch)
+
+    turn = _turn(rag, target=target, python_turn=_stored_turn())
+
+    registry = turn.loop._registry
+    prompt = turn.loop._system_prompt
+    assert "run_python" in registry.names
+    assert prompt == rag._agent_system_prompt(target, ConversationWindow(), python=True)
+    assert _prompt("agent_tools_python", code) in prompt
+    assert turn.budget.tool_schema_tokens == schema_tokens(registry.schemas(), 3.5)
+    assert turn.budget.system_tokens == estimate_tokens(prompt, 3.5)
+
+
+@pytest.mark.parametrize("case", ["no_turn", "scoped", "visual", "no_client", "not_discovered"])
+def test_run_python_is_offered_only_where_its_analyses_can_be_stored(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A turn that is not stored, scoped or visual, or has no workbench discovered, gets neither the tool nor its line.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        case (str): Why the tool is not offered.
+    """
+    rag = _rag(monkeypatch)
+    workbench = _workbench_ready(monkeypatch)
+    target, scoped, python_turn = "all", False, _stored_turn()
+    if case == "no_turn":
+        python_turn = None
+    elif case == "scoped":
+        scoped = True
+    elif case == "visual":
+        target = "visual"
+    elif case == "no_client":
+        monkeypatch.setattr("docint.core.rag.workbench_client", lambda: None)
+    else:
+        workbench.discovery = None
+
+    turn = _turn(rag, target=target, scoped=scoped, pinned_count=2 if scoped else 0, python_turn=python_turn)
+
+    assert "run_python" not in turn.loop._registry.names
+    assert turn.loop._system_prompt == _system_prompt("en", target, rule=False, summary=NO_HISTORY)
+    assert workbench.discoveries == (1 if case == "not_discovered" else 0)
+
+
+def test_a_failing_discovery_costs_a_turn_only_run_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discovery that raises is no reason to lose the turn: it goes without the tool, as it did before workbench.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    workbench = _workbench_ready(monkeypatch)
+
+    def _fail() -> Discovery:
+        """Fail as a client that broke would.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        raise RuntimeError("an invented fault")
+
+    workbench.discover = _fail  # type: ignore[method-assign]
+
+    turn = _turn(rag, python_turn=_stored_turn())
+
+    assert "run_python" not in turn.loop._registry.names
+    assert turn.loop._system_prompt == _system_prompt("en", "all", rule=False, summary=NO_HISTORY)
+
+
+def test_run_python_works_for_the_stored_turn_within_the_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tool the factory built calls workbench for the turn's owner and session, with the timeout read at the build.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("WORKBENCH_TIMEOUT", "40")
+    rag = _rag(monkeypatch)
+    workbench = _workbench_ready(monkeypatch)
+    turn = _turn(rag, python_turn=_stored_turn())
+    turn.ledger.add([programme_passage()])
+
+    with binding(DisclosureLedger()):
+        reply = turn.loop._registry.call(tool_call("run_python", code="print(1)"), _ctx(turn))
+
+    [call] = workbench.calls
+    assert (call["owner"], call["session_id"]) == ("user-a", "session-1")
+    assert (call["timeout_s"], call["time_limit_s"]) == (40.0, 28)
+    assert not reply.error
+
+
+def test_run_python_is_withheld_first_when_room_is_short(
+    monkeypatch: pytest.MonkeyPatch, loguru_caplog_info: Any
+) -> None:
+    """One token short of room for all of them, a turn gives up run_python and keeps topics and keyword in full.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        loguru_caplog_info (Any): Bridged INFO capture.
+    """
+
+    def _rag_with_everything(window: int | None = None) -> RAG:
+        """Build an engine whose collection is ready for keyword and topics, and whose workbench is discovered.
+
+        Args:
+            window (int | None): The chat model's context window; the default one when ``None``.
+
+        Returns:
+            RAG: The engine.
+        """
+        rag = _rag(monkeypatch) if window is None else _rag(monkeypatch, ctx_window=window)
+        _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
+        _topics_ready(monkeypatch, rag)
+        _workbench_ready(monkeypatch)
+        return rag
+
+    budget = _turn(_rag_with_everything(), python_turn=_stored_turn()).budget
+    window = _window_with_room(budget, MIN_ROUND_ROOM)
+    assert {"keyword", "topics", "run_python"} <= _turn(
+        _rag_with_everything(window), python_turn=_stored_turn()
+    ).loop._registry.names
+    loguru_caplog_info.clear()
+    short = _rag_with_everything(window - 1)
+
+    turn = _turn(short, python_turn=_stored_turn())
+
+    tools = {schema["function"]["name"]: schema["function"]["parameters"] for schema in turn.loop._registry.schemas()}
+    assert "run_python" not in tools and "topics" in tools
+    assert tools["keyword"]["properties"]["field"]["enum"] == list(KEYWORD_FIELDS)
+    assert turn.loop._system_prompt == short._agent_system_prompt(
+        "all", ConversationWindow(), keyword_fields=KEYWORD_FIELDS, topics=True
+    )
+    room = replace(budget, ctx_window=window - 1).round_room
+    messages = loguru_caplog_info.messages
+    assert [line for line in messages if line.startswith(NO_ROOM_FOR_PYTHON)] == [
+        f"{NO_ROOM_FOR_PYTHON}{room} tokens of room with it, under the {MIN_ROUND_ROOM} one needs"
+    ]
+    assert [line for line in messages if line.startswith(NO_ROOM_FOR_TOPICS)] == []
+    assert [line for line in messages if line.startswith(TEXT_ALONE_FOR_ROOM)] == []
+    assert _withheld_for_room(messages) == []
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
+def test_the_python_line_follows_the_topics_line(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    """The guide ends with the topics line, then the python line, in that order, and nothing else changes.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        code (str): The locale.
+    """
+    rag = _rag(monkeypatch, code=code)
+    window = ConversationWindow()
+
+    prompt = rag._agent_system_prompt("all", window, keyword_fields=KEYWORD_FIELDS, topics=True, python=True)
+    without = rag._agent_system_prompt("all", window, keyword_fields=KEYWORD_FIELDS, topics=True)
+
+    topics, python = _prompt("agent_tools_topics", code), _prompt("agent_tools_python", code)
+    assert f"\n{topics}\n{python}\n\n" in prompt
+    assert prompt.replace(f"\n{python}", "", 1) == without
+    alone = rag._agent_system_prompt("documents", window, python=True)
+    assert f"\n{python}\n\n" in alone and topics not in alone
+
+
+def test_without_workbench_a_turn_offers_what_it_always_did(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no workbench configured, a stored turn has the tools, prompt and budget of a turn that is not stored.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    def _built(python_turn: PythonTurn | None) -> AgentTurn:
+        """Build the turn of a collection ready for keyword and topics.
+
+        Args:
+            python_turn (PythonTurn | None): The stored turn, or ``None``.
+
+        Returns:
+            AgentTurn: The turn.
+        """
+        rag = _rag(monkeypatch)
+        _keyword_ready(monkeypatch, rag, fields=KEYWORD_FIELDS)
+        _topics_ready(monkeypatch, rag)
+        return _turn(rag, python_turn=python_turn)
+
+    stored, plain = _built(_stored_turn()), _built(None)
+
+    assert "run_python" not in stored.loop._registry.names
+    assert stored.loop._registry.names == plain.loop._registry.names
+    assert stored.loop._system_prompt == plain.loop._system_prompt
+    assert stored.budget == plain.budget
+
+
+@pytest.mark.anyio
+async def test_discovery_runs_off_the_event_loop_on_the_streaming_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discovery that blocks 0.3 s, built as a streamed turn is, leaves the loop free to run another coroutine.
+
+    The streaming routes drive ``agent_turn`` through ``_aiter_sync_gen``, which builds and iterates the turn on a
+    worker thread; the discovery blocks there, never on the loop.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = _rag(monkeypatch)
+    workbench = _workbench_ready(monkeypatch)
+    loop_thread = threading.get_ident()
+    discovered_on: list[int] = []
+
+    def _slow() -> Discovery:
+        """Block as a discovery does while workbench answers.
+
+        Returns:
+            Discovery: What workbench offers.
+        """
+        discovered_on.append(threading.get_ident())
+        time.sleep(0.3)
+        return Discovery(60, "0.2.0")
+
+    workbench.discover = _slow  # type: ignore[method-assign]
+    ticks = 0
+
+    async def _tick() -> None:
+        """Count a tick every 10 ms for as long as the loop is free."""
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    def _build() -> Iterator[AgentTurn]:
+        """Build the turn on the worker thread, as the streaming route does.
+
+        Yields:
+            AgentTurn: The turn.
+        """
+        yield _turn(rag, python_turn=_stored_turn())
+
+    ticker = asyncio.create_task(_tick())
+    try:
+        [turn] = [built async for built in _aiter_sync_gen(_build)]
+    finally:
+        ticker.cancel()
+
+    assert discovered_on and discovered_on[0] != loop_thread
+    assert ticks >= 10
+    assert "run_python" in turn.loop._registry.names

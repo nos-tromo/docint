@@ -39,6 +39,7 @@ from docint.agents.turn.history import (
 )
 from docint.agents.turn.loop import AgentResult, ToolsUnavailable
 from docint.agents.turn.scope import EvidenceDoesNotFit
+from docint.agents.turn.workbench_tool import PythonTurn
 from docint.agents.types import AgentProgress, AnswerMode, PriorTurn
 from docint.core.retention import ExpiringItem, inherit
 from docint.core.retention_sources import source_expiry
@@ -48,6 +49,7 @@ from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
 from docint.core.summary.units import source_file_hash
+from docint.utils.env_cfg import load_agent_env
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -1080,7 +1082,9 @@ class SessionManager:
         an empty one is still a scope. Its reply is an assessment when it carries the sentinel,
         labelled and stored with its boundary; otherwise a lookup, whose trail answers
         ``plain``. Closing it closes the loop, so a suspended round's model slot comes back at
-        once.
+        once. A stored turn (``persist``, with a session and an owner) is also handed what
+        ``run_python`` needs: its owner, its session and its deadline, the turn's start plus
+        ``AGENT_TIME_BUDGET_S``, the loop's own.
 
         Args:
             user_msg (str): The user's message, verbatim.
@@ -1122,6 +1126,12 @@ class SessionManager:
         )
         # A scoped engine fetches exactly the pinned chunks, numbered, whatever the query.
         pinned = list(engine.retrieve(QueryBundle(user_msg))) if scoped else None
+        # Only a stored turn can keep an analysis, so only it is offered ``run_python``.
+        python_turn = (
+            PythonTurn(owner, session_id, turn_started_at + load_agent_env().time_budget_s)
+            if persist and session_id is not None and owner is not None
+            else None
+        )
         turn = self.rag.agent_turn(
             engine,
             retrieval_target=retrieval_target,
@@ -1132,6 +1142,7 @@ class SessionManager:
             metadata_filter_rules=metadata_filter_rules,
             metadata_filters_active=metadata_filters_active,
             vector_store_kwargs=vector_store_kwargs,
+            python_turn=python_turn,
         )
         if turn is None:
             # The factory has logged the numbers.

@@ -5,7 +5,15 @@ from __future__ import annotations
 import re
 
 import pytest
-from agent_fakes import PLANNED_SYSTEM_TOKENS, ScriptedSearch, programme_passage, shown_numbers, tool_call, tool_context
+from agent_fakes import (
+    PLANNED_SYSTEM_TOKENS,
+    FakeWorkbench,
+    ScriptedSearch,
+    programme_passage,
+    shown_numbers,
+    tool_call,
+    tool_context,
+)
 from llama_index.core.schema import NodeWithScore
 
 from docint.agents.assessment.gate import MIN_CTX_WINDOW
@@ -14,9 +22,11 @@ from docint.agents.turn.keyword import KeywordMatcher, KeywordResult
 from docint.agents.turn.tools import SearchFn, ToolRegistry, ToolReply
 from docint.agents.turn.toolsets import toolset_for
 from docint.agents.turn.topics import TopicPassages, TopicsListing, TopicsSource
+from docint.agents.turn.workbench_tool import PythonTurn, WorkbenchPythonTool
 from docint.core.retrieval.visual import RETRIEVAL_TARGETS
 from docint.utils.embed_chunking import estimate_tokens
 from docint.utils.prompt_loader import load_localized_prompt
+from docint.utils.workbench_client import Discovery
 
 CLIP = "harbour_walk.webm"
 #: Most words a description may take; every round of every turn is sent all of them.
@@ -33,6 +43,8 @@ KEYWORD_FIELDS = ("text", "author", "network", "uuid")
 KEYWORD_TOKENS = 330
 #: Most topics may cost a turn: its schema plus its guide line in the locale where it costs most.
 TOPICS_TOKENS = 200
+#: Most run_python may cost a turn: its schema plus its guide line in the locale where it costs most.
+PYTHON_TOKENS = 400
 
 
 def _no_frames(key: str) -> list[NodeWithScore]:
@@ -113,6 +125,15 @@ def _topics() -> TopicsSource:
     return TopicsSource(listing=_listing, passages=_passages)
 
 
+def _python() -> WorkbenchPythonTool:
+    """Build the run_python tool of a stored turn over a workbench double that fails the test if it is called.
+
+    Returns:
+        WorkbenchPythonTool: The tool.
+    """
+    return WorkbenchPythonTool(FakeWorkbench(), Discovery(60, "0.2.0"), PythonTurn("user-a", "session-1", 1_000.0))
+
+
 def _toolset(
     target: str,
     *,
@@ -120,6 +141,7 @@ def _toolset(
     search_images: SearchFn | None = None,
     keyword: KeywordMatcher | None = None,
     topics: TopicsSource | None = None,
+    python: WorkbenchPythonTool | None = None,
 ) -> ToolRegistry:
     """Build the tools of a turn whose searches fail the test if they run, unless given.
 
@@ -129,6 +151,7 @@ def _toolset(
         search_images (SearchFn | None): The image search; one that raises if it runs when not given.
         keyword (KeywordMatcher | None): The keyword match the turn offers; none when not given.
         topics (TopicsSource | None): The topics the turn offers; none when not given.
+        python (WorkbenchPythonTool | None): The run_python tool the turn offers; none when not given.
 
     Returns:
         ToolRegistry: The tools the target offers.
@@ -140,6 +163,7 @@ def _toolset(
         list_keyframes=_no_frames,
         keyword=keyword,
         topics=topics,
+        python=python,
     )
 
 
@@ -238,6 +262,46 @@ def test_a_visual_turn_is_never_offered_topics_even_when_given_them() -> None:
 
     assert _offered(registry) == ["search_images", "keyframes", "read"]
     refused = registry.call(tool_call("topics"), tool_context())
+    assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
+
+
+@pytest.mark.parametrize(
+    ("target", "names"),
+    [
+        ("documents", ["search", "keyword", "topics", "run_python", "read"]),
+        ("all", ["search", "search_images", "keyframes", "keyword", "topics", "run_python", "read"]),
+    ],
+)
+def test_run_python_sits_after_topics_and_before_read(target: str, names: list[str]) -> None:
+    """Run_python follows topics and comes before read, on a documents or an all turn.
+
+    Args:
+        target (str): The retrieval target, one that searches text.
+        names (list[str]): The tools in the order the model is shown them.
+    """
+    registry = _toolset(target, keyword=_keyword_matcher(), topics=_topics(), python=_python())
+
+    assert _offered(registry) == names
+    assert registry.names == set(names)
+
+
+def test_run_python_stands_alone_between_search_and_read() -> None:
+    """Without keyword or topics, run_python still sits before read."""
+    assert _offered(_toolset("documents", python=_python())) == ["search", "run_python", "read"]
+    assert _offered(_toolset("documents", keyword=_keyword_matcher(), python=_python())) == [
+        "search",
+        "keyword",
+        "run_python",
+        "read",
+    ]
+
+
+def test_a_visual_turn_is_never_offered_run_python_even_when_given_it() -> None:
+    """Run_python works on text passages, so a visual turn keeps its tools and refuses a call to it as unknown."""
+    registry = _toolset("visual", keyword=_keyword_matcher(), topics=_topics(), python=_python())
+
+    assert _offered(registry) == ["search_images", "keyframes", "read"]
+    refused = registry.call(tool_call("run_python", code="print(1)"), tool_context())
     assert _is_refusal_naming_the_offered_tools(refused, registry), refused.text
 
 
@@ -357,7 +421,7 @@ def _descriptions() -> dict[str, str]:
     Returns:
         dict[str, str]: Each description, by the tool's name.
     """
-    registry = _toolset("all", keyword=_keyword_matcher(), topics=_topics())
+    registry = _toolset("all", keyword=_keyword_matcher(), topics=_topics(), python=_python())
     return {schema["function"]["name"]: schema["function"]["description"] for schema in registry.schemas()}
 
 
@@ -538,6 +602,31 @@ def test_topics_costs_a_turn_no_more_than_its_planned_tokens() -> None:
     )
 
 
+def _python_cost() -> tuple[int, int]:
+    """Estimate what the run_python tool costs a turn: its schema, and its guide line where it costs most.
+
+    Returns:
+        tuple[int, int]: The schema tokens and the guide tokens.
+    """
+    registry = _toolset("all", python=_python())
+    schema = schema_tokens([item for item in registry.schemas() if item["function"]["name"] == "run_python"], RATIO)
+    guide = max(
+        estimate_tokens("\n" + load_localized_prompt("agent_tools_python", default="", required=True, lang=code), RATIO)
+        for code in ("en", "de")
+    )
+    return schema, guide
+
+
+def test_run_python_costs_a_turn_no_more_than_its_planned_tokens() -> None:
+    """The run_python tool's schema and its guide line stay within the tokens planned for them."""
+    schema, guide = _python_cost()
+
+    assert schema + guide <= PYTHON_TOKENS, (
+        f"run_python costs {schema} schema tokens and {guide} prompt tokens, over the {PYTHON_TOKENS} planned; "
+        f"shorten its line before raising the plan."
+    )
+
+
 def test_a_thinking_model_keeps_room_for_a_text_only_keyword_in_the_smallest_window() -> None:
     """Keyword on the text alone (its line, no fields line) leaves a thinking model room to run a turn at 8k."""
     budget = _budget_with_keyword(reasoning=True, fields=("text",))
@@ -588,9 +677,10 @@ def test_a_thinking_model_has_no_room_left_for_keyword_with_all_four_fields_in_t
         ("keyframes", ("specific clip", "[n]")),
         ("keyword", ("count", "exact", "[n]")),
         ("topics", ("topics", "share", "[n]")),
+        ("run_python", ("python", "passages", "csv", "png")),
         ("read", ("rest of a passage",)),
     ],
-    ids=["search", "search_images", "keyframes", "keyword", "topics", "read"],
+    ids=["search", "search_images", "keyframes", "keyword", "topics", "run_python", "read"],
 )
 def test_a_description_says_what_the_tool_is_for(tool: str, anchors: tuple[str, ...]) -> None:
     """The model routes by what a description names: text by documents, pictures by what is seen, a clip, a passage.

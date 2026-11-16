@@ -45,6 +45,7 @@ from docint.agents.assessment.split import SENTINEL
 from docint.agents.history import build_prior_turn
 from docint.agents.turn.history import CarriedPassage, ConversationWindow, question_block
 from docint.agents.turn.loop import AgentLoop
+from docint.agents.turn.workbench_tool import PythonTurn
 from docint.agents.types import AgentProgress, PriorTurn
 from docint.core.rag import AGENT_LEDGER_CAP, RAG, AgentTurn, agent_llm_view
 from docint.core.state import session_manager as session_module
@@ -1329,6 +1330,89 @@ def test_the_turn_is_built_from_the_requests_engine_target_and_filters(session_m
     assert kwargs["metadata_filters_active"] is True
     assert kwargs["vector_store_kwargs"] is store_kwargs
     assert rag.build_query_engine.call_args.kwargs["streaming"] is True
+
+
+@pytest.mark.parametrize(
+    ("persist", "session_id", "expected"),
+    [
+        (True, "session-1", PythonTurn("user-a", "session-1", 100.0 + 120.0)),
+        (False, "session-1", None),
+        (True, None, None),
+    ],
+    ids=["stored", "stateless", "no_session"],
+)
+def test_only_a_stored_turn_hands_its_owner_session_and_deadline_to_the_tool(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+    persist: bool,
+    session_id: str | None,
+    expected: PythonTurn | None,
+) -> None:
+    """The factory gets the owner, the session and the turn's deadline of a stored turn, and nothing otherwise.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        persist (bool): Whether the turn is written.
+        session_id (str | None): The conversation, or ``None`` when stateless.
+        expected (PythonTurn | None): What the factory must be handed.
+    """
+    monkeypatch.setenv("AGENT_TIME_BUDGET_S", "120")
+    rag = cast(Any, session_manager.rag)
+    rag.agent_turn.return_value = None
+    if session_id is not None:
+        session_manager.start_session(session_id, owner="user-a")
+
+    stream = session_manager.stream_agent_turn(
+        QUESTION,
+        engine=MagicMock(),
+        scoped_node_ids=None,
+        coverage_unit="documents",
+        metadata_filters_active=False,
+        metadata_filter_rules=None,
+        vector_store_kwargs=None,
+        retrieval_target="all",
+        session_id=session_id,
+        owner="user-a",
+        replace_turn_idx=None,
+        turn_started_at=100.0,
+        persist=persist,
+    )
+    with pytest.raises(session_module.AgentTurnFallback):
+        next(stream)
+
+    assert rag.agent_turn.call_args.kwargs["python_turn"] == expected
+
+
+def test_a_stored_turn_without_an_owner_hands_the_tool_nothing(session_manager: SessionManager) -> None:
+    """A turn with no owning principal has no pseudonym to send, so it is offered no tool.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
+    rag = cast(Any, session_manager.rag)
+    rag.agent_turn.return_value = None
+    session_manager.start_session("session-1")
+
+    stream = session_manager.stream_agent_turn(
+        QUESTION,
+        engine=MagicMock(),
+        scoped_node_ids=None,
+        coverage_unit="documents",
+        metadata_filters_active=False,
+        metadata_filter_rules=None,
+        vector_store_kwargs=None,
+        retrieval_target="all",
+        session_id="session-1",
+        owner=None,
+        replace_turn_idx=None,
+        turn_started_at=100.0,
+        persist=True,
+    )
+    with pytest.raises(session_module.AgentTurnFallback):
+        next(stream)
+
+    assert rag.agent_turn.call_args.kwargs["python_turn"] is None
 
 
 def test_an_agent_turn_carries_the_models_reasoning(session_manager: SessionManager) -> None:

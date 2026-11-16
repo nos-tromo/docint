@@ -546,6 +546,27 @@ def test_a_topics_line_is_one_line_naming_only_topics(code: str) -> None:
 
 
 @pytest.mark.parametrize("code", ["en", "de"])
+def test_the_run_python_line_exists_in_every_locale(code: str) -> None:
+    """The run_python line is one line of plain text in each locale, naming the files, the folder and the tool.
+
+    Its braces list the keys of ``passages.json`` and are not a placeholder: the line is never formatted, so
+    the same keys reach the model in both locales.
+
+    Args:
+        code (str): The locale.
+    """
+    text = _prompt("agent_tools_python", code)
+
+    assert "\n" not in text, f"{code}/agent_tools_python.txt is more than one line"
+    assert "`" not in text, f"{code}/agent_tools_python.txt quotes in backticks"
+    assert text.startswith("- run_python(code, passages, title):"), f"{code}/agent_tools_python.txt opens otherwise"
+    for named in ("passages.json", "keyword_checks.json", "topics.json", "out/", "CSV", "PNG", "[n]"):
+        assert named in text, f"{code}/agent_tools_python.txt does not name {named}"
+    assert "{n, text, file, page, time, author, network, kind}" in text
+    assert _placeholders(text) == set()
+
+
+@pytest.mark.parametrize("code", ["en", "de"])
 def test_the_keyword_guide_makes_a_count_a_fact_not_a_source(code: str) -> None:
     """The guide keeps a count out of the citations and a zero out of any claim of absence, in the locale's words.
 

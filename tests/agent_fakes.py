@@ -33,7 +33,7 @@ from docint.agents.turn.toolsets import toolset_for
 from docint.agents.turn.topics import TopicsSource
 from docint.core.search.fields import SEARCH_FIELDS
 from docint.utils.audit_disclose import current_ledger
-from docint.utils.workbench_client import PNG_SIGNATURE, InlineFile, OutputFile, RunFailure, RunResult
+from docint.utils.workbench_client import PNG_SIGNATURE, Discovery, InlineFile, OutputFile, RunFailure, RunResult
 
 ScriptedRound = Sequence[dict[str, Any] | Exception] | Exception
 """One scripted model call: the raw chunks it streams, or the error its first pull raises.
@@ -800,6 +800,8 @@ class FakeWorkbench:
         calls (list[dict[str, Any]]): The arguments of every call, in order.
         ledger_states (list[int]): Per call, how many disclosures were in flight in the bound ledger as it
             went out; ``-1`` when none was bound.
+        discovery (Discovery | None): What :meth:`discover` answers; ``None`` for a workbench not usable now.
+        discoveries (int): How often :meth:`discover` was asked.
     """
 
     def __init__(self, *answers: RunResult | RunFailure) -> None:
@@ -812,6 +814,17 @@ class FakeWorkbench:
         self._scripted = bool(answers)
         self.calls: list[dict[str, Any]] = []
         self.ledger_states: list[int] = []
+        self.discovery: Discovery | None = Discovery(60, "0.2.0")
+        self.discoveries = 0
+
+    def discover(self) -> Discovery | None:
+        """Count the discovery and answer it.
+
+        Returns:
+            Discovery | None: ``discovery``.
+        """
+        self.discoveries += 1
+        return self.discovery
 
     def run_python(
         self,
