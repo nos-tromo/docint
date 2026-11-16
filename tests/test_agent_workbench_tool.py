@@ -10,7 +10,7 @@ import re
 import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from _pytest.logging import LogCaptureFixture
@@ -576,6 +576,32 @@ def test_the_time_limit_leaves_room_for_start_up_and_the_turn(left: float, time_
     assert (call["owner"], call["session_id"]) == ("user-a", "session-1")
 
 
+def test_the_tool_takes_its_timeout_from_its_caller_and_reads_no_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The call's deadline follows the timeout the tool was built with; a malformed environment is not its concern."""
+    monkeypatch.setenv("WORKBENCH_TIMEOUT", "not-a-number")
+    workbench = FakeWorkbench()
+    tool = WorkbenchPythonTool(
+        workbench,
+        DISCOVERY,
+        TURN,
+        timeout_s=30.0,
+        clock=lambda: TURN.deadline - 200.0,
+        slots=threading.BoundedSemaphore(2),
+    )
+    ctx = _context()
+    _three(ctx)
+
+    _run(tool, ctx, code=CODE)
+
+    [call] = workbench.calls
+    assert (call["timeout_s"], call["time_limit_s"]) == (30.0, 18)
+
+
+def test_a_refusal_has_a_text_for_every_kind_a_call_can_fail_with() -> None:
+    """Every failure kind of the client, and no_time, has its refusal; a new kind must be added here and there."""
+    assert set(wt.REFUSALS) == {*get_args(FailureKind), "no_time"}
+
+
 def test_two_calls_at_once_are_the_most_a_process_sends() -> None:
     """With both of the process's slots held, a call is refused at once and discloses nothing."""
     workbench = FakeWorkbench()
@@ -702,7 +728,10 @@ def test_the_reply_fits_and_names_the_analysis() -> None:
 
 @pytest.mark.parametrize(
     ("held", "picked", "named"),
-    [(64, None, "64 passages ([1] to [64])"), (800, list(range(1, 801, 2)), "and ")],
+    [
+        (64, None, r"64 passages \(\[1\] to \[64\]\)"),
+        (800, list(range(1, 801, 2)), r"400 passages \(\[1\], \[3\], .+\[\d+\] and \d+ more\)"),
+    ],
     ids=["all_64", "every_other_of_800"],
 )
 def test_the_note_ends_the_reply_however_many_passages_went(held: int, picked: list[int] | None, named: str) -> None:
@@ -717,7 +746,7 @@ def test_the_note_ends_the_reply_however_many_passages_went(held: int, picked: l
     assert ctx.budget.result_chars == 2_000
     assert len(reply.text) <= 2_000
     assert reply.text.endswith(ANALYSIS_NOTE.format(k=1))
-    assert named in reply.text.splitlines()[0]
+    assert re.search(named, reply.text.splitlines()[0])
 
 
 def test_an_analysis_is_kept_only_once_its_reply_is_written(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -771,6 +800,52 @@ def test_a_long_stdout_is_cut_in_the_middle() -> None:
     assert reply.text.endswith(ANALYSIS_NOTE.format(k=1))
 
 
+def test_a_title_over_eighty_characters_is_cut_to_eighty() -> None:
+    """The model's long title is normalised and cut to 80 characters, in the reply's detail and in the analysis."""
+    title = "Posts per author  in   May and June\n" * 4
+    expected = " ".join(title.split())[:80]
+    tool, ctx = _tool(FakeWorkbench()), _context()
+    _three(ctx)
+
+    reply = _run(tool, ctx, code=CODE, title=title)
+
+    assert len(expected) == 80
+    assert (reply.detail, ctx.artifacts[0]["title"]) == (expected, expected)
+
+
+@pytest.mark.parametrize(("stdout", "stderr"), [("2 authors", ""), ("", "warning"), ("2 authors", "warning")])
+def test_a_cut_output_is_named_without_saying_which_stream(stdout: str, stderr: str) -> None:
+    """Workbench says only that it cut an output, so the reply says that and never that stdout was cut."""
+    workbench = FakeWorkbench(run_result(stdout=stdout, stderr=stderr, truncated=True))
+    tool, ctx = _tool(workbench), _context()
+    _three(ctx)
+
+    reply = _run(tool, ctx, code=CODE)
+
+    assert "Output cut by workbench." in reply.text
+    assert "stdout (cut by workbench)" not in reply.text
+    assert reply.text.endswith(ANALYSIS_NOTE.format(k=1))
+
+
+def test_an_output_workbench_did_not_cut_is_not_said_to_be() -> None:
+    """A whole output carries no mention of a cut."""
+    tool, ctx = _tool(FakeWorkbench(run_result(truncated=False))), _context()
+    _three(ctx)
+
+    reply = _run(tool, ctx, code=CODE)
+
+    assert "cut by workbench" not in reply.text.lower()
+
+
+def test_ranges_name_runs_of_three_or_more_and_count_what_they_leave_out() -> None:
+    """A run of three or more is a range, shorter runs are named one by one, and a limit counts the rest."""
+    assert wt._ranges([*range(1, 11), 12, 14, 15]) == "[1] to [10], [12], [14], [15]"
+    assert wt._ranges([1, 2, 3, 5, 6, 7, 8]) == "[1] to [3], [5] to [8]"
+    assert wt._ranges([4]) == "[4]"
+    cut = wt._ranges(range(1, 400, 2), most=30)
+    assert cut == "[1], [3], [5], [7], [9], [11] and 194 more"
+
+
 def test_the_end_of_stderr_is_shown() -> None:
     """A run that wrote to stderr shows the end of it, at most 500 characters."""
     workbench = FakeWorkbench(run_result(stderr="warn " * 300 + "LAST"))
@@ -822,7 +897,7 @@ def test_an_empty_csv_is_no_table_and_the_reply_names_it() -> None:
 
 def test_tables_read_what_pandas_writes() -> None:
     """The BOM goes, the index column's empty name stays, short rows are padded and long rows cut."""
-    assert parse_table("x.csv", "﻿,author,posts\n0,user-a,12\n1,user-b\n") == {
+    assert parse_table("x.csv", "\ufeff,author,posts\n0,user-a,12\n1,user-b\n") == {
         "name": "x.csv",
         "columns": ["", "author", "posts"],
         "rows": [["0", "user-a", "12"], ["1", "user-b", ""]],
@@ -839,7 +914,7 @@ def test_tables_read_what_pandas_writes() -> None:
     header_only = parse_table("x.csv", "author,posts\n")
     assert header_only is not None and (header_only["rows"], header_only["row_count"]) == ([], 0)
     assert parse_table("x.csv", "") is None
-    assert parse_table("x.csv", "﻿") is None
+    assert parse_table("x.csv", "\ufeff") is None
 
 
 def test_tables_and_charts_are_bounded() -> None:
@@ -882,6 +957,66 @@ def test_a_chart_too_large_in_pixels_is_dropped() -> None:
 
     assert ctx.artifacts[0]["charts"] == []
     assert "huge.png" in reply.text and "too large in pixels" in reply.text
+
+
+def _png_with(**changes: bytes) -> bytes:
+    """Build the start of a PNG with one of its parts replaced.
+
+    Args:
+        **changes (bytes): ``length``, ``tag`` or ``header`` bytes to put in place of the valid ones.
+
+    Returns:
+        bytes: The image.
+    """
+    png = tiny_png()
+    parts = {"length": png[8:12], "tag": png[12:16], "header": png[16:]}
+    parts.update(changes)
+    return png[:8] + parts["length"] + parts["tag"] + parts["header"]
+
+
+@pytest.mark.parametrize(
+    "png",
+    [
+        tiny_png()[:8],
+        tiny_png()[:24],
+        tiny_png()[:32],
+        _png_with(tag=b"IDAT"),
+        _png_with(length=b"\x00\x00\x00\x0c"),
+        tiny_png(0, 480),
+        tiny_png(640, 0),
+    ],
+    ids=[
+        "signature_only",
+        "cut_after_size",
+        "cut_before_checksum",
+        "not_ihdr",
+        "length_not_13",
+        "no_width",
+        "no_height",
+    ],
+)
+def test_a_chart_whose_header_is_not_a_readable_png_is_dropped(png: bytes) -> None:
+    """A chart whose signature, first chunk or size does not read as a PNG header is dropped, and the reply says so."""
+    workbench = FakeWorkbench(run_result(texts=(), images=(("bad.png", png),)))
+    tool, ctx = _tool(workbench), _context()
+    _three(ctx)
+
+    reply = _run(tool, ctx, code=CODE)
+
+    assert ctx.artifacts == []
+    assert "bad.png (not a readable PNG)" in reply.text
+
+
+def test_a_png_header_with_its_checksum_is_a_chart() -> None:
+    """The smallest image that reads, 33 bytes with the header's checksum, is kept."""
+    assert len(tiny_png()) == 33
+    workbench = FakeWorkbench(run_result(texts=(), images=(("ok.png", tiny_png()),)))
+    tool, ctx = _tool(workbench), _context()
+    _three(ctx)
+
+    _run(tool, ctx, code=CODE)
+
+    assert [chart["name"] for chart in ctx.artifacts[0]["charts"]] == ["ok.png"]
 
 
 def test_the_analysis_carries_its_code_output_and_provenance() -> None:

@@ -40,14 +40,13 @@ import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from llama_index.core.schema import BaseNode, MetadataMode
 from loguru import logger
 
 from docint.agents.turn.keyword import DEFAULT_KEYWORD_FIELD, check_key
 from docint.agents.turn.tools import (
-    ErrorKind,
     ToolContext,
     ToolReply,
     ToolWork,
@@ -58,8 +57,15 @@ from docint.agents.turn.tools import (
 from docint.core.search.fields import UnknownSearchFieldError
 from docint.core.summary.units import source_file_hash, source_file_name
 from docint.utils.audit_disclose import DisclosureRefused, record_disclosure
-from docint.utils.env_cfg import load_workbench_env
-from docint.utils.workbench_client import PNG_SIGNATURE, Discovery, InlineFile, RunFailure, RunResult
+from docint.utils.text_budget import cut_marker, fit_tail_with_marker
+from docint.utils.workbench_client import (
+    PNG_SIGNATURE,
+    Discovery,
+    FailureKind,
+    InlineFile,
+    RunFailure,
+    RunResult,
+)
 
 #: The name the model calls the tool by, and workbench's tool it reaches.
 NAME = "run_python"
@@ -81,6 +87,8 @@ CALLS_PER_TURN = 2
 WORKBENCH_SLOTS = 2
 WORKBENCH_SLOT_POOL = threading.BoundedSemaphore(WORKBENCH_SLOTS)
 
+#: Seconds a call may take when its caller names no other, as ``WORKBENCH_TIMEOUT`` defaults.
+DEFAULT_TIMEOUT_S = 75.0
 #: Seconds of the turn kept for what follows a run.
 TURN_RESERVE_S = 15.0
 #: Fewest seconds a call needs; with less left nothing is sent.
@@ -136,7 +144,9 @@ BAD_PASSAGES_REPLY = (
     "passages must be a list of the numbers of passages shown before, such as [1, 3]; "
     "leave it out to use every passage shown."
 )
-REFUSALS: Mapping[str, str] = {
+#: Why a call sent nothing, or what a failed one means: the client's kinds, and ``no_time``.
+RefusalKind = FailureKind | Literal["no_time"]
+REFUSALS: Mapping[RefusalKind, str] = {
     "no_time": "not run: too little of this turn's time is left for a run; answer from the passages shown.",
     "no_capacity": "not run: workbench is busy; call it again in your next round, or answer from the passages shown.",
     "unavailable": "workbench did not answer; answer from the passages shown.",
@@ -146,6 +156,10 @@ REFUSALS: Mapping[str, str] = {
     ),
 }
 
+_BOM = "\ufeff"
+# A PNG's signature, the IHDR chunk's length, tag and 13 bytes of data, and its checksum.
+_PNG_HEADER_BYTES = 33
+_IHDR_LENGTH = b"\x00\x00\x00\x0d"
 _STDERR_CHARS = 500
 _ROWS_SHOWN = 5
 _ROW_LINE_CHARS = 200
@@ -253,10 +267,10 @@ class _NotSent:
     """A call whose fetch sent nothing, and why.
 
     Attributes:
-        kind (ErrorKind): ``no_time``, ``no_capacity`` or ``unavailable``.
+        kind (RefusalKind): ``no_time``, ``no_capacity`` or ``unavailable``.
     """
 
-    kind: ErrorKind
+    kind: RefusalKind
 
 
 def _scalar(value: Any) -> str | int | float | None:
@@ -450,7 +464,7 @@ def parse_table(name: str, text: str) -> dict[str, Any] | None:
         ``None`` for a file without a header, such as an empty one, or one the CSV reader refuses.
     """
     try:
-        rows = list(csv.reader(io.StringIO(text.removeprefix("﻿"), newline="")))
+        rows = list(csv.reader(io.StringIO(text.removeprefix(_BOM), newline="")))
     except csv.Error:
         return None
     if not rows or not rows[0]:
@@ -483,9 +497,11 @@ def _png_size(png: bytes) -> tuple[int, int] | None:
 
     Returns:
         tuple[int, int] | None: Width and height, both at least one; ``None`` when the bytes do not
-        start as a PNG does.
+        start as a PNG does: its signature, then a 13-byte IHDR chunk with its checksum.
     """
-    if len(png) < 24 or not png.startswith(PNG_SIGNATURE) or png[12:16] != b"IHDR":
+    if len(png) < _PNG_HEADER_BYTES or not png.startswith(PNG_SIGNATURE):
+        return None
+    if png[8:12] != _IHDR_LENGTH or png[12:16] != b"IHDR":
         return None
     width, height = struct.unpack(">II", png[16:24])
     return (width, height) if width and height else None
@@ -596,19 +612,6 @@ def _csv_line(cells: Sequence[str]) -> str:
     return line if len(line) <= _ROW_LINE_CHARS else line[: _ROW_LINE_CHARS - 3] + "..."
 
 
-def _marker(hidden: int, total: int) -> str:
-    """Name a gap in a cut text.
-
-    Args:
-        hidden (int): Characters the gap withholds.
-        total (int): Length of the whole text.
-
-    Returns:
-        str: The marker.
-    """
-    return f"[... {hidden} of {total} characters not shown ...]"
-
-
 def _middle(text: str, room: int) -> str:
     """Cut a text to its start and end around a marker, within ``room``.
 
@@ -622,12 +625,12 @@ def _middle(text: str, room: int) -> str:
     """
     if len(text) <= room:
         return text
-    keep = room - len(_marker(len(text), len(text))) - 2
+    keep = room - len(cut_marker(len(text), len(text))) - 2
     if keep <= 0:
         return ""
     head = (keep + 1) // 2
     tail = keep - head
-    marker = _marker(len(text) - keep, len(text))
+    marker = cut_marker(len(text) - keep, len(text))
     return f"{text[:head]}\n{marker}\n{text[len(text) - tail :]}"
 
 
@@ -643,10 +646,8 @@ def _tail(text: str, room: int) -> str:
     """
     if len(text) <= room:
         return text
-    keep = room - len(_marker(len(text), len(text))) - 1
-    if keep <= 0:
-        return ""
-    return f"{_marker(len(text) - keep, len(text))}\n{text[len(text) - keep :]}"
+    keep = room - len(cut_marker(len(text), len(text))) - 1
+    return fit_tail_with_marker(text, keep)[0] if keep > 0 else ""
 
 
 @dataclass
@@ -745,6 +746,7 @@ class WorkbenchPythonTool:
         discovery: Discovery,
         turn: PythonTurn,
         *,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
         clock: Callable[[], float] = time.monotonic,
         slots: threading.Semaphore = WORKBENCH_SLOT_POOL,
     ) -> None:
@@ -754,6 +756,7 @@ class WorkbenchPythonTool:
             client (WorkbenchCaller): The workbench client.
             discovery (Discovery): What discovery found: the cap on a run's limit and the version.
             turn (PythonTurn): The stored turn the calls are made for, with its deadline.
+            timeout_s (float): The most a call may take, as ``WORKBENCH_TIMEOUT`` sets it; the caller reads it.
             clock (Callable[[], float]): Reads the time on the deadline's scale.
             slots (threading.Semaphore): The process's workbench slots, taken without waiting.
         """
@@ -765,7 +768,7 @@ class WorkbenchPythonTool:
         self._turn = turn
         self._clock = clock
         self._slots = slots
-        self._timeout_s = load_workbench_env().timeout
+        self._timeout_s = timeout_s
         self._round_calls = 0
         self._turn_calls = 0
 
@@ -1044,8 +1047,7 @@ class WorkbenchPythonTool:
         slots = [_Slot(1, text=f"run_python ran on {_and(inputs)}.{made}")]
         stdout, stderr = result.stdout.rstrip(), result.stderr.rstrip()
         if stdout.strip():
-            label = "stdout (cut by workbench):" if result.truncated else "stdout:"
-            slots.append(_Slot(5, fit=_block(label, stdout, _middle, limit)))
+            slots.append(_Slot(5, fit=_block("stdout:", stdout, _middle, limit)))
         for table in tables:
             rows, columns = int(table["row_count"]), len(table["columns"])
             size = f"{_count(rows, 'row')} × {_count(columns, 'column')}"  # noqa: RUF001
@@ -1061,6 +1063,8 @@ class WorkbenchPythonTool:
         not_returned = [f"{item.name[:_NAME_CHARS]} ({item.size} bytes)" for item in result.files if not item.returned]
         if not_returned:
             info.append("Not returned by workbench: " + ", ".join(not_returned) + ".")
+        if result.truncated:
+            info.append("Output cut by workbench.")
         if not_kept:
             info.append("Not kept: " + ", ".join(not_kept) + ".")
         left: list[str] = []
