@@ -5,12 +5,15 @@ teardown; tests that need a chain of their own build one on a private
 ``StringIO`` and verify it themselves.
 """
 
+import contextlib
+import contextvars
 import io
 import json
 import os
 import subprocess
 import sys
 import textwrap
+from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +25,7 @@ from typing_extensions import override
 from docint.core import audit
 from docint.core.audit_targets import chunk_target, entity_key, entity_target, report_items_target, unit_target
 from docint.core.auth.principal import Principal
+from docint.utils.audit_disclose import DisclosureLedger, DisclosureRefused, current_ledger, record_disclosure
 from docint.utils.audit_event import Actor, AuditEmitter, AuditWriteError, Target, verify_chain
 from docint.utils.audit_forward import forward_headers
 from docint.utils.audit_meter import (
@@ -585,3 +589,244 @@ def test_social_link_stats_count_what_the_linker_joined() -> None:
 
     assert _social_link_stats(pipeline) == SocialLinkStats(dossiers=1, postings=("u1",), comments=1, media=2)
     assert _social_link_stats(SimpleNamespace()) is None
+
+
+#: A workbench job id as the client reads it off an answer.
+JOB = "0" * 32
+
+
+@pytest.fixture
+def stream() -> Iterator[io.StringIO]:
+    """Give a test the stream of a private chain, and verify that chain at teardown.
+
+    Yields:
+        io.StringIO: Where the test's own chain writes.
+    """
+    out = io.StringIO()
+    yield out
+    report = verify_chain(_events(out))
+    assert report.ok, report.problems
+
+
+def _chat(stream: io.StringIO) -> audit.Operation:
+    """Open a chat turn's operation on a private chain.
+
+    Args:
+        stream (io.StringIO): Where its events go.
+
+    Returns:
+        audit.Operation: Alice's ``query`` / ``chat.query`` in ``alpha``.
+    """
+    return audit.Operation(_auditor(stream), _context(), "query", "chat.query", container="alpha")
+
+
+def _record_call() -> Any:
+    """Record one ``run_python`` call in the bound ledger, as the tool does before it sends.
+
+    Returns:
+        Any: The call's disclosure handle.
+    """
+    return record_disclosure(point_ids=["1", "2"], passages=2, keyword_checks=1, topic_listings=0, data_bytes=2048)
+
+
+def _written(stream: io.StringIO) -> list[dict[str, Any]]:
+    """Return the operation events a private chain holds, without its lifecycle events.
+
+    Args:
+        stream (io.StringIO): The chain's stream.
+
+    Returns:
+        list[dict[str, Any]]: The events, in order.
+    """
+    return [event for event in _events(stream) if event["action"] != "lifecycle"]
+
+
+def test_disclosing_writes_what_the_route_left_beneath_its_primary_event(stream: io.StringIO) -> None:
+    """A disclosure the route did not write is written at the seal, beneath the primary event, by reference.
+
+    Args:
+        stream (io.StringIO): The private chain's stream.
+    """
+    op = _chat(stream)
+
+    with audit.disclosing(op):
+        _record_call().answered(JOB)
+        op.record(target=Target(kind="chunk", ids=["1"], count=1))
+
+    query, disclose = _written(stream)
+    assert (query["action"], query["operation"], query["outcome"]) == ("query", "chat.query", "ok")
+    assert (disclose["action"], disclose["operation"], disclose["outcome"]) == ("disclose", "chat.workbench", "ok")
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert disclose["recipient"] == "workbench:run_python"
+    assert disclose["target"] == {"kind": "chunk", "ids": ["1", "2"], "count": 2, "container": "alpha"}
+    assert disclose["criteria"] == {
+        "workbench_job": JOB,
+        "passages": 2,
+        "keyword_checks": 1,
+        "topic_listings": 0,
+        "data_bytes": 2048,
+    }
+    assert (disclose["purpose"], disclose["request_id"]) == (query["purpose"], query["request_id"])
+
+
+@pytest.mark.parametrize("error", [RuntimeError, ValueError])
+def test_disclosing_settles_a_failed_operation_before_its_disclosures(
+    stream: io.StringIO, error: type[Exception]
+) -> None:
+    """The turn fails after a hand-over: its failure event first, the disclosure beneath it, the error raised.
+
+    A ``ValueError`` of the turn's own (a context overflow, say) is raised too, never taken for the
+    binding's reset.
+
+    Args:
+        stream (io.StringIO): The private chain's stream.
+        error (type[Exception]): What the turn raises.
+    """
+    op = _chat(stream)
+
+    with pytest.raises(error, match="synthetic failure"), audit.disclosing(op):
+        _record_call().answered(JOB)
+        raise error("synthetic failure")
+
+    query, disclose = _written(stream)
+    assert (query["operation"], query["outcome"]) == ("chat.query", "error")
+    assert query["criteria"]["incomplete"] is True
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "ok")
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert disclose["criteria"]["workbench_job"] == JOB
+    assert "incomplete" not in disclose["criteria"]
+    assert "synthetic failure" not in stream.getvalue()
+
+
+def test_a_call_in_flight_at_the_seal_is_incomplete(stream: io.StringIO) -> None:
+    """A call still waiting at the seal is an incomplete error without a job; its late answer changes nothing.
+
+    Args:
+        stream (io.StringIO): The private chain's stream.
+    """
+    op = _chat(stream)
+
+    with audit.disclosing(op):
+        flying = _record_call()
+        op.record(target=Target(kind="chunk", ids=["1"], count=1))
+    flying.answered(JOB)
+
+    query, disclose = _written(stream)
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert disclose["outcome"] == "error"
+    assert disclose["criteria"]["incomplete"] is True
+    assert "workbench_job" not in disclose["criteria"]
+
+
+def test_nothing_is_disclosed_after_the_seal() -> None:
+    """Once the turn ended, a call recorded into its ledger is refused, from a copy of its context too."""
+    op = audit.Operation(audit.current(), _context(), "query", "chat.query")
+    held: list[DisclosureLedger] = []
+
+    with audit.disclosing(op) as ledger:
+        held.append(ledger)
+        worker = contextvars.copy_context()
+
+    assert held[0].sealed is True
+    assert current_ledger() is None
+    with pytest.raises(DisclosureRefused):
+        worker.run(_record_call)
+    with pytest.raises(DisclosureRefused):
+        _record_call()
+    assert op.settled is False
+
+
+def test_an_operation_without_disclosures_is_left_to_its_route(stream: io.StringIO) -> None:
+    """No hand-over: the block settles nothing, on success or failure, so a client error still records nothing.
+
+    Args:
+        stream (io.StringIO): The private chain's stream.
+    """
+    op = _chat(stream)
+
+    with audit.disclosing(op):
+        pass
+    with pytest.raises(LookupError), audit.disclosing(op):
+        raise LookupError("a client error")
+
+    assert op.settled is False
+    assert _written(stream) == []
+
+
+def test_a_turn_closed_from_another_context_is_still_sealed_and_written(stream: io.StringIO) -> None:
+    """A cancelled stream closes its generator elsewhere: the seal and the writes still happen, and nothing raises.
+
+    The binding's reset fails there (its token belongs to the turn's own context), after the seal.
+
+    Args:
+        stream (io.StringIO): The private chain's stream.
+    """
+    op = _chat(stream)
+    held: list[DisclosureLedger] = []
+
+    def _turn() -> Generator[None, None, None]:
+        with audit.disclosing(op) as ledger:
+            held.append(ledger)
+            _record_call()
+            yield
+
+    def _scenario() -> None:
+        turn = _turn()
+        next(turn)
+        contextvars.copy_context().run(turn.close)
+
+    contextvars.copy_context().run(_scenario)
+
+    assert held[0].sealed is True
+    query, disclose = _written(stream)
+    assert (query["outcome"], query["criteria"]["incomplete"]) == ("error", True)
+    assert (disclose["parent_event_id"], disclose["outcome"]) == (query["event_id"], "error")
+    assert disclose["criteria"]["incomplete"] is True
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError("synthetic failure")])
+def test_a_write_that_fails_at_the_seal_never_raises_over_the_turn(failure: Exception | None) -> None:
+    """At the seal a failed disclosure write is logged: the turn ends as it would have, with its own error if any.
+
+    Args:
+        failure (Exception | None): What the turn raises after its chain broke, if anything.
+    """
+    failing = _FailingStream()
+    op = audit.Operation(_auditor(failing), _context(), "query", "chat.query")
+
+    try:
+        with pytest.raises(RuntimeError, match="synthetic failure") if failure else contextlib.nullcontext():
+            with audit.disclosing(op):
+                _record_call().answered(JOB)
+                op.record()
+                failing.fail = True
+                if failure is not None:
+                    raise failure
+    finally:
+        failing.fail = False
+        op.auditor.close()
+
+    assert [event["operation"] for event in _written(failing)] == ["chat.query"]
+
+
+def test_a_disclosure_that_cannot_be_written_raises() -> None:
+    """Writing a turn's disclosures fails closed, as every audit write does."""
+    failing = _FailingStream()
+    op = audit.Operation(_auditor(failing), _context(), "query", "chat.query")
+    ledger = DisclosureLedger()
+    ledger.add(point_ids=["1"], passages=1, keyword_checks=0, topic_listings=0, data_bytes=10).answered(JOB)
+    op.record()
+    failing.fail = True
+
+    try:
+        with pytest.raises(audit.AUDIT_FAILURES):
+            audit.write_disclosures(op, ledger.take())
+    finally:
+        failing.fail = False
+        op.auditor.close()
+
+
+def test_chat_routes_ask_for_disclose_only_while_workbench_is_configured() -> None:
+    """The chat routes check ``disclose`` against the purpose rule only when they can disclose."""
+    assert audit.chat_also(True) == ("ai_call", "disclose")
+    assert audit.chat_also(False) == ("ai_call",)

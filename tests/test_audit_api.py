@@ -10,7 +10,9 @@ which lands on the same stream) is verified by ``conftest.audit_stream``.
 
 import io
 import json
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ from typing import Any
 import pytest
 from conftest import run_ingest
 from fastapi.testclient import TestClient
+from starlette.requests import Request as StarletteRequest
 from test_api import DummyRAG, _sse_frames
 from typing_extensions import override
 
@@ -27,8 +30,10 @@ from docint.core.entities.resolution import ResolutionSummary
 from docint.core.jobs import IngestJobManager
 from docint.core.rag import IngestStats
 from docint.core.search.fulltext import parse_keywords
+from docint.core.state.session_manager import SessionCollectionMismatchError
+from docint.utils.audit_disclose import DisclosureRefused, current_ledger, record_disclosure
 from docint.utils.audit_event import AuditEmitter, sha256_text
-from docint.utils.audit_forward import forward_headers
+from docint.utils.audit_forward import CHAT_REASON, forward_headers
 from docint.utils.audit_meter import TransferKey, count_transfer, staged_meter, take_staged
 from docint.utils.audit_runtime import PURPOSE_HEADER, encode_purpose
 from docint.utils.hashing import compute_file_hash
@@ -37,12 +42,18 @@ from docint.utils.translate_client import TranslateResult
 ALICE = {"X-Auth-User": "alice"}
 ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
+#: A workbench job id as the client reads it off an answer.
+JOB = "0" * 32
 
 
 class _FailingStream(io.StringIO):
-    """A stream that takes writes until ``fail`` is set, then raises like a full disk."""
+    """A stream that takes writes until ``fail`` is set, then raises like a full disk.
+
+    With ``refuse`` set it refuses only the lines that contain it.
+    """
 
     fail = False
+    refuse: str | None = None
 
     @override
     def write(self, s: str) -> int:
@@ -55,9 +66,9 @@ class _FailingStream(io.StringIO):
             int: Characters written.
 
         Raises:
-            OSError: Once ``fail`` is set.
+            OSError: Once ``fail`` is set, or for a line holding ``refuse``.
         """
-        if self.fail:
+        if self.fail or (self.refuse is not None and self.refuse in s):
             raise OSError("no space left on device")
         return super().write(s)
 
@@ -102,8 +113,11 @@ def client(rag: DummyRAG) -> Iterator[TestClient]:
 
 
 @contextmanager
-def _failing_chain() -> Iterator[_FailingStream]:
+def _failing_chain(refuse: str | None = None) -> Iterator[_FailingStream]:
     """Install, over the running app's chain, one whose stream fails every write.
+
+    Args:
+        refuse (str | None): Fail only the lines holding this text instead.
 
     Yields:
         _FailingStream: The failing stream.
@@ -113,12 +127,14 @@ def _failing_chain() -> Iterator[_FailingStream]:
     emitter.start()
     auditor = audit.Auditor(emitter)
     audit.install(auditor)
-    stream.fail = True
+    stream.fail = refuse is None
+    stream.refuse = refuse
     try:
         yield stream
     finally:
         audit.uninstall(auditor)
         stream.fail = False
+        stream.refuse = None
         auditor.close()
 
 
@@ -981,3 +997,306 @@ def test_the_admin_listing_across_owners_is_an_admin_event(
     assert (event["action"], event["operation"]) == ("admin", "collections.list_all")
     assert event["target"] == {"kind": "collection", "count": 3}
     assert event["criteria"] == {"owners": 2}
+
+
+def _hand_over(point_ids: tuple[str, ...] = ("1", "2")) -> Any:
+    """Record one ``run_python`` call in the turn's ledger, as the tool does before it sends.
+
+    Args:
+        point_ids (tuple[str, ...]): The points whose passages the call hands over.
+
+    Returns:
+        Any: The call's disclosure handle.
+    """
+    return record_disclosure(
+        point_ids=list(point_ids), passages=len(point_ids), keyword_checks=1, topic_listings=0, data_bytes=2048
+    )
+
+
+class _PythonRAG(DummyRAG):
+    """``test_api``'s RAG double whose chat turns make one ``run_python`` call before they answer.
+
+    The call is recorded the way the tool records it, and the purpose it would state to workbench
+    is kept in ``forwarded``.
+    """
+
+    def __init__(self) -> None:
+        """Answer every call with ``JOB``, and let the turn succeed."""
+        super().__init__()
+        #: The job the call's answer names; ``None`` when no answer came.
+        self.job: str | None = JOB
+        #: Whether the turn fails after its call.
+        self.fail = False
+        self.forwarded: list[dict[str, str]] = []
+
+    def _run_python(self) -> None:
+        """Make the turn's call: state its purpose, record it, settle it.
+
+        Raises:
+            RuntimeError: After the call, when the turn is set to fail.
+        """
+        self.forwarded.append(forward_headers(system_reason=CHAT_REASON))
+        disclosure = _hand_over()
+        if self.job is None:
+            disclosure.unanswered()
+        else:
+            disclosure.answered(self.job)
+        if self.fail:
+            raise RuntimeError("secret detail of a failed turn")
+
+    def chat(self, question: str, **kwargs: Any) -> dict[str, Any]:
+        """Call workbench once, then answer as the double does.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The turn's parameters.
+
+        Returns:
+            dict[str, Any]: The double's answer.
+        """
+        self._run_python()
+        return super().chat(question, **kwargs)
+
+    def stream_chat(self, question: str, **kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Call workbench once, then stream as the double does.
+
+        Args:
+            question (str): The question.
+            **kwargs (Any): The turn's parameters.
+
+        Yields:
+            str | dict[str, Any]: The double's tokens, then its final payload.
+        """
+        self._run_python()
+        yield from super().stream_chat(question, **kwargs)
+
+
+@pytest.fixture
+def python_rag(rag: DummyRAG, monkeypatch: pytest.MonkeyPatch) -> _PythonRAG:
+    """Put the double whose turns call workbench behind the app, in place of ``rag``.
+
+    Args:
+        rag (DummyRAG): The plain double it replaces.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+
+    Returns:
+        _PythonRAG: The double.
+    """
+    double = _PythonRAG()
+    monkeypatch.setattr(api_module, "rag", double)
+    return double
+
+
+_TURN = {"question": "How many posts name the meeting?", "collection": "alpha"}
+
+
+def test_a_turn_that_ran_python_records_one_disclose_per_call(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The call is a ``disclose`` beneath the turn's ``query``, by reference, before the answer's ``ai_call``.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    headers = {**ALICE, "X-Request-ID": "req-0005", PURPOSE_HEADER: encode_purpose("case-0001", "review")}
+
+    assert client.post("/query", json=_TURN, headers=headers).status_code == 200
+
+    query, disclose, answer = _ops(audit_stream)
+    assert [(e["action"], e["operation"]) for e in (query, disclose, answer)] == [
+        ("query", "chat.query"),
+        ("disclose", "chat.workbench"),
+        ("ai_call", "chat.answer"),
+    ]
+    assert disclose["parent_event_id"] == query["event_id"] and disclose["recipient"] == "workbench:run_python"
+    assert disclose["outcome"] == "ok"
+    assert disclose["target"] == {"kind": "chunk", "ids": ["1", "2"], "count": 2, "container": "alpha"}
+    assert {
+        k: disclose["criteria"][k]
+        for k in ("workbench_job", "passages", "keyword_checks", "topic_listings", "data_bytes")
+    } == {"workbench_job": JOB, "passages": 2, "keyword_checks": 1, "topic_listings": 0, "data_bytes": 2048}
+    assert "incomplete" not in disclose["criteria"]
+    assert (disclose["purpose"], disclose["request_id"]) == (query["purpose"], query["request_id"])
+    assert answer["parent_event_id"] == query["event_id"]
+
+
+def test_a_streamed_turn_discloses_before_its_final_frame(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The streamed turn writes the same events; a disclosure that cannot be written withholds the sources.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    frames = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert "sources" in frames[-1]
+    query, disclose, answer = _ops(audit_stream)
+    assert [(e["action"], e["operation"]) for e in (query, disclose, answer)] == [
+        ("query", "chat.query"),
+        ("disclose", "chat.workbench"),
+        ("ai_call", "chat.answer"),
+    ]
+    assert disclose["parent_event_id"] == query["event_id"]
+
+    with _failing_chain(refuse='"action":"disclose"'):
+        refused = _sse_frames(client.post("/stream_query", json=_TURN, headers=ALICE).text)
+
+    assert refused[-1] == {"error": "Internal server error", "code": "generation_failed"}
+    assert not any("sources" in frame for frame in refused)
+
+
+def test_a_call_that_got_no_answer_is_disclosed_as_an_error(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """The data left even though no answer came: an ``error`` disclosure without a job, the turn still ``ok``.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    python_rag.job = None
+
+    assert client.post("/query", json=_TURN, headers=ALICE).status_code == 200
+
+    query, disclose, _answer = _ops(audit_stream)
+    assert query["outcome"] == "ok"
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "error")
+    assert "workbench_job" not in disclose["criteria"]
+    assert "incomplete" not in disclose["criteria"]
+
+
+def test_a_failed_turn_writes_its_disclosures_beneath_the_failure_event(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO
+) -> None:
+    """A turn that fails after its call: a 500, the ``query`` as failed and the ``disclose`` beneath it.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+    """
+    python_rag.fail = True
+
+    assert client.post("/query", json=_TURN, headers=ALICE).status_code == 500
+
+    query, disclose = _ops(audit_stream)
+    assert (query["operation"], query["outcome"]) == ("chat.query", "error")
+    assert query["criteria"]["incomplete"] is True
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "ok")
+    assert disclose["criteria"]["workbench_job"] == JOB
+    assert "secret detail" not in audit_stream.getvalue()
+
+
+def test_a_stream_whose_client_went_away_discloses_every_call_sent_and_sends_no_more(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client leaves while a call waits: the call is written at the seal, and the turn's next call is refused.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(api_module, "STREAM_DISCONNECT_POLL_INTERVAL_S", 0.05)
+    refused: list[DisclosureRefused] = []
+    finished = threading.Event()
+
+    def _gone(question: str, **_kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Send one call, wait while the client goes away, then try a second one."""
+        try:
+            _hand_over()
+            ledger = current_ledger()
+            deadline = time.monotonic() + 5.0
+            while ledger is not None and not ledger.sealed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            try:
+                _hand_over(("3",))
+            except DisclosureRefused as exc:
+                refused.append(exc)
+        finally:
+            finished.set()
+        yield {"response": "answer", "sources": [{"id": 3}], "session_id": "generated-session"}
+
+    async def _disconnected(_self: StarletteRequest) -> bool:
+        """Report the client as gone."""
+        return True
+
+    monkeypatch.setattr(python_rag, "stream_chat", _gone)
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", _disconnected)
+
+    with client.stream("POST", "/stream_query", json=_TURN, headers=ALICE) as response:
+        body = "".join(chunk.decode() for chunk in response.iter_raw())
+
+    assert finished.wait(5.0)
+    assert len(refused) == 1
+    assert '"sources"' not in body
+    query, disclose = _ops(audit_stream)
+    assert (query["outcome"], query["criteria"]["incomplete"]) == ("error", True)
+    assert disclose["parent_event_id"] == query["event_id"]
+    assert (disclose["operation"], disclose["outcome"]) == ("chat.workbench", "error")
+    assert disclose["criteria"]["incomplete"] is True
+    assert "workbench_job" not in disclose["criteria"]
+    assert disclose["target"]["ids"] == ["1", "2"]
+
+
+@pytest.mark.parametrize("route", ["/query", "/stream_query"])
+@pytest.mark.parametrize(
+    ("headers", "forwarded"),
+    [
+        (
+            {"X-Request-ID": "req-0006", PURPOSE_HEADER: encode_purpose("case-0001", "review")},
+            {"X-Audit-Purpose": "case_ref=case-0001&reason=review", "X-Request-ID": "req-0006"},
+        ),
+        ({}, {"X-Audit-Purpose": "reason=docint+chat"}),
+    ],
+)
+def test_calls_to_workbench_state_the_turns_purpose(
+    client: TestClient, python_rag: _PythonRAG, route: str, headers: dict[str, str], forwarded: dict[str, str]
+) -> None:
+    """A turn's call to workbench states the turn's purpose and request id, else docint's reason for asking.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        route (str): The chat route.
+        headers (dict[str, str]): The turn's purpose and request id headers.
+        forwarded (dict[str, str]): What the call to workbench states.
+    """
+    response = client.post(route, json=_TURN, headers={**ALICE, **headers})
+
+    assert response.status_code == 200
+    if route == "/stream_query":
+        assert "sources" in _sse_frames(response.text)[-1]
+    assert python_rag.forwarded == [forwarded]
+
+
+def test_a_client_error_still_records_nothing(
+    client: TestClient, python_rag: _PythonRAG, audit_stream: io.StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session pinned to another collection is a 409 before any call, and the trail stays empty.
+
+    Args:
+        client (TestClient): The running app.
+        python_rag (_PythonRAG): The double whose turn calls workbench.
+        audit_stream (io.StringIO): The test's audit stream.
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    def _pinned(session_id: str | None = None, owner: str | None = None) -> str:
+        raise SessionCollectionMismatchError(session_id="session-0001", pinned="beta", requested="alpha")
+
+    monkeypatch.setattr(python_rag, "start_session", _pinned)
+
+    response = client.post("/query", json={**_TURN, "session_id": "session-0001"}, headers=ALICE)
+
+    assert response.status_code == 409
+    assert python_rag.forwarded == []
+    assert _ops(audit_stream) == []
