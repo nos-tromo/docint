@@ -509,6 +509,57 @@ describe('Sidebar chat draft pruning', () => {
   })
 })
 
+describe('Sidebar cached analyses', () => {
+  const key = (session: string, collection: string) => ['session-analyses', session, 'a1', { collection, owner: null }]
+
+  function renderWith(qc: QueryClient) {
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Sidebar />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+  }
+
+  it("drops a deleted session's analyses and keeps another session's", async () => {
+    vi.stubGlobal(
+      'fetch',
+      mockFetch({
+        '/collections/list': ['alpha'],
+        '/sessions/list': { sessions: [{ id: 's1', created_at: '2026-01-01', title: 'First chat', collection: 'alpha' }] },
+        '/sessions/s1': { ok: true }
+      })
+    )
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(key('s1', 'alpha'), { id: 'a1' })
+    qc.setQueryData(key('s2', 'alpha'), { id: 'a1' })
+
+    renderWith(qc)
+    await userEvent.click(await screen.findByLabelText(/delete session/i))
+
+    await waitFor(() => expect(qc.getQueryData(key('s1', 'alpha'))).toBeUndefined())
+    expect(qc.getQueryData(key('s2', 'alpha'))).toEqual({ id: 'a1' })
+  })
+
+  it("drops a deleted collection's analyses and keeps another collection's", async () => {
+    vi.stubGlobal('fetch', mockFetch({ '/collections/list': ['alpha', 'beta'], '/sessions/list': { sessions: [] } }))
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(key('s1', 'alpha'), { id: 'a1' })
+    qc.setQueryData(key('s2', 'beta'), { id: 'a1' })
+
+    renderWith(qc)
+    await userEvent.click(await screen.findByLabelText(/delete collection alpha/i))
+
+    await waitFor(() => expect(qc.getQueryData(key('s1', 'alpha'))).toBeUndefined())
+    expect(qc.getQueryData(key('s2', 'beta'))).toEqual({ id: 'a1' })
+  })
+})
+
 describe('Sidebar keeps the current section when switching collections', () => {
   it('stays on the current section instead of jumping to chat', async () => {
     const fetchMock = mockFetch({

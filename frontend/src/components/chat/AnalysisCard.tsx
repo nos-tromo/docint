@@ -30,19 +30,30 @@ function text(value: unknown): string {
  * The first rows of one table, and how many more it has.
  *
  * Every cell is text the sandbox wrote from retrieved passages, so it goes through React as text and nothing else.
+ * The scroll area is reachable by keyboard and named by the table's caption: its name, else its number.
  */
-function TablePreview({ table }: { table: AnalysisTable }) {
+function TablePreview({ table, n }: { table: AnalysisTable; n: number }) {
   const t = useT()
+  const captionId = useId()
   const columns = list<string>(table.columns)
   const rows = list<string[]>(table.rows)
   const shown = rows.slice(0, PREVIEW_ROWS)
+  const rowCount = typeof table.row_count === 'number' ? table.row_count : 0
   // The run may have had more rows than the stored table kept.
-  const more = Math.max(typeof table.row_count === 'number' ? table.row_count : 0, rows.length) - shown.length
+  const more = Math.max(rowCount, rows.length) - shown.length
+  const cut = table.truncated === true || rows.length < rowCount
   return (
     <div className="space-y-1">
-      <div className="break-words text-xs text-muted-foreground">{text(table.name)}</div>
-      <div className="overflow-x-auto rounded-md border border-border">
+      <div
+        role="region"
+        aria-labelledby={captionId}
+        tabIndex={0}
+        className="overflow-x-auto rounded-md border border-border outline-none focus-visible:ring-1 focus-visible:ring-primary"
+      >
         <table className="w-full text-xs">
+          <caption id={captionId} className="break-words px-2 py-1 text-left text-xs text-muted-foreground">
+            {text(table.name) || t('chat.analysis_table_n', { n })}
+          </caption>
           <thead className="text-muted-foreground">
             <tr>
               {columns.map((column, c) => (
@@ -74,13 +85,17 @@ function TablePreview({ table }: { table: AnalysisTable }) {
           {t(more === 1 ? 'chat.analysis_more_rows_one' : 'chat.analysis_more_rows', { count: more })}
         </div>
       )}
+      {cut && <div className="text-xs text-muted-foreground">{t('chat.analysis_table_cut')}</div>}
     </div>
   )
 }
 
-/** The charts that are PNG data URIs, each opening the preview dialog from its own bytes. */
-function Charts({ charts }: { charts: AnalysisChart[] }) {
-  const t = useT()
+/**
+ * The charts that are PNG data URIs, each opening the preview dialog from its own bytes.
+ *
+ * A chart with no name is called by the analysis's title.
+ */
+function Charts({ charts, title }: { charts: AnalysisChart[]; title: string }) {
   const openPreview = useUiStore((s) => s.openPreview)
   const drawn = charts.filter((chart) => isPngDataUri(chart?.data_uri))
   if (drawn.length === 0) return null
@@ -88,16 +103,17 @@ function Charts({ charts }: { charts: AnalysisChart[] }) {
     <div className="flex flex-wrap gap-3">
       {drawn.map((chart, i) => {
         const name = text(chart.name)
+        const label = name || title
         return (
           // Two charts may share a name, and the list is never reordered.
           // eslint-disable-next-line @eslint-react/no-array-index-key
           <figure key={i} className="max-w-xs space-y-1">
             <button
               type="button"
-              onClick={() => openPreview({ filename: name || t('common.unknown_source'), data_uri: chart.data_uri })}
+              onClick={() => openPreview({ filename: label, data_uri: chart.data_uri })}
               className="block cursor-pointer overflow-hidden rounded border border-border outline-none hover:border-foreground/40 focus-visible:ring-1 focus-visible:ring-primary"
             >
-              <img src={chart.data_uri} alt={name} className="h-40 w-auto max-w-full bg-white object-contain" />
+              <img src={chart.data_uri} alt={label} className="h-40 w-auto max-w-full bg-white object-contain" />
             </button>
             {name && <figcaption className="break-words text-xs text-muted-foreground">{name}</figcaption>}
           </figure>
@@ -127,29 +143,30 @@ function provenanceLine(analysis: Analysis, t: Translate): string | null {
   return version || job ? t('chat.analysis_provenance_workbench', { version: version || '?', job: job || '?' }) : null
 }
 
+/** The code behind a disclosure: the whole row is the button, its label is constant and `aria-expanded` says the rest. */
 function CodeDisclosure({ code }: { code: string }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const codeId = useId()
-  const label = open ? t('chat.analysis_code_hide') : t('chat.analysis_code_show')
+  const label = t('chat.analysis_code')
   return (
     <div>
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span aria-hidden="true" className="flex-1">
-          {label}
-        </span>
-        <DisclosureButton
-          expanded={open}
-          controls={codeId}
-          label={label}
-          onClick={() => setOpen((value) => !value)}
-          className="h-6 w-6"
-        />
-      </div>
+      <DisclosureButton
+        expanded={open}
+        controls={codeId}
+        label={label}
+        onClick={() => setOpen((value) => !value)}
+        className="h-6 w-full flex-row-reverse justify-between text-xs"
+      >
+        <span>{label}</span>
+      </DisclosureButton>
       {open && (
         <pre
           id={codeId}
-          className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-background p-2 text-xs"
+          role="region"
+          aria-label={label}
+          tabIndex={0}
+          className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-background p-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-primary"
         >
           <code>{code}</code>
         </pre>
@@ -215,13 +232,16 @@ export function AnalysisCard({
           {t('chat.analysis_failed')}
         </p>
       )}
+      {!analysis && read.status === 'pending' && read.fetchStatus === 'idle' && (
+        <p className="text-xs text-muted-foreground">{t('chat.analysis_no_detail')}</p>
+      )}
       {analysis && (
         <>
           {list<AnalysisTable>(analysis.tables).map((table, i) => (
             // eslint-disable-next-line @eslint-react/no-array-index-key
-            <TablePreview key={i} table={table} />
+            <TablePreview key={i} table={table} n={i + 1} />
           ))}
-          <Charts charts={list<AnalysisChart>(analysis.charts)} />
+          <Charts charts={list<AnalysisChart>(analysis.charts)} title={title} />
           {text(analysis.code) && <CodeDisclosure code={analysis.code} />}
           {provenance && <p className="break-words text-xs text-muted-foreground">{provenance}</p>}
         </>

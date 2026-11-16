@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AnalysisCard } from './AnalysisCard'
@@ -9,6 +9,9 @@ import { LanguageContext } from '@/i18n/LanguageContext'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { ANALYSIS, PNG_URI } from '@/test/analysis'
+
+const NO_DETAIL = 'The details of this analysis need an open chat in an active collection.'
+const NO_DETAIL_DE = 'Die Details dieser Analyse setzen einen geöffneten Chat in einer aktiven Sammlung voraus.'
 
 const SUMMARY: AnalysisSummary = {
   id: 'a1',
@@ -28,15 +31,18 @@ interface Props {
 
 function renderCard({ entry = ANALYSIS, index = 1, sessionId = 'session-1', inReport = false, lang = 'en' }: Props = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const ui = (current: Analysis | AnalysisSummary) => (
+  const ui = (current: Analysis | AnalysisSummary, session: string | null) => (
     <QueryClientProvider client={qc}>
       <LanguageContext value={lang}>
-        <AnalysisCard entry={current} index={index} sessionId={sessionId} inReport={inReport} />
+        <AnalysisCard entry={current} index={index} sessionId={session} inReport={inReport} />
       </LanguageContext>
     </QueryClientProvider>
   )
-  const view = render(ui(entry))
-  return { ...view, update: (next: Analysis | AnalysisSummary) => view.rerender(ui(next)) }
+  const view = render(ui(entry, sessionId))
+  return {
+    ...view,
+    update: (next: Analysis | AnalysisSummary, session: string | null = sessionId) => view.rerender(ui(next, session))
+  }
 }
 
 /** Answer every request with one JSON body, and keep the URLs asked for. */
@@ -97,16 +103,46 @@ describe('AnalysisCard', () => {
     expect(within(screen.getByTestId('analysis-card')).getByText('Analysis 2')).toBeInTheDocument()
   })
 
-  it('keeps the code behind a disclosure', async () => {
+  it('keeps the code behind a disclosure that one constant label names', async () => {
     renderCard()
 
     expect(screen.queryByText(/import pandas/)).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Show code' }))
+    const toggle = screen.getByRole('button', { name: 'Code' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    // The words are part of the button, so a click on them opens it.
+    await userEvent.click(within(toggle).getByText('Code'))
 
     expect(screen.getByText(/import pandas/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Hide code' })).toHaveAttribute('aria-expanded', 'true')
-    await userEvent.click(screen.getByRole('button', { name: 'Hide code' }))
+    expect(screen.getByRole('button', { name: 'Code' })).toHaveAttribute('aria-expanded', 'true')
+    await userEvent.click(screen.getByRole('button', { name: 'Code' }))
     expect(screen.queryByText(/import pandas/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Code' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('lets a keyboard user scroll a table and the code, each by a name', async () => {
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Code' }))
+
+    const card = screen.getByTestId('analysis-card')
+    const tableRegion = within(card).getByRole('region', { name: 'posts.csv' })
+    expect(tableRegion).toHaveAttribute('tabindex', '0')
+    expect(tableRegion).toContainElement(within(card).getByRole('table'))
+    const codeRegion = within(card).getByRole('region', { name: 'Code' })
+    expect(codeRegion).toHaveAttribute('tabindex', '0')
+    expect(codeRegion).toHaveTextContent(/import pandas/)
+  })
+
+  it('names a table by its caption, and a nameless one by its number', () => {
+    const [table] = ANALYSIS.tables
+    renderCard({ entry: { ...ANALYSIS, tables: [table, { ...table, name: '' }] } })
+
+    const card = screen.getByTestId('analysis-card')
+    expect(within(card).getAllByRole('table').map((each) => within(each).getByRole('caption').textContent)).toEqual([
+      'posts.csv',
+      'Table 2'
+    ])
+    expect(within(card).getByRole('table', { name: 'posts.csv' })).toBeInTheDocument()
+    expect(within(card).getByRole('region', { name: 'Table 2' })).toHaveAttribute('tabindex', '0')
   })
 
   it('opens a chart in the preview dialog', async () => {
@@ -115,6 +151,36 @@ describe('AnalysisCard', () => {
     await userEvent.click(screen.getByRole('button', { name: 'chart.png' }))
 
     expect(useUiStore.getState().previewModal).toEqual({ filename: 'chart.png', data_uri: PNG_URI })
+  })
+
+  it('names a chart that has no name by the analysis it belongs to', async () => {
+    renderCard({ entry: { ...ANALYSIS, charts: [{ name: '', data_uri: PNG_URI, bytes: 12 }] } })
+
+    const button = screen.getByRole('button', { name: 'Posts per author' })
+    expect(within(button).getByRole('img', { name: 'Posts per author' })).toHaveAttribute('src', PNG_URI)
+    await userEvent.click(button)
+    expect(useUiStore.getState().previewModal).toEqual({ filename: 'Posts per author', data_uri: PNG_URI })
+  })
+
+  it('says so when a table was stored cut', () => {
+    const [table] = ANALYSIS.tables
+    const cutRows = { ...table, rows: table.rows.slice(0, 6), row_count: 600 }
+    renderCard({ entry: { ...ANALYSIS, tables: [cutRows, { ...table, name: 'cells.csv', truncated: true }] } })
+
+    expect(within(screen.getByTestId('analysis-card')).getAllByText('This table was stored cut.')).toHaveLength(2)
+  })
+
+  it('says nothing of a cut for a table stored whole', () => {
+    renderCard()
+
+    expect(screen.queryByText(/stored cut/)).not.toBeInTheDocument()
+  })
+
+  it('says so in German when a table was stored cut', () => {
+    const [table] = ANALYSIS.tables
+    renderCard({ entry: { ...ANALYSIS, tables: [{ ...table, truncated: true }] }, lang: 'de' })
+
+    expect(screen.getByText('Diese Tabelle wurde gekürzt gespeichert.')).toBeInTheDocument()
   })
 
   it('names its provenance', () => {
@@ -212,6 +278,69 @@ describe('AnalysisCard from a summary', () => {
 
     expect(urls).toEqual([])
     expect(screen.getByText('Posts per author')).toBeInTheDocument()
+    expect(screen.getByText(NO_DETAIL)).toBeInTheDocument()
+  })
+
+  it('says why it shows no detail when no collection is active', () => {
+    const urls = serve(ANALYSIS)
+    useUiStore.setState({ selectedCollection: null })
+    renderCard({ entry: SUMMARY })
+
+    expect(urls).toEqual([])
+    expect(screen.getByText(NO_DETAIL)).toBeInTheDocument()
+  })
+
+  it('says it in German', () => {
+    serve(ANALYSIS)
+    renderCard({ entry: SUMMARY, sessionId: null, lang: 'de' })
+
+    expect(screen.getByText(NO_DETAIL_DE)).toBeInTheDocument()
+  })
+
+  it('does not say it while the analysis is loading or once it is shown', async () => {
+    serve(ANALYSIS)
+    renderCard({ entry: SUMMARY })
+
+    expect(screen.queryByText(NO_DETAIL)).not.toBeInTheDocument()
+    await screen.findByText('alice')
+    expect(screen.queryByText(NO_DETAIL)).not.toBeInTheDocument()
+  })
+
+  it("never serves another collection's or session's analysis", async () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string) => {
+        const url = String(u)
+        urls.push(url)
+        const where = /sessions\/([^/]+)\/analyses\/a1\?collection=(\w+)/.exec(url)
+        const body = {
+          ...ANALYSIS,
+          tables: [{ ...ANALYSIS.tables[0], rows: [[`${where?.[2]}-${where?.[1]}`, '1']], row_count: 1 }]
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
+      })
+    )
+    const view = renderCard({ entry: SUMMARY })
+    expect(await screen.findByText('docs-session-1')).toBeInTheDocument()
+
+    act(() => useUiStore.setState({ selectedCollection: 'other' }))
+    expect(screen.queryByText('docs-session-1')).not.toBeInTheDocument()
+    expect(await screen.findByText('other-session-1')).toBeInTheDocument()
+
+    view.update(SUMMARY, 'session-2')
+    expect(screen.queryByText('other-session-1')).not.toBeInTheDocument()
+    expect(await screen.findByText('other-session-2')).toBeInTheDocument()
+
+    // Back where it started: still read from its own entry, never from the last one shown.
+    view.update(SUMMARY, 'session-1')
+    act(() => useUiStore.setState({ selectedCollection: 'docs' }))
+    expect(await screen.findByText('docs-session-1')).toBeInTheDocument()
+    expect(urls.map((url) => url.replace(/^.*\/sessions\//, ''))).toEqual([
+      'session-1/analyses/a1?collection=docs',
+      'session-1/analyses/a1?collection=other',
+      'session-2/analyses/a1?collection=other'
+    ])
   })
 
   it('says so when the analysis cannot be read, and keeps the title', async () => {
@@ -248,7 +377,7 @@ describe('AnalysisCard with untrusted content', () => {
       }
     }
     renderCard({ entry })
-    await userEvent.click(screen.getByRole('button', { name: 'Show code' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Code' }))
 
     const card = screen.getByTestId('analysis-card')
     expect(card.querySelector('b')).toBeNull()

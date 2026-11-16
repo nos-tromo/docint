@@ -1,14 +1,15 @@
 import { useEffect } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { deleteSession, getSessionAnalysis, getSessionHistory, listSessions } from '@/api/sessions'
 import type { Analysis } from '@/api/types'
-import { useActiveCollection } from '@/hooks/useActiveCollection'
+import { useActiveCollection, type CollectionScope } from '@/hooks/useActiveCollection'
 
 export const sessionsKey = ['sessions'] as const
 export const sessionHistoryKey = (id: string) => ['sessions', id, 'history'] as const
 // Outside the `sessions` prefix on purpose: a finished turn invalidates that prefix, and a stored analysis
 // (up to a MiB of charts) never changes, so it must not be read again with every message.
-export const sessionAnalysisKey = (id: string, analysisId: string) => ['session-analyses', id, analysisId] as const
+export const sessionAnalysesKey = ['session-analyses'] as const
+export const sessionAnalysisKey = (id: string, analysisId: string) => [...sessionAnalysesKey, id, analysisId] as const
 
 export function useSessions() {
   const scope = useActiveCollection()
@@ -76,10 +77,23 @@ export function useSeedSessionAnalysis(sessionId: string | null, analysis: Analy
   }, [qc, scope, sessionId, analysis])
 }
 
+/** Forget the analyses cached for a collection's chats, whichever owner's. */
+export function dropCollectionAnalyses(qc: QueryClient, collection: string) {
+  qc.removeQueries({
+    queryKey: sessionAnalysesKey,
+    // The scope is the fourth part of the key, after the session and the analysis (see `useSessionAnalysis`).
+    predicate: (query) => (query.queryKey[3] as CollectionScope | undefined)?.collection === collection
+  })
+}
+
 export function useDeleteSession() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => deleteSession(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sessionsKey })
+    onSuccess: (_data, id) => {
+      // Its analyses are up to a MiB each, and nothing reads them once it is gone.
+      qc.removeQueries({ queryKey: [...sessionAnalysesKey, id] })
+      return qc.invalidateQueries({ queryKey: sessionsKey })
+    }
   })
 }
