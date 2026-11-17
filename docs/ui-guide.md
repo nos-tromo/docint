@@ -93,6 +93,12 @@ exchange renders as a `ChatTurn` with `Citation`s and a `ValidationBanner` for
 answer/source mismatches. Cancellation uses
 an `AbortController`.
 
+The transcript and the composer share one centred column, as in Ghostwriter.
+Your question sits right-aligned in a bubble in the accent colour (`@infra/ui`
+`UserBubble`; `--app-bubble` keeps white text readable in dark mode too), and
+the answer follows below it without a frame. The composer is one pill under
+the transcript (`ChatComposer`) with Send at its end.
+
 The answer is Markdown: `grounded_qa.txt` on a plain turn, and
 `agent_system.txt` on an agent turn, ask the model for lists, bold, tables and
 topic headings where structure helps, and for plain paragraphs otherwise.

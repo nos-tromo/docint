@@ -14,6 +14,10 @@
      below, mirroring @infra/ui's own light/dark/prefers-color-scheme
      pattern in theme.css so this tracks data-theme exactly. */
   --app-accent: hsl(160 84% 27%);
+  /* The user's own chat messages (@infra/ui UserBubble): white text on the
+     accent. Kept at the light accent in dark mode too: white on L=27% is
+     ~5:1, on the dark accent (L=39%) only ~2.6:1. */
+  --app-bubble: hsl(160 84% 27%);
   /* Single source of truth for the app font. Tailwind's `sans` AND `mono`
      families both resolve to this var (see tailwind.config.ts), so every
      piece of text — including markdown code blocks and any stray

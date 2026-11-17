@@ -255,6 +255,14 @@ describe('Chat SSE handling', () => {
     expect(screen.queryByText(/stream ended unexpectedly/i)).not.toBeInTheDocument()
   })
 
+  it('names the composer for assistive technology', async () => {
+    renderChat()
+
+    const byRole = await screen.findByRole('textbox', { name: 'Ask something…' })
+    expect(byRole).toBe(screen.getByPlaceholderText(/ask something/i))
+    expect(screen.getByRole('button', { name: /send/i })).toBeDisabled()
+  })
+
   it('Enter submits, Shift+Enter inserts a newline', async () => {
     const frames =
       'data: {"token":"ok"}\n\n' +

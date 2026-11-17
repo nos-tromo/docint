@@ -44,6 +44,18 @@ function renderTurn(
 }
 
 describe('ChatTurn', () => {
+  it('sets the question in the accent bubble, its label for screen readers only', () => {
+    renderTurn({ user: 'Which dates did the meeting set?', assistant: 'Three.', done: true, meta: null })
+
+    const question = screen.getByText('Which dates did the meeting set?')
+    const bubble = question.closest('.bg-bubble')
+    expect(bubble).not.toBeNull()
+    expect(screen.getByText('You')).toHaveClass('sr-only')
+    expect(bubble).toContainElement(screen.getByText('You'))
+    // The answer is not in the bubble.
+    expect(bubble).not.toContainElement(screen.getByText('Three.'))
+  })
+
   it('surfaces the entities behind the answer above its sources', () => {
     const meta = {
       session_id: 's',
