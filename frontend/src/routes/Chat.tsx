@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { DownloadButton, NewButton, PageHeader, SendButton } from '@infra/ui'
+import { ChatComposer, DownloadButton, NewButton, PageHeader, SendButton } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
@@ -579,47 +579,53 @@ export function Chat() {
             for width: a wide answer table scrolls in its own box instead of
             widening the column past the viewport. */}
         <section className="flex flex-col h-full min-h-0 min-w-0">
-          <ScopeBanner
-            count={scopedChunkIds.length}
-            missing={scope.missing}
-            onClear={() => void unscope()}
-          />
-          {scopeError && (
-            <p className="mb-3 text-xs text-red-500" role="alert">
-              {scopeError}
-            </p>
-          )}
-          {topicError && topicError.sessionId === currentSessionId && (
-            <p className="mb-3 text-xs text-red-500" role="alert">
-              {topicError.message}
-            </p>
-          )}
+          {/* The banners, the transcript and the composer share one centred
+              column, so the composer lines up with the messages above it. */}
+          <div className="mx-auto w-full max-w-3xl px-4">
+            <ScopeBanner
+              count={scopedChunkIds.length}
+              missing={scope.missing}
+              onClear={() => void unscope()}
+            />
+            {scopeError && (
+              <p className="mb-3 text-xs text-red-500" role="alert">
+                {scopeError}
+              </p>
+            )}
+            {topicError && topicError.sessionId === currentSessionId && (
+              <p className="mb-3 text-xs text-red-500" role="alert">
+                {topicError.message}
+              </p>
+            )}
+          </div>
           <div
             ref={transcript.ref}
             onScroll={transcript.onScroll}
-            className="flex-1 min-h-0 overflow-auto space-y-6 pr-2"
+            className="flex-1 min-h-0 overflow-auto"
           >
-            {state.turns.map((t, i) => (
-              <ChatTurn
-                // The transcript is append-only and turns carry no id; the index is
-                // already load-bearing here, passed down as turnIdx.
-                // eslint-disable-next-line @eslint-react/no-array-index-key
-                key={i}
-                turn={t}
-                sessionId={t.meta?.session_id ?? currentSessionId ?? undefined}
-                turnIdx={i}
-                reportDedupeKeys={reportDedupeKeys}
-              />
-            ))}
+            <div className="mx-auto w-full max-w-3xl space-y-6 px-4">
+              {state.turns.map((t, i) => (
+                <ChatTurn
+                  // The transcript is append-only and turns carry no id; the index is
+                  // already load-bearing here, passed down as turnIdx.
+                  // eslint-disable-next-line @eslint-react/no-array-index-key
+                  key={i}
+                  turn={t}
+                  sessionId={t.meta?.session_id ?? currentSessionId ?? undefined}
+                  turnIdx={i}
+                  reportDedupeKeys={reportDedupeKeys}
+                />
+              ))}
+            </div>
           </div>
           <form
             onSubmit={(e) => {
               e.preventDefault()
               void send()
             }}
-            className="mt-4 flex items-end gap-2 pr-2"
+            className="mx-auto mt-4 w-full max-w-3xl px-4"
           >
-            <textarea
+            <ChatComposer
               value={draft}
               onChange={(e) => setDraft(key, e.target.value)}
               onKeyDown={(e) => {
@@ -631,27 +637,25 @@ export function Chat() {
                   void send()
                 }
               }}
+              aria-label={t('chat.ask_placeholder')}
               placeholder={t('chat.ask_placeholder')}
-              rows={1}
-              className="flex-1 bg-muted border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
-            />
-            {/* size="md" so the shell's aspect-square lands at 40x40, the
-                composer's own height. `busy` replaces what used to be a typed
-                '…' standing in for a spinner, and IconButton folds busy into
-                disabled, so the in-flight guard is unchanged. */}
-            <SendButton
-              label={t('chat.send')}
-              type="submit"
-              variant="primary"
-              size="md"
-              busy={state.inflight}
-              disabled={!draft.trim() || topicPending}
+              // `busy` shows a spinner, and IconButton folds busy into
+              // disabled, so the in-flight guard is unchanged.
+              end={
+                <SendButton
+                  label={t('chat.send')}
+                  type="submit"
+                  variant="primary"
+                  busy={state.inflight}
+                  disabled={!draft.trim() || topicPending}
+                />
+              }
             />
           </form>
           {/* Only once there is something to send: a reopened chat reads its topic every time, and a
               hint flashing past on each would say nothing. */}
           {topicPending && draft.trim() && (
-            <p role="status" className="mt-1 pr-2 text-xs text-muted-foreground">
+            <p role="status" className="mx-auto mt-1 w-full max-w-3xl px-4 text-xs text-muted-foreground">
               {t('chat.topic_focus_reading')}
             </p>
           )}
