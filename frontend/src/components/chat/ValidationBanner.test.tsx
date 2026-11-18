@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { ValidationBanner } from './ValidationBanner'
 import type { AgentTrail, ValidationFields } from '@/api/types'
 
@@ -7,7 +7,35 @@ function trail(overrides: Partial<AgentTrail>): AgentTrail {
   return { steps: 1, actions: [], reason: null, answer: 'split', shortened: 0, evidence_chars: 9, ...overrides }
 }
 
+/** The detail sits behind a disclosure; open it. */
+function openDetail() {
+  fireEvent.click(screen.getByRole('button', { name: 'Show the validation details' }))
+}
+
 describe('ValidationBanner', () => {
+  it('keeps the detail behind a disclosure, and a pass and a mismatch apart', () => {
+    const { unmount } = render(
+      <ValidationBanner
+        v={{ validation_checked: true, validation_mismatch: false, validation_reason: 'Answer matches.' }}
+      />
+    )
+    expect(screen.queryByText('Answer matches.')).not.toBeInTheDocument()
+    const toggle = screen.getByRole('button', { name: 'Show the validation details' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    openDetail()
+    expect(screen.getByText('Answer matches.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Hide the validation details' })).toHaveAttribute('aria-expanded', 'true')
+    // A pass is a quiet line, not a box.
+    expect(screen.getByText(/response validation passed/i).closest('.rounded-md')).toBeNull()
+    unmount()
+
+    render(
+      <ValidationBanner v={{ validation_checked: true, validation_mismatch: true, validation_reason: 'Not supported.' }} />
+    )
+    // A mismatch stays a warning in its own box.
+    expect(screen.getByText(/flagged a potential mismatch/i).closest('.rounded-md')).not.toBeNull()
+  })
+
   it('renders the validated state when the answer is grounded', () => {
     render(
       <ValidationBanner
@@ -19,6 +47,7 @@ describe('ValidationBanner', () => {
       />
     )
     expect(screen.getByText(/response validation passed/i)).toBeInTheDocument()
+    openDetail()
     expect(screen.getByText(/answer matches/i)).toBeInTheDocument()
   })
 
@@ -33,6 +62,7 @@ describe('ValidationBanner', () => {
       />
     )
     expect(screen.getByText(/flagged a potential mismatch/i)).toBeInTheDocument()
+    openDetail()
     expect(screen.getByText(/not supported/i)).toBeInTheDocument()
   })
 
@@ -52,6 +82,8 @@ describe('ValidationBanner', () => {
     expect(
       screen.getByText(/response validation unavailable/i)
     ).toBeInTheDocument()
+    // Opened, the detail is still the catalog's.
+    openDetail()
     expect(screen.getByText(/skipped or unavailable/i)).toBeInTheDocument()
     expect(screen.queryByText(/connection refused/i)).not.toBeInTheDocument()
   })
@@ -61,6 +93,7 @@ describe('ValidationBanner', () => {
     // user expects to see *some* validation status under every response.
     render(<ValidationBanner v={{}} />)
     expect(screen.getByText(/response not validated/i)).toBeInTheDocument()
+    openDetail()
     expect(
       screen.getByText(/skipped or unavailable/i)
     ).toBeInTheDocument()
