@@ -1510,7 +1510,10 @@ describe('Chat session switching', () => {
     await waitFor(() => {
       expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
     })
-    expect(screen.getByText(/Fact \[1\]\./)).toBeInTheDocument()
+    // "Fact [1]." with its marker as a superscript.
+    const fact = screen.getByText(/^Fact/)
+    expect(fact).toHaveTextContent('Fact1.')
+    expect(fact.querySelector('sup')).toHaveTextContent('1')
     expect(useUiStore.getState().currentSessionId).toBe('sess-1')
   })
 
@@ -1563,6 +1566,8 @@ describe('Chat session switching', () => {
     const note = { step: 1, action: 'note', detail: provisional, found: 0 }
     const keyframes = { step: 1, action: 'keyframes', detail: 'harbour_walk.webm', found: 4 }
     const answer = 'Zwei Personen in Regenjacken am Hafen [1].'
+    // The page shows the marker as a superscript, so the text is matched without it.
+    const shown = /^Zwei Personen in Regenjacken am Hafen/
 
     renderChat()
 
@@ -1581,7 +1586,7 @@ describe('Chat session switching', () => {
 
     // Tokens after the note start a fresh answer rather than continue the withdrawn text.
     send({ token: answer })
-    expect(await screen.findByText(answer)).toBeInTheDocument()
+    expect(await screen.findByText(shown)).toBeInTheDocument()
 
     send({
       response: answer,
@@ -1594,7 +1599,7 @@ describe('Chat session switching', () => {
     stream.close()
 
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy'))
-    expect(screen.getByText(answer)).toBeInTheDocument()
+    expect(screen.getByText(shown)).toBeInTheDocument()
     expect(screen.queryByText(new RegExp(provisional))).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
   })

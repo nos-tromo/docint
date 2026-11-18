@@ -110,8 +110,10 @@ The answer is Markdown: `grounded_qa.txt` on a plain turn, and
 `agent_system.txt` on an agent turn, ask the model for lists, bold, tables and
 topic headings where structure helps, and for plain paragraphs otherwise.
 `components/common/MarkdownProse.tsx` renders it, shared with the Analysis
-summary. A table scrolls inside its own box, citation markers such as `[3]` stay
-plain text, and raw HTML in an answer is shown as text, never parsed.
+summary. A table scrolls inside its own box, citation markers such as `[3]` or
+`[1] [2]` show as a superscript on the word before them (`³`, `¹,²`; code is
+left as written, and Copy and the transcript download keep the `[n]` form), and
+raw HTML in an answer is shown as text, never parsed.
 
 The metadata-filter disclosure, the retrieval-mode toggle and the
 **Answer from** control hold the right edge of the Chat header row (the

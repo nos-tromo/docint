@@ -351,7 +351,7 @@ describe('ChatTurn', () => {
     expect(screen.queryByTestId('retry-notice')).not.toBeInTheDocument()
   })
 
-  it('renders a Markdown answer as structure, its citation markers as text', () => {
+  it('renders a Markdown answer as structure, its citation markers as superscripts', () => {
     const answer = [
       '### Board members',
       '',
@@ -368,8 +368,11 @@ describe('ChatTurn', () => {
     expect(screen.getByRole('heading', { level: 3, name: 'Board members' })).toBeInTheDocument()
     expect(container.querySelectorAll('li')).toHaveLength(2)
     expect(screen.getByText('Alice Weber', { selector: 'strong' })).toBeInTheDocument()
-    expect(container.querySelector('li')).toHaveTextContent('Alice Weber chairs the board [1]')
-    expect(screen.getByText(/keeps the minutes \[2\]\[3\]/)).toBeInTheDocument()
+    const [first, second] = Array.from(container.querySelectorAll('li'))
+    expect(first).toHaveTextContent('Alice Weber chairs the board1')
+    expect(first.querySelector('sup')).toHaveTextContent('1')
+    expect(second.querySelector('sup')).toHaveTextContent('2,3')
+    expect(second).not.toHaveTextContent('[')
     // A wide table scrolls inside its own box instead of stretching the panel.
     expect(screen.getByTestId('markdown-table')).toContainElement(screen.getByRole('table'))
     expect(screen.getByRole('cell', { name: 'Chair' })).toBeInTheDocument()
@@ -790,7 +793,7 @@ describe('ChatTurn', () => {
     const trail = screen.getByTestId('agent-trail')
     expect(within(trail).getByText('3 steps')).toBeInTheDocument()
     expect(screen.queryByText('Searches behind this answer')).not.toBeInTheDocument()
-    const answer = screen.getByText('Person A steht am Hafen [1].')
+    const answer = screen.getByText(/^Person A steht am Hafen/)
     expect(trail.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
@@ -1202,7 +1205,7 @@ describe('ChatTurn', () => {
     const meta = { ...lookupMeta(), analyses: [ANALYSIS] }
     renderTurn({ user: 'q', assistant: 'Alice posted most [1].', done: true, meta }, 'en', { sessionId: 'session-1' })
 
-    const answer = screen.getByText('Alice posted most [1].')
+    const answer = screen.getByText(/^Alice posted most/)
     const card = screen.getByTestId('analysis-card')
     expect(within(card).getByText('Analysis 1 · Posts per author')).toBeInTheDocument()
     expect(answer.compareDocumentPosition(card)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
