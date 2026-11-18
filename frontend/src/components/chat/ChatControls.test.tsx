@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { ChatControls } from './ChatControls'
+import { ChatControls, ReasoningToggle } from './ChatControls'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSearchUiStore } from '@/stores/searchUi'
 
@@ -71,8 +71,14 @@ describe('ChatControls', () => {
     expect(panel?.className).not.toContain('bottom-full')
   })
 
-  it('carries the reasoning toggle, off by default and named by its state', () => {
+  it('leaves the reasoning toggle to the composer', () => {
     render(<ChatControls />)
+
+    expect(screen.queryByRole('button', { name: /reasoning/i })).not.toBeInTheDocument()
+  })
+
+  it('names the reasoning toggle by its state, off by default', () => {
+    render(<ReasoningToggle />)
 
     // Off is the safe default: thinking costs latency and tokens, so the user
     // opts in per chat. The state lives in the accessible name, like the
@@ -83,7 +89,7 @@ describe('ChatControls', () => {
   })
 
   it('flips reasoning on and off, and says so', async () => {
-    render(<ChatControls />)
+    render(<ReasoningToggle />)
 
     await userEvent.click(screen.getByRole('button', { name: /reasoning/i }))
 
@@ -99,7 +105,7 @@ describe('ChatControls', () => {
   it('lights the brain up when reasoning is on, rather than only tinting it', async () => {
     // Same rule as the retrieval pair: the two states must survive a glance
     // without a hover, so the drawing changes, not just the background.
-    const { container } = render(<ChatControls />)
+    const { container } = render(<ReasoningToggle />)
     const off = screen.getByRole('button', { name: /reasoning/i }).querySelector('svg')?.innerHTML
 
     await userEvent.click(screen.getByRole('button', { name: /reasoning/i }))

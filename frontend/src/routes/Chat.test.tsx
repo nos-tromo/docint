@@ -263,6 +263,17 @@ describe('Chat SSE handling', () => {
     expect(screen.getByRole('button', { name: /send/i })).toBeDisabled()
   })
 
+  it('puts the reasoning switch in the composer, beside Send', async () => {
+    renderChat()
+
+    const form = (await screen.findByRole('textbox', { name: 'Ask something…' })).closest('form')
+    const reasoning = screen.getByRole('button', { name: /reasoning/i })
+    expect(form).toContainElement(reasoning)
+    expect(reasoning.compareDocumentPosition(screen.getByRole('button', { name: /send/i }))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+  })
+
   it('Enter submits, Shift+Enter inserts a newline', async () => {
     const frames =
       'data: {"token":"ok"}\n\n' +
