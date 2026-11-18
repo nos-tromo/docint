@@ -96,8 +96,15 @@ an `AbortController`.
 The transcript and the composer share one centred column, as in Ghostwriter.
 Your question sits right-aligned in a bubble in the accent colour (`@infra/ui`
 `UserBubble`; `--app-bubble` keeps white text readable in dark mode too), and
-the answer follows below it without a frame. The composer is one pill under
-the transcript (`ChatComposer`) with Send at its end.
+the answer follows below it without a frame or label. An answer reads top to
+bottom: its steps, the text, its analyses, any notices, the validation line,
+entities and sources (round chips; a click opens the source's details), and a
+row of actions: the target chip on the left, **Copy** (the answer as written,
+Markdown included) and **"+ Report"** on the right. The validation is one line:
+a quiet check when it passed, a quiet note when it did not run, an amber box
+when it flagged a mismatch; its reason opens behind a disclosure. The composer
+is one pill under the transcript (`ChatComposer`) with the reasoning switch and
+Send at its end.
 
 The answer is Markdown: `grounded_qa.txt` on a plain turn, and
 `agent_system.txt` on an agent turn, ask the model for lists, bold, tables and
@@ -107,7 +114,8 @@ summary. A table scrolls inside its own box, citation markers such as `[3]` stay
 plain text, and raw HTML in an answer is shown as text, never parsed.
 
 The metadata-filter disclosure, the retrieval-mode toggle and the
-**Answer from** control hold the right edge of the Chat header row
+**Answer from** control hold the right edge of the Chat header row (the
+reasoning switch sits in the composer instead, as in Ghostwriter)
 (`src/components/chat/ChatControls.tsx`): they
 govern what any answer retrieves against, so they belong to the chat rather
 than to the search panel, which owns only the query field and the hits. Each
@@ -138,8 +146,8 @@ The choice belongs to one chat. It is not remembered across reloads. New chat
 returns it to Everything, even from a chat with no turns or a stateless one, as
 does a collection switch away from a started chat and opening Chat with no
 session; opening a saved session leaves the current choice as it is. A turn
-answered from Documents or Images alone says so with a quiet chip beside
-"Assistant" ("Answered from documents only" / "Answered from images only";
+answered from Documents or Images alone says so with a quiet chip in the row
+under the answer ("Answered from documents only" / "Answered from images only";
 "Nur aus Dokumenten beantwortet" / "Nur aus Bildern beantwortet" in German),
 and the chat's transcript download writes the same line after that answer. The
 chip is drawn from the target stored with the turn, so it survives a reload.
@@ -221,14 +229,15 @@ While it works, the turn lists each step as it happens:
 - "Carried over n passages from earlier answers", on a follow-up: the passages
   its earlier answers cite, which it starts out holding as its first sources.
   The row opens the trail, ahead of any search, and stays in it once the turn
-  is done: in the disclosure below with the turn's other steps, or, when the
-  turn took no other step, alone as a line under the answer.
+  is done: in the disclosure with the turn's other steps, or, when the turn
+  took no other step, alone as a line above the answer.
 
-When the turn finishes, its steps fold behind a **Searches behind this
-answer** disclosure where the live list stood. Every agent turn with a step
-besides its pinned selection and its carried passages gets one, lookups
-included. A follow-up that only carried passages took no other step, so its row
-stands as a line under the answer, with no disclosure. A turn whose stream
+The steps stand above the answer, as in Ghostwriter. When the turn finishes,
+they fold behind a disclosure titled by their count (**3 steps** / **3
+Schritte**) where the live list stood. Every agent turn with a step besides its
+pinned selection and its carried passages gets one, lookups included. A
+follow-up that only carried passages took no other step, so its row stands as
+a line above the answer, with no disclosure. A turn whose stream
 failed keeps the steps it showed, in the same form, above the error.
 
 A muted note says when a turn stopped searching at one of its limits: the
@@ -546,7 +555,8 @@ contents peek out while shut; the control is the `@infra/ui`
 `DisclosureButton` at the bar's right edge, not the bar itself. The sections
 run summaries, topics, chat answers, entity findings, hate-speech findings,
 the order the exports use. Artifacts are added from elsewhere in
-the app: an **"+ Report"** control sits on every chat answer, entity finding,
+the app: an **"+ Report"** control sits on every chat answer (in the row of
+actions under it, beside Copy), entity finding,
 and hate-speech finding, and on the Analysis screen's summary and topics; a
 topics item is titled by its topic count and previews the first labels. Switching the active collection releases the active
 report, so a report and its evidence always describe the same collection; every
