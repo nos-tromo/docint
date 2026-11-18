@@ -9,7 +9,7 @@ function sourceKey(s: Source, i: number): string {
 }
 
 /**
- * An answer's sources as a compact pill row, mirroring the entity pills.
+ * An answer's sources as a row of round chips, mirroring the entity chips (Ghostwriter's result chips).
  *
  * Clicking a pill expands the familiar `Citation` detail card below the row
  * (already open, so preview, reference metadata, and Translate are one click
@@ -35,7 +35,7 @@ export function SourcePills({ sources }: { sources: Source[] }) {
                 title={t('chat.source_toggle_details')}
                 aria-expanded={key === selected}
                 onClick={() => setSelected((cur) => (cur === key ? null : key))}
-                className="inline-flex max-w-full items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px] hover:text-blue-300"
+                className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted px-2.5 py-1 text-xs hover:bg-accent"
               >
                 {typeof s.citation_index === 'number' && (
                   <span className="tabular-nums text-muted-foreground">{s.citation_index}</span>

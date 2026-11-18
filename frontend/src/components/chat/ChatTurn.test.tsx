@@ -227,16 +227,44 @@ describe('ChatTurn', () => {
     }
   })
 
-  it('sits in the assistant header row, between its label and the answer', () => {
+  it('sits in the row under the answer, left of Copy and Add to report, with no assistant label', () => {
     const meta = { session_id: 's', sources: [], retrieval_target: 'documents' } as unknown as ChatFinalEvent
 
-    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta })
+    renderTurn({ user: 'who?', assistant: 'Alice.', done: true, meta }, 'en', {
+      sessionId: 's',
+      turnIdx: 0,
+      reportDedupeKeys: new Set<string>()
+    })
 
-    const label = screen.getByText('Assistant')
-    const chip = screen.getByTestId('retrieval-target-used')
+    expect(screen.queryByText('Assistant')).not.toBeInTheDocument()
     const answer = screen.getByText('Alice.')
-    expect(label.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(chip.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const row = screen.getByTestId('answer-actions')
+    const chip = within(row).getByTestId('retrieval-target-used')
+    const copy = within(row).getByRole('button', { name: 'Copy answer' })
+    const report = within(row).getByRole('button', { name: 'Add to report' })
+    expect(answer.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(chip.compareDocumentPosition(copy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(copy.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('copies the answer as written, Markdown included', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
+
+    renderTurn({ user: 'who?', assistant: 'Alice met **Bob** [1].', done: true, meta: null })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Copy answer' }))
+    expect(writeText).toHaveBeenCalledWith('Alice met **Bob** [1].')
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+  })
+
+  it('offers no copy while the answer is still being written', () => {
+    renderTurn({ user: 'who?', assistant: 'Alice', done: false, meta: null })
+
+    expect(screen.queryByRole('button', { name: 'Copy answer' })).not.toBeInTheDocument()
   })
 
   it('no target chip on a scoped turn', () => {
@@ -754,6 +782,24 @@ describe('ChatTurn', () => {
       'Searched “Hafen Regenjacken”: 3 new passages',
       'Searched the images for “zwei Personen in Regenjacken am Hafen”: 2 new images'
     ])
+  })
+
+  it('titles the finished steps by their count, above the answer', () => {
+    renderTurn({ user: 'Wer steht am Hafen?', assistant: 'Person A steht am Hafen [1].', done: true, meta: lookupMeta() })
+
+    const trail = screen.getByTestId('agent-trail')
+    expect(within(trail).getByText('3 steps')).toBeInTheDocument()
+    expect(screen.queryByText('Searches behind this answer')).not.toBeInTheDocument()
+    const answer = screen.getByText('Person A steht am Hafen [1].')
+    expect(trail.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('streams its steps above the answer being written', () => {
+    renderTurn({ user: 'Was zeigt der Clip?', assistant: 'Person A', done: false, meta: null, agentSteps: NEW_STEPS })
+
+    const live = screen.getByTestId('agent-trail-live')
+    const answer = screen.getByText('Person A')
+    expect(live.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it.each([

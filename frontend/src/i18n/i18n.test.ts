@@ -17,7 +17,8 @@ const AGENT_REASONS = [
 
 /** One label per trail step kind, singular and plural where a step counts what it found. */
 const AGENT_TRAIL_KEYS = [
-  'chat.agent_trail_title',
+  'chat.agent_trail_steps_one',
+  'chat.agent_trail_steps_other',
   'chat.agent_trail_show',
   'chat.agent_trail_hide',
   'chat.agent_trail_seed_one',

@@ -75,7 +75,7 @@ export function AnswerEntities({ sources }: { sources: Source[] }) {
 
   return (
     <div className="mt-3">
-      <div className="text-xs uppercase text-muted-foreground">{t('chat.entities')}</div>
+      <div className="text-xs text-muted-foreground">{t('chat.entities')}</div>
       <ul className="mt-1.5 flex flex-wrap gap-1" data-testid="answer-entities">
         {shown.map((mention) => {
           const body = (
@@ -89,14 +89,14 @@ export function AnswerEntities({ sources }: { sources: Source[] }) {
             <li
               key={mention.key}
               data-testid="answer-entity"
-              className="inline-flex items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]"
+              className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2.5 py-1 text-xs"
             >
               {/* Without an active collection there is nothing to resolve the
                   entity against, so the pill stays informational. */}
               {collection ? (
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1 hover:text-blue-300"
+                  className="inline-flex items-center gap-1 hover:text-foreground"
                   title={t('chat.entity_open_analysis')}
                   onClick={() => open(mention)}
                 >

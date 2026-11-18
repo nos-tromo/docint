@@ -138,7 +138,6 @@ export const de: Strings = {
   'chat.title': 'Chat',
   'chat.download': 'Herunterladen',
   'chat.you': 'Sie',
-  'chat.assistant': 'Assistent',
   'chat.no_answer': '(keine Antwort)',
   'chat.answer_pending': 'Antwort wird erstellt…',
   'chat.error_title': 'Chat-Fehler',
@@ -146,6 +145,7 @@ export const de: Strings = {
   'chat.entities_more': '+{count} weitere',
   'chat.entity_open_analysis': 'In Analyse anzeigen',
   'chat.sources': 'Quellen',
+  'chat.copy_answer': 'Antwort kopieren',
   'chat.source_number': 'Quelle {n}',
   'chat.source_toggle_details': 'Quellendetails anzeigen',
   'chat.ask_placeholder': 'Etwas fragen…',
@@ -218,6 +218,8 @@ export const de: Strings = {
   'chat.validation_passed_title': 'Antwortvalidierung bestanden',
   'chat.validation_unavailable_title': 'Antwortvalidierung nicht verfügbar',
   'chat.validation_not_validated_title': 'Antwort nicht validiert',
+  'chat.validation_details_show': 'Details der Validierung anzeigen',
+  'chat.validation_details_hide': 'Details der Validierung ausblenden',
   'chat.validation_default_detail':
     'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
   'chat.validation_passed_assessment_title':
@@ -232,7 +234,8 @@ export const de: Strings = {
     '{count} Passage wurde gekürzt, damit sie in den Kontext des Modells passt.',
   'chat.assessment_shortened_other':
     '{count} Passagen wurden gekürzt, damit sie in den Kontext des Modells passen.',
-  'chat.agent_trail_title': 'Suchen hinter dieser Antwort',
+  'chat.agent_trail_steps_one': '{count} Schritt',
+  'chat.agent_trail_steps_other': '{count} Schritte',
   'chat.agent_trail_show': 'Suchen hinter dieser Antwort anzeigen',
   'chat.agent_trail_hide': 'Suchen hinter dieser Antwort ausblenden',
   'chat.agent_trail_seed_one': 'Ausgangspunkt: {count} Passage',
