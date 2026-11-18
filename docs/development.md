@@ -218,7 +218,15 @@ requests to `main`. It delegates to the shared reusable pipeline
   Node 20).
 
 Dependabot is configured via `.github/dependabot.yml` for dependency
-updates.
+updates. An alert with a fixed version is closed by raising the version, or,
+for a transitive npm package, by an override floor in `frontend/package.json`
+(`pnpm.overrides`). An alert with no fixed version is dismissed on GitHub only
+once its vulnerable path is shown unreachable, and is listed here until a fix
+ships:
+
+| Alert | Package | Why it is dismissed | Revisit |
+|---|---|---|---|
+| #187, GHSA-fc5q-39xc-vjpf (high) | `picomatch` ≤ 4.0.7, frontend dev only | ReDoS needs an attacker-supplied glob. picomatch arrives only through build and test tooling (eslint, typescript-eslint, vite, vitest via tinyglobby), and every glob it sees comes from this repo's own config. The built SPA holds none of its code, and the frontend image ships `dist/` alone under nginx. Dismissed as tolerable risk. | When picomatch publishes a fix: add an override floor and close this row. |
 
 ## Docker development
 
