@@ -141,6 +141,7 @@ export const en = {
   'chat.copy_answer': 'Copy answer',
   'chat.source_number': 'Source {n}',
   'chat.source_toggle_details': 'Show source details',
+  'chat.source_no_excerpt': 'No excerpt is stored for this source.',
   'chat.ask_placeholder': 'Ask something…',
   'chat.send': 'Send',
   'chat.retrieval_session': 'Whole chat (stateful)',

@@ -148,6 +148,7 @@ export const de: Strings = {
   'chat.copy_answer': 'Antwort kopieren',
   'chat.source_number': 'Quelle {n}',
   'chat.source_toggle_details': 'Quellendetails anzeigen',
+  'chat.source_no_excerpt': 'Zu dieser Quelle ist kein Textauszug gespeichert.',
   'chat.ask_placeholder': 'Etwas fragen…',
   'chat.send': 'Senden',
   'chat.retrieval_session': 'Kompletten Chat einbeziehen (stateful)',

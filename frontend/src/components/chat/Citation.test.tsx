@@ -13,9 +13,8 @@ describe('Citation', () => {
         <Citation source={{ id: 's1', filename: 'f.pdf', text: 'Hola mundo' } as never} />
       </QueryClientProvider>
     )
-    // The snippet (and the TranslateControl mounted next to it) only renders
-    // once the citation card is expanded.
-    await userEvent.click(screen.getByRole('button', { name: 'f.pdf' }))
+    // The details are shown as soon as they mount: the pill that opened them
+    // was the click.
     expect(screen.getByText('Hola mundo')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /translate/i })).toBeInTheDocument()
   })
@@ -28,35 +27,34 @@ describe('Citation', () => {
       </QueryClientProvider>
     )
     expect(screen.queryByText('0.842')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'f.pdf' })).toBeInTheDocument()
+    expect(screen.getByText('Hola')).toBeInTheDocument()
   })
 
-  it('shows the number the generator cited the source by', () => {
-    // Answers refer to "source 3"; the number comes from the backend
-    // (`citation_index`), never from the card's position — the list is
-    // deduped and image matches are appended after generation, so position
-    // and the model's numbering drift apart.
+  it('repeats neither the number nor the label the pill above carries', () => {
+    // The pill is the details' heading (SourcePills tests its number and label).
     const qc = new QueryClient()
     render(
       <QueryClientProvider client={qc}>
         <Citation source={{ id: 's1', filename: 'f.pdf', text: 'Hola', citation_index: 3 } as never} />
       </QueryClientProvider>
     )
-    expect(screen.getByText('3')).toBeInTheDocument()
-    // The label stays the button's whole accessible name.
-    expect(screen.getByRole('button', { name: 'f.pdf' })).toBeInTheDocument()
+    const detail = screen.getByTestId('source-detail')
+    expect(detail).not.toHaveTextContent('f.pdf')
+    expect(detail).not.toHaveTextContent('3')
+    // A quiet block on a left rule, not a boxed card.
+    expect(detail).toHaveClass('border-l-2')
+    expect(detail).not.toHaveClass('rounded-md')
   })
 
-  it('leaves a source the generator never saw unnumbered', () => {
-    // Image matches are retrieved after generation, so the answer cannot
-    // have cited them — a number here would invite a lookup that fails.
+  it('says so in one line when the source carries no passage', () => {
     const qc = new QueryClient()
     render(
       <QueryClientProvider client={qc}>
-        <Citation source={{ id: 's1', filename: 'shot.png', text: 'Hola' } as never} />
+        <Citation source={{ id: 's1', filename: 'f.txt' } as never} />
       </QueryClientProvider>
     )
-    expect(screen.queryByTitle(/^Source /)).not.toBeInTheDocument()
+    expect(screen.getByTestId('source-detail')).toHaveTextContent('No excerpt is stored for this source.')
+    expect(screen.queryByRole('button', { name: /translate/i })).not.toBeInTheDocument()
   })
 
   it('caps the metadata value track so unbreakable values cannot overflow the card', async () => {
@@ -78,15 +76,13 @@ describe('Citation', () => {
         />
       </QueryClientProvider>
     )
-    await userEvent.click(screen.getByRole('button', { name: 'f.pdf' }))
     const dl = document.querySelector('dl')
     expect(dl?.className).toContain('grid-cols-[auto_minmax(0,1fr)]')
   })
 
-  it('opens the preview dialog from the header instead of leaving the app', async () => {
-    // The old full-width "Open original" anchor cost a row inside the
-    // expanded panel and navigated away; the preview is now an icon action in
-    // the header row, next to Translate.
+  it('opens the preview dialog from the details instead of leaving the app', async () => {
+    // The old full-width "Open original" anchor cost a row and navigated
+    // away; the preview is an icon action at the details' right edge.
     useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
     const qc = new QueryClient()
     render(
@@ -103,18 +99,6 @@ describe('Citation', () => {
       filename: 'f.pdf'
     })
     expect(screen.queryByRole('link', { name: /original/i })).not.toBeInTheDocument()
-  })
-
-  it('starts expanded when defaultOpen is set', () => {
-    // SourcePills opens the card from a pill click; landing collapsed would
-    // demand a redundant second click on the card header.
-    const qc = new QueryClient()
-    render(
-      <QueryClientProvider client={qc}>
-        <Citation source={{ id: 's1', filename: 'f.pdf', text: 'Hola mundo' } as never} defaultOpen />
-      </QueryClientProvider>
-    )
-    expect(screen.getByText('Hola mundo')).toBeInTheDocument()
   })
 
   it('omits the preview action when the source has no stored file', () => {
