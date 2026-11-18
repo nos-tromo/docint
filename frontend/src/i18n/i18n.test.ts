@@ -19,8 +19,6 @@ const AGENT_REASONS = [
 const AGENT_TRAIL_KEYS = [
   'chat.agent_trail_steps_one',
   'chat.agent_trail_steps_other',
-  'chat.agent_trail_show',
-  'chat.agent_trail_hide',
   'chat.agent_trail_seed_one',
   'chat.agent_trail_seed_other',
   'chat.agent_trail_carried_one',

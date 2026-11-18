@@ -219,8 +219,6 @@ export const de: Strings = {
   'chat.validation_passed_title': 'Antwortvalidierung bestanden',
   'chat.validation_unavailable_title': 'Antwortvalidierung nicht verfügbar',
   'chat.validation_not_validated_title': 'Antwort nicht validiert',
-  'chat.validation_details_show': 'Details der Validierung anzeigen',
-  'chat.validation_details_hide': 'Details der Validierung ausblenden',
   'chat.validation_default_detail':
     'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
   'chat.validation_passed_assessment_title':
@@ -237,8 +235,6 @@ export const de: Strings = {
     '{count} Passagen wurden gekürzt, damit sie in den Kontext des Modells passen.',
   'chat.agent_trail_steps_one': '{count} Schritt',
   'chat.agent_trail_steps_other': '{count} Schritte',
-  'chat.agent_trail_show': 'Suchen hinter dieser Antwort anzeigen',
-  'chat.agent_trail_hide': 'Suchen hinter dieser Antwort ausblenden',
   'chat.agent_trail_seed_one': 'Ausgangspunkt: {count} Passage',
   'chat.agent_trail_seed_other': 'Ausgangspunkt: {count} Passagen',
   'chat.agent_trail_carried_one': '{count} Passage aus früheren Antworten übernommen',
