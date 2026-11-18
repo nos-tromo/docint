@@ -91,9 +91,10 @@ export function ReasoningToggle() {
 }
 
 /**
- * The settings that govern the next answer: the reasoning toggle, the
- * retrieval mode and the metadata filters. The last two decide what the answer
- * retrieves against; the first, how hard the model works on what it found.
+ * The settings that govern the next answer: the retrieval mode and the
+ * metadata filters decide what the answer retrieves against. The reasoning
+ * toggle, how hard the model works on what it found, sits in the composer
+ * beside Send (routes/Chat.tsx).
  *
  * The two retrieval settings: the
  * metadata filters and the retrieval mode.
@@ -161,7 +162,7 @@ export function ChatControls() {
   return (
     <div className="flex items-center gap-2">
       <RetrievalTargetPicker />
-      <ReasoningToggle />
+      {/* The reasoning switch sits in the composer beside Send (routes/Chat.tsx), as in Ghostwriter. */}
       <RetrievalToggle />
       {/* Last, so its right edge *is* the header row's right edge: the panel it
           drops is right-aligned under it and therefore lands on the same line

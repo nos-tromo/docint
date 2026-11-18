@@ -61,13 +61,16 @@ describe('SourcePills', () => {
       }
     ])
 
-    await userEvent.click(screen.getByTestId('source-pill'))
+    const pill = screen.getByTestId('source-pill')
+    await userEvent.click(pill)
 
-    // One click on the pill lands with the card details expanded — the
-    // snippet-backed Translate control and the metadata are visible without
-    // a second click on the card header.
+    // One click on the pill shows the details — the snippet-backed Translate
+    // control and the metadata — and marks the pill as their heading.
     expect(screen.getByText('alice')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /translate/i })).toBeInTheDocument()
+    expect(pill).toHaveAttribute('aria-expanded', 'true')
+    // The details do not repeat the pill's label in a box of their own.
+    expect(screen.getByTestId('source-detail')).not.toHaveTextContent('a.pdf')
   })
 
   it('collapses the card when the same pill is clicked again', async () => {

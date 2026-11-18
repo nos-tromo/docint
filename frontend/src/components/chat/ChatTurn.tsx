@@ -1,5 +1,6 @@
 import { useId, useState } from 'react'
 import {
+  CopyButton,
   DisclosureButton,
   DocumentsIcon,
   ImageIcon,
@@ -329,15 +330,19 @@ function researchSteps(actions: TrailStep[] | undefined): TrailStep[] {
   )
 }
 
-/** The searches behind a finished agent turn, behind a disclosure where the live trail stood. */
+/** The searches behind a finished agent turn, behind a disclosure titled by their count, where the live trail stood. */
 function AgentTrailDisclosure({ steps }: { steps: TrailStep[] }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const listId = useId()
   return (
-    <div className="mt-3 text-xs text-muted-foreground" data-testid="agent-trail">
+    <div className="mb-3 text-xs text-muted-foreground" data-testid="agent-trail">
       <div className="flex items-center gap-2">
-        <span className="flex-1">{t('chat.agent_trail_title')}</span>
+        <span className="flex-1">
+          {t(steps.length === 1 ? 'chat.agent_trail_steps_one' : 'chat.agent_trail_steps_other', {
+            count: steps.length
+          })}
+        </span>
         <DisclosureButton
           expanded={open}
           controls={listId}
@@ -352,12 +357,12 @@ function AgentTrailDisclosure({ steps }: { steps: TrailStep[] }) {
 }
 
 /**
- * A finished turn's trail: behind the disclosure, unless all the turn did was carry passages over. It searched
- * nothing then, so its one row stands under the answer rather than behind a title that names searches.
+ * A finished turn's trail, above the answer: behind the disclosure, unless all the turn did was carry passages
+ * over. It searched nothing then, so its one row stands on its own rather than behind a count of steps.
  */
 function FinishedTrail({ steps }: { steps: TrailStep[] }) {
   if (steps.every((step) => step.action === 'carried')) {
-    return <TrailSteps steps={steps} testId="agent-trail" className="mt-3 text-xs text-muted-foreground" />
+    return <TrailSteps steps={steps} testId="agent-trail" className="mb-3 text-xs text-muted-foreground" />
   }
   return <AgentTrailDisclosure steps={steps} />
 }
@@ -464,6 +469,7 @@ export function ChatTurn({
     assessment && trail && Object.hasOwn(ANSWER_COPY, trail.answer) ? ANSWER_COPY[trail.answer] : undefined
   const targetUsed = retrievalTargetUsed(turn.meta)
   const analyses = analysesOf(turn)
+  const copyable = turn.done && !!turn.assistant
   return (
     <article className="space-y-3">
       {/* The question in the accent bubble; its label is for screen readers,
@@ -473,27 +479,8 @@ export function ChatTurn({
         <div className="whitespace-pre-wrap">{turn.user}</div>
       </UserBubble>
       <div>
-        <div className="flex items-center justify-between gap-2 mb-1">
-          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-            <span className="shrink-0">{t('chat.assistant')}</span>
-            {targetUsed && <TargetUsedChip target={targetUsed} />}
-          </div>
-          {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
-        </div>
-        {turn.assistant ? (
-          <MarkdownProse text={turn.assistant} />
-        ) : (
-          <div className="text-muted-foreground">
-            {turn.done ? (
-              t('chat.no_answer')
-            ) : (
-              // Hidden because the spinner is a status of its own; the live region below announces it.
-              <span aria-hidden="true" data-testid="answer-pending" className="inline-flex py-1">
-                <Spinner className="border-border" label={t('chat.answer_pending')} />
-              </span>
-            )}
-          </div>
-        )}
+        {/* The steps come first, as in Ghostwriter: live while the turn runs, behind a disclosure once
+            it is done. Who answers needs no label; the layout says it. */}
         {!turn.done && (
           // Mounted before the first step arrives, so a screen reader announces it; `atomic` off keeps
           // each new step from re-reading the whole list.
@@ -503,8 +490,23 @@ export function ChatTurn({
               <TrailSteps
                 steps={turn.agentSteps}
                 testId="agent-trail-live"
-                className="mt-3 text-xs text-muted-foreground"
+                className="mb-3 text-xs text-muted-foreground"
               />
+            )}
+          </div>
+        )}
+        {research.length > 0 && <FinishedTrail steps={research} />}
+        {turn.assistant ? (
+          <MarkdownProse text={turn.assistant} />
+        ) : (
+          <div className="text-muted-foreground">
+            {turn.done ? (
+              t('chat.no_answer')
+            ) : (
+              // Hidden because the spinner is a status of its own; the live region above announces it.
+              <span aria-hidden="true" data-testid="answer-pending" className="inline-flex py-1">
+                <Spinner className="border-border" label={t('chat.answer_pending')} />
+              </span>
             )}
           </div>
         )}
@@ -517,7 +519,6 @@ export function ChatTurn({
             inReport={reportDedupeKeys?.has(analysisReportItem(entry.id).dedupe_key) ?? false}
           />
         ))}
-        {research.length > 0 && <FinishedTrail steps={research} />}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">{t('chat.error_title')}</div>
@@ -581,8 +582,24 @@ export function ChatTurn({
         <AnswerEntities sources={sources} />
         {sources.length > 0 && (
           <div className="mt-3 space-y-1.5">
-            <div className="text-xs uppercase text-muted-foreground">{t('chat.sources')}</div>
+            <div className="text-xs text-muted-foreground">{t('chat.sources')}</div>
             <SourcePills sources={sources} />
+          </div>
+        )}
+        {(targetUsed || copyable || reportItem) && (
+          // What the finished answer was drawn from on the left, what can be done with it on the right.
+          <div className="mt-3 flex items-center gap-2" data-testid="answer-actions">
+            {targetUsed && <TargetUsedChip target={targetUsed} />}
+            <div className="ml-auto flex items-center gap-1">
+              {copyable && (
+                <CopyButton
+                  text={turn.assistant}
+                  label={t('chat.copy_answer')}
+                  copiedLabel={t('common.copied')}
+                />
+              )}
+              {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+            </div>
           </div>
         )}
       </div>

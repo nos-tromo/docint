@@ -9,11 +9,12 @@ function sourceKey(s: Source, i: number): string {
 }
 
 /**
- * An answer's sources as a compact pill row, mirroring the entity pills.
+ * An answer's sources as a row of round chips, mirroring the entity chips (Ghostwriter's result chips).
  *
- * Clicking a pill expands the familiar `Citation` detail card below the row
- * (already open, so preview, reference metadata, and Translate are one click
- * away); clicking the same pill again collapses it, another pill switches.
+ * Clicking a chip marks it and opens its details (`Citation`) below the row:
+ * the passage, reference metadata, Translate and preview, one click away. The
+ * marked chip is their heading, so the details repeat neither its number nor
+ * its label. Clicking the same chip again closes them, another chip switches.
  */
 export function SourcePills({ sources }: { sources: Source[] }) {
   const t = useT()
@@ -35,7 +36,7 @@ export function SourcePills({ sources }: { sources: Source[] }) {
                 title={t('chat.source_toggle_details')}
                 aria-expanded={key === selected}
                 onClick={() => setSelected((cur) => (cur === key ? null : key))}
-                className="inline-flex max-w-full items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px] hover:text-blue-300"
+                className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted px-2.5 py-1 text-xs hover:bg-accent aria-expanded:border-foreground/40 aria-expanded:bg-accent"
               >
                 {typeof s.citation_index === 'number' && (
                   <span className="tabular-nums text-muted-foreground">{s.citation_index}</span>
@@ -48,9 +49,9 @@ export function SourcePills({ sources }: { sources: Source[] }) {
       </ul>
       {selectedSource && (
         <div className="mt-2">
-          {/* Remount per selection so the card's open state resets when the
-              user switches pills. */}
-          <Citation key={selected} source={selectedSource} defaultOpen />
+          {/* Remount per selection so a translation shown for one source does
+              not carry over to the next. */}
+          <Citation key={selected} source={selectedSource} />
         </div>
       )}
     </div>

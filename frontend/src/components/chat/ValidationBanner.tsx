@@ -1,5 +1,5 @@
-import type { ComponentType } from 'react'
-import { CheckIcon, InfoIcon, WarningIcon, type IconProps } from '@infra/ui'
+import { useId, useState, type ComponentType } from 'react'
+import { CheckIcon, DisclosureButton, InfoIcon, XIcon, type IconProps } from '@infra/ui'
 import type { ChatFinalEvent, ValidationFields } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -7,7 +7,8 @@ import { useT } from '@/i18n/LanguageContext'
 type BannerFields = ValidationFields & Pick<ChatFinalEvent, 'answer_mode' | 'agent'>
 
 interface BannerSpec {
-  tone: string
+  /** Which outcome: every one is the same quiet line, told apart by its icon and the icon's colour. */
+  kind: 'mismatch' | 'passed' | 'unverified'
   /** Drawn, never typed — `⚠`/`✓`/`ⓘ` render from whatever font the OS falls
    *  back to, and the first and last of those carry emoji presentation on some
    *  platforms, so they arrive full-colour beside monochrome chrome. */
@@ -29,8 +30,8 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
     answer === 'unsplit' || answer === 'empty' || (answer === 'split' && v.agent?.evidence_chars === 0)
   if (v.validation_checked === true && v.validation_mismatch === true) {
     return {
-      tone: 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]',
-      Icon: WarningIcon,
+      kind: 'mismatch',
+      Icon: XIcon,
       title: assessment
         ? t('chat.validation_mismatch_assessment_title')
         : t('chat.validation_mismatch_title'),
@@ -39,7 +40,7 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   }
   if (v.validation_checked === true) {
     return {
-      tone: 'border-[var(--status-emerald-border)] bg-[var(--status-emerald-surface)] text-[var(--status-emerald-strong)]',
+      kind: 'passed',
       Icon: CheckIcon,
       title: assessment
         ? t('chat.validation_passed_assessment_title')
@@ -54,7 +55,7 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   // backend `reason` can carry a raw caught-exception message (validation
   // model/transport failure) — never render it; catalog copy only.
   return {
-    tone: 'border-border bg-muted text-muted-foreground',
+    kind: 'unverified',
     Icon: InfoIcon,
     title:
       assessment && v.validation_checked === false && noSourcePart
@@ -66,16 +67,42 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   }
 }
 
+/**
+ * The answer's validation, as one quiet line under it: a green check when it passed, a red cross when it
+ * flagged a mismatch, an info mark when it did not run. The detail opens behind a disclosure, so it never
+ * outweighs the answer.
+ */
 export function ValidationBanner({ v }: { v: BannerFields }) {
   const t = useT()
   const spec = resolveSpec(v, t)
+  const [open, setOpen] = useState(false)
+  const detailId = useId()
   return (
-    <div className={cn('mt-3 rounded-md border px-3 py-2 text-xs', spec.tone)}>
-      <div className="font-medium flex items-center gap-2">
-        <spec.Icon className="h-3.5 w-3.5 shrink-0" />
-        <span>{spec.title}</span>
+    <div className="mt-3 text-xs text-muted-foreground" data-validation={spec.kind}>
+      <div className="flex items-center gap-2">
+        <spec.Icon
+          className={cn(
+            'h-3.5 w-3.5 shrink-0',
+            spec.kind === 'passed' && 'text-[var(--status-emerald-fg)]',
+            spec.kind === 'mismatch' && 'text-[var(--status-red-fg)]'
+          )}
+        />
+        <span className="min-w-0 flex-1">{spec.title}</span>
+        {spec.detail && (
+          <DisclosureButton
+            expanded={open}
+            controls={detailId}
+            label={open ? t('chat.validation_details_hide') : t('chat.validation_details_show')}
+            onClick={() => setOpen((value) => !value)}
+            className="h-6 w-6"
+          />
+        )}
       </div>
-      {spec.detail && <div className="mt-1 text-[11px] opacity-90">{spec.detail}</div>}
+      {open && spec.detail && (
+        <div id={detailId} className="mt-1 text-[11px]">
+          {spec.detail}
+        </div>
+      )}
     </div>
   )
 }

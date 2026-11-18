@@ -20,7 +20,7 @@ import { scopeChunkIds, scopeFor, searchKeyFor, useSearchUiStore } from '@/store
 import { focusInScope, toSessionTopic, useTopicFocusStore } from '@/stores/topicFocus'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
-import { ChatControls } from '@/components/chat/ChatControls'
+import { ChatControls, ReasoningToggle } from '@/components/chat/ChatControls'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
 import { ScopeBanner } from '@/components/chat/ScopeBanner'
 import { SearchPanel } from '@/components/chat/SearchPanel'
@@ -642,13 +642,16 @@ export function Chat() {
               // `busy` shows a spinner, and IconButton folds busy into
               // disabled, so the in-flight guard is unchanged.
               end={
-                <SendButton
-                  label={t('chat.send')}
-                  type="submit"
-                  variant="primary"
-                  busy={state.inflight}
-                  disabled={!draft.trim() || topicPending}
-                />
+                <>
+                  <ReasoningToggle />
+                  <SendButton
+                    label={t('chat.send')}
+                    type="submit"
+                    variant="primary"
+                    busy={state.inflight}
+                    disabled={!draft.trim() || topicPending}
+                  />
+                </>
               }
             />
           </form>
