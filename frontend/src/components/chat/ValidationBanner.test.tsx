@@ -13,8 +13,8 @@ function openDetail() {
 }
 
 describe('ValidationBanner', () => {
-  it('keeps the detail behind a disclosure, and a pass and a mismatch apart', () => {
-    const { unmount } = render(
+  it('keeps the detail behind a disclosure, and draws a pass and a mismatch alike but for the icon', () => {
+    const { container: passed, unmount } = render(
       <ValidationBanner
         v={{ validation_checked: true, validation_mismatch: false, validation_reason: 'Answer matches.' }}
       />
@@ -25,15 +25,22 @@ describe('ValidationBanner', () => {
     openDetail()
     expect(screen.getByText('Answer matches.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Hide the validation details' })).toHaveAttribute('aria-expanded', 'true')
-    // A pass is a quiet line, not a box.
-    expect(screen.getByText(/response validation passed/i).closest('.rounded-md')).toBeNull()
+    const passLine = passed.firstElementChild
+    const check = passed.querySelector('svg')
+    expect(check).toHaveClass('text-[var(--status-emerald-fg)]')
+    const checkDrawing = check?.innerHTML
     unmount()
 
-    render(
+    const { container: flagged } = render(
       <ValidationBanner v={{ validation_checked: true, validation_mismatch: true, validation_reason: 'Not supported.' }} />
     )
-    // A mismatch stays a warning in its own box.
-    expect(screen.getByText(/flagged a potential mismatch/i).closest('.rounded-md')).not.toBeNull()
+    // The same quiet line, no box: only the icon says it, a red cross for the green check.
+    const mismatchLine = flagged.firstElementChild
+    expect(mismatchLine?.className).toBe(passLine?.className)
+    expect(screen.getByText(/flagged a potential mismatch/i).closest('.rounded-md')).toBeNull()
+    const cross = flagged.querySelector('svg')
+    expect(cross).toHaveClass('text-[var(--status-red-fg)]')
+    expect(cross?.innerHTML).not.toBe(checkDrawing)
   })
 
   it('renders the validated state when the answer is grounded', () => {

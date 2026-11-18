@@ -1,5 +1,5 @@
 import { useId, useState, type ComponentType } from 'react'
-import { CheckIcon, DisclosureButton, InfoIcon, WarningIcon, type IconProps } from '@infra/ui'
+import { CheckIcon, DisclosureButton, InfoIcon, XIcon, type IconProps } from '@infra/ui'
 import type { ChatFinalEvent, ValidationFields } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -7,7 +7,7 @@ import { useT } from '@/i18n/LanguageContext'
 type BannerFields = ValidationFields & Pick<ChatFinalEvent, 'answer_mode' | 'agent'>
 
 interface BannerSpec {
-  /** A mismatch is a warning and keeps a box; the other outcomes are a quiet line. */
+  /** Which outcome: every one is the same quiet line, told apart by its icon and the icon's colour. */
   kind: 'mismatch' | 'passed' | 'unverified'
   /** Drawn, never typed — `⚠`/`✓`/`ⓘ` render from whatever font the OS falls
    *  back to, and the first and last of those carry emoji presentation on some
@@ -31,7 +31,7 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
   if (v.validation_checked === true && v.validation_mismatch === true) {
     return {
       kind: 'mismatch',
-      Icon: WarningIcon,
+      Icon: XIcon,
       title: assessment
         ? t('chat.validation_mismatch_assessment_title')
         : t('chat.validation_mismatch_title'),
@@ -68,29 +68,26 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
 }
 
 /**
- * The answer's validation, on one line under it: a mismatch as a compact amber warning, a pass or an
- * unverified answer as a quiet note. The detail opens behind a disclosure, so it never outweighs the answer.
+ * The answer's validation, as one quiet line under it: a green check when it passed, a red cross when it
+ * flagged a mismatch, an info mark when it did not run. The detail opens behind a disclosure, so it never
+ * outweighs the answer.
  */
 export function ValidationBanner({ v }: { v: BannerFields }) {
   const t = useT()
   const spec = resolveSpec(v, t)
   const [open, setOpen] = useState(false)
   const detailId = useId()
-  const warning = spec.kind === 'mismatch'
   return (
-    <div
-      className={cn(
-        'mt-3 text-xs',
-        warning
-          ? 'rounded-md border border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] px-3 py-1.5 text-[var(--status-amber-strong)]'
-          : 'text-muted-foreground'
-      )}
-    >
+    <div className="mt-3 text-xs text-muted-foreground" data-validation={spec.kind}>
       <div className="flex items-center gap-2">
         <spec.Icon
-          className={cn('h-3.5 w-3.5 shrink-0', spec.kind === 'passed' && 'text-[var(--status-emerald-fg)]')}
+          className={cn(
+            'h-3.5 w-3.5 shrink-0',
+            spec.kind === 'passed' && 'text-[var(--status-emerald-fg)]',
+            spec.kind === 'mismatch' && 'text-[var(--status-red-fg)]'
+          )}
         />
-        <span className={cn('min-w-0 flex-1', warning && 'font-medium')}>{spec.title}</span>
+        <span className="min-w-0 flex-1">{spec.title}</span>
         {spec.detail && (
           <DisclosureButton
             expanded={open}

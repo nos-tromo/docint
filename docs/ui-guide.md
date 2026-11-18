@@ -100,9 +100,10 @@ the answer follows below it without a frame or label. An answer reads top to
 bottom: its steps, the text, its analyses, any notices, the validation line,
 entities and sources (round chips; a click opens the source's details), and a
 row of actions: the target chip on the left, **Copy** (the answer as written,
-Markdown included) and **"+ Report"** on the right. The validation is one line:
-a quiet check when it passed, a quiet note when it did not run, an amber box
-when it flagged a mismatch; its reason opens behind a disclosure. The composer
+Markdown included) and **"+ Report"** on the right. The validation is one quiet
+line in every outcome, told apart by its icon alone: a green check when it
+passed, a red cross when it flagged a mismatch, an info mark when it did not
+run; its reason opens behind a disclosure. The composer
 is one pill under the transcript (`ChatComposer`) with the reasoning switch and
 Send at its end.
 
