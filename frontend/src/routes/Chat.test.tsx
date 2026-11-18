@@ -1601,7 +1601,7 @@ describe('Chat session switching', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /send/i })).not.toHaveAttribute('aria-busy'))
     expect(screen.getByText(shown)).toBeInTheDocument()
     expect(screen.queryByText(new RegExp(provisional))).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^\d+ steps?$/ })).toBeInTheDocument()
   })
 
   it('keeps the steps of an agent turn that fails behind the disclosure', async () => {
@@ -1624,7 +1624,7 @@ describe('Chat session switching', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
 
     expect(await screen.findByText(/answer could not be generated/i)).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: /^\d+ steps?$/ }))
     expect(
       within(screen.getByTestId('agent-trail'))
         .getAllByRole('listitem')

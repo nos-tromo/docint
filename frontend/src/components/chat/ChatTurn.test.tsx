@@ -12,6 +12,9 @@ import { LanguageContext } from '@/i18n/LanguageContext'
 import { useUiStore } from '@/stores/ui'
 import { ANALYSIS } from '@/test/analysis'
 
+/** The finished trail's toggle: its count is the button (DisclosureText), with no chevron beside it. */
+const TRAIL_TOGGLE = /^\d+ steps?$/
+
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
 })
@@ -428,10 +431,10 @@ describe('ChatTurn', () => {
 
     expect(screen.getByTestId('assessment-notice')).toHaveTextContent(/model’s own assessment/i)
     expect(screen.queryByTestId('agent-trail-live')).not.toBeInTheDocument()
-    const toggle = screen.getByRole('button', { name: /show the searches/i })
+    const toggle = screen.getByRole('button', { name: TRAIL_TOGGLE })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     await userEvent.click(toggle)
-    expect(screen.getByRole('button', { name: /hide the searches/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: TRAIL_TOGGLE })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText(/evaluation datasets/)).toBeInTheDocument()
   })
 
@@ -527,7 +530,7 @@ describe('ChatTurn', () => {
       meta: assessmentMeta({ ...TRAIL, actions: [{ action: 'seed', detail: '', found: 2 }] })
     })
     expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: TRAIL_TOGGLE })).not.toBeInTheDocument()
   })
 
   it.each([
@@ -732,7 +735,7 @@ describe('ChatTurn', () => {
     renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta(stored as unknown as AgentTrail) })
 
     expect(screen.getByTestId('assessment-notice')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: TRAIL_TOGGLE })).not.toBeInTheDocument()
   })
 
   const LOOKUP_TRAIL: AgentTrail = {
@@ -772,11 +775,11 @@ describe('ChatTurn', () => {
 
     expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
     expect(screen.queryByTestId('agent-reason-notice')).not.toBeInTheDocument()
-    const toggle = screen.getByRole('button', { name: 'Show the searches behind this answer' })
+    const toggle = screen.getByRole('button', { name: TRAIL_TOGGLE })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     await userEvent.click(toggle)
 
-    expect(screen.getByRole('button', { name: 'Hide the searches behind this answer' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: TRAIL_TOGGLE })).toHaveAttribute(
       'aria-expanded',
       'true'
     )
@@ -792,9 +795,26 @@ describe('ChatTurn', () => {
 
     const trail = screen.getByTestId('agent-trail')
     expect(within(trail).getByText('3 steps')).toBeInTheDocument()
-    expect(screen.queryByText('Searches behind this answer')).not.toBeInTheDocument()
     const answer = screen.getByText(/^Person A steht am Hafen/)
     expect(trail.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('opens the finished steps from their count, with no chevron, by pointer and keyboard', async () => {
+    renderTurn({ user: 'Wer steht am Hafen?', assistant: 'Person A steht am Hafen [1].', done: true, meta: lookupMeta() })
+
+    const trail = screen.getByTestId('agent-trail')
+    const toggle = within(trail).getByRole('button', { name: '3 steps' })
+    // The words are the control: no separate chevron button beside them.
+    expect(within(trail).getAllByRole('button')).toEqual([toggle])
+    expect(toggle.querySelector('svg')).toBeNull()
+
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(trailRows('agent-trail')).toHaveLength(3)
+    await userEvent.keyboard('{Enter}')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.keyboard(' ')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('streams its steps above the answer being written', () => {
@@ -815,7 +835,7 @@ describe('ChatTurn', () => {
 
     expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
     expect(screen.queryByTestId('assessment-answer-degraded')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Show the searches behind this answer' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: TRAIL_TOGGLE })).toBeInTheDocument()
   })
 
   it('image-search, keyframe, read, keyword and note steps have labels', () => {
@@ -904,7 +924,7 @@ describe('ChatTurn', () => {
 
     renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
 
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
     expect(trailRows('agent-trail')).toEqual(['Listed the topics', 'Read topic T12: 2 passages'])
   })
 
@@ -1055,7 +1075,7 @@ describe('ChatTurn', () => {
         ]
       })
     })
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
 
     expect(trailRows('agent-trail')).toEqual([
       'Keyword check “Kontrollgruppe”: 0 matches (12 chunks not checked), 0 new',
@@ -1102,7 +1122,7 @@ describe('ChatTurn', () => {
         actions: [{ action: 'keyword', detail: 'Nachtschicht', found: 1, field: 'text', matches: null, unchecked: 4 }]
       })
     })
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
 
     expect(streamed).toEqual(['Keyword check “Nachtschicht”: count unavailable, 1 new'])
     expect(trailRows('agent-trail')).toEqual(streamed)
@@ -1121,7 +1141,7 @@ describe('ChatTurn', () => {
   ] as const)('lists the keyword checks of %s behind the disclosure', async (_name, meta) => {
     renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: meta() })
 
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
 
     expect(trailRows('agent-trail')).toEqual([
       'Keyword check “Kontrollgruppe”: 0 matches, 0 new',
@@ -1196,7 +1216,7 @@ describe('ChatTurn', () => {
     }
     renderTurn({ user: 'q', assistant: 'Done.', done: true, meta: lookupMeta(stored) })
 
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
 
     expect(trailRows('agent-trail')).toEqual(['Ran Python: Posts per author'])
   })
@@ -1287,7 +1307,7 @@ describe('ChatTurn', () => {
       ]
     }
     renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
     expect(trailRows('agent-trail')).toEqual([
       'Carried over 2 passages from earlier answers',
       'Searched “Hafen”: 1 new passage'
@@ -1300,8 +1320,7 @@ describe('ChatTurn', () => {
     renderTurn({ user: 'q', assistant: 'Person A [1].', done: true, meta: lookupMeta(stored) })
 
     // It searched nothing, so there is no title or toggle naming searches to put the row behind.
-    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
-    expect(screen.queryByText('Searches behind this answer')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: TRAIL_TOGGLE })).not.toBeInTheDocument()
     expect(trailRows('agent-trail')).toEqual(['Carried over 2 passages from earlier answers'])
     // The row is the trail's own: the passages icon, in the small muted text.
     const trail = screen.getByTestId('agent-trail')
@@ -1322,7 +1341,7 @@ describe('ChatTurn', () => {
 
     // Shut, the disclosure holds both rows: the carried one is not also a line under the answer.
     expect(screen.queryByText(/Carried over/)).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
     expect(trailRows('agent-trail')).toEqual([
       'Carried over 2 passages from earlier answers',
       'Searched “Hafen”: 1 new passage'
@@ -1339,7 +1358,7 @@ describe('ChatTurn', () => {
       agentSteps: [{ step: 0, action: 'carried', detail: '', found: 2 }]
     })
 
-    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: TRAIL_TOGGLE })).not.toBeInTheDocument()
     expect(trailRows('agent-trail')).toEqual(['Carried over 2 passages from earlier answers'])
   })
 
@@ -1399,7 +1418,7 @@ describe('ChatTurn', () => {
     }
     renderTurn({ user: 'q', assistant: 'Fact [1].', done: true, meta: assessmentMeta(stored) })
     expect(screen.getByTestId('assessment-notice')).toHaveTextContent('2 passages were shortened')
-    await userEvent.click(screen.getByRole('button', { name: 'Show the searches behind this answer' }))
+    await userEvent.click(screen.getByRole('button', { name: TRAIL_TOGGLE }))
     expect(trailRows('agent-trail')).toEqual(['Searched “evaluation datasets”: 1 new passage'])
   })
 
@@ -1498,7 +1517,7 @@ describe('ChatTurn', () => {
 
     expect(screen.getByTestId('agent-reason-notice')).toHaveTextContent(/could not run its own searches/i)
     expect(screen.queryByTestId('assessment-notice')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /searches/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: TRAIL_TOGGLE })).not.toBeInTheDocument()
   })
 
   it('keeps every call of a round in the live trail as more steps arrive', () => {

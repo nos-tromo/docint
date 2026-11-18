@@ -103,7 +103,8 @@ row of actions: the target chip on the left, **Copy** (the answer as written,
 Markdown included) and **"+ Report"** on the right. The validation is one quiet
 line in every outcome, told apart by its icon alone: a green check when it
 passed, a red cross when it flagged a mismatch, an info mark when it did not
-run; its reason opens behind a disclosure. The composer
+run. Where there is a reason, the line's title opens it when clicked, with no
+chevron beside it. The composer
 is one pill under the transcript (`ChatComposer`) with the reasoning switch and
 Send at its end.
 
@@ -236,8 +237,9 @@ While it works, the turn lists each step as it happens:
   took no other step, alone as a line above the answer.
 
 The steps stand above the answer, as in Ghostwriter. When the turn finishes,
-they fold behind a disclosure titled by their count (**3 steps** / **3
-Schritte**) where the live list stood. Every agent turn with a step besides its
+they fold behind their count (**3 steps** / **3 Schritte**) where the live
+list stood; the count itself opens them when clicked, with no chevron beside
+it. Every agent turn with a step besides its
 pinned selection and its carried passages gets one, lookups included. A
 follow-up that only carried passages took no other step, so its row stands as
 a line above the answer, with no disclosure. A turn whose stream

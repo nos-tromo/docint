@@ -212,8 +212,6 @@ export const en = {
   'chat.validation_unavailable_title': 'Response validation unavailable',
   'chat.validation_not_validated_title': 'Response not validated',
   'chat.validation_default_detail': 'Validation was skipped or unavailable for this response.',
-  'chat.validation_details_show': 'Show the validation details',
-  'chat.validation_details_hide': 'Hide the validation details',
   'chat.validation_passed_assessment_title': 'Response validation passed for the source-backed part',
   'chat.validation_mismatch_assessment_title': 'Response validation flagged the source-backed part',
   'chat.validation_skipped_assessment_title':
@@ -224,8 +222,6 @@ export const en = {
   'chat.assessment_shortened_other': '{count} passages were shortened to fit the model’s context.',
   'chat.agent_trail_steps_one': '{count} step',
   'chat.agent_trail_steps_other': '{count} steps',
-  'chat.agent_trail_show': 'Show the searches behind this answer',
-  'chat.agent_trail_hide': 'Hide the searches behind this answer',
   'chat.agent_trail_seed_one': 'Started from {count} passage',
   'chat.agent_trail_seed_other': 'Started from {count} passages',
   'chat.agent_trail_carried_one': 'Carried over {count} passage from earlier answers',

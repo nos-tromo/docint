@@ -7,9 +7,9 @@ function trail(overrides: Partial<AgentTrail>): AgentTrail {
   return { steps: 1, actions: [], reason: null, answer: 'split', shortened: 0, evidence_chars: 9, ...overrides }
 }
 
-/** The detail sits behind a disclosure; open it. */
+/** The detail sits behind the line's own title, which is the one button the banner draws; open it. */
 function openDetail() {
-  fireEvent.click(screen.getByRole('button', { name: 'Show the validation details' }))
+  fireEvent.click(screen.getByRole('button'))
 }
 
 describe('ValidationBanner', () => {
@@ -20,11 +20,13 @@ describe('ValidationBanner', () => {
       />
     )
     expect(screen.queryByText('Answer matches.')).not.toBeInTheDocument()
-    const toggle = screen.getByRole('button', { name: 'Show the validation details' })
+    // The title is the disclosure (DisclosureText): its words are the name, with no chevron beside them.
+    const toggle = screen.getByRole('button', { name: 'Response validation passed' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle.querySelector('svg')).toBeNull()
     openDetail()
     expect(screen.getByText('Answer matches.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Hide the validation details' })).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
     const passLine = passed.firstElementChild
     const check = passed.querySelector('svg')
     expect(check).toHaveClass('text-[var(--status-emerald-fg)]')
@@ -41,6 +43,12 @@ describe('ValidationBanner', () => {
     const cross = flagged.querySelector('svg')
     expect(cross).toHaveClass('text-[var(--status-red-fg)]')
     expect(cross?.innerHTML).not.toBe(checkDrawing)
+  })
+
+  it('draws a line with nothing behind it as text, not as a button', () => {
+    render(<ValidationBanner v={{ validation_checked: true, validation_mismatch: false, validation_reason: null }} />)
+    expect(screen.getByText('Response validation passed')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('renders the validated state when the answer is grounded', () => {

@@ -1,5 +1,5 @@
 import { useId, useState, type ComponentType } from 'react'
-import { CheckIcon, DisclosureButton, InfoIcon, XIcon, type IconProps } from '@infra/ui'
+import { CheckIcon, DisclosureText, InfoIcon, XIcon, type IconProps } from '@infra/ui'
 import type { ChatFinalEvent, ValidationFields } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -69,8 +69,8 @@ function resolveSpec(v: BannerFields, t: ReturnType<typeof useT>): BannerSpec {
 
 /**
  * The answer's validation, as one quiet line under it: a green check when it passed, a red cross when it
- * flagged a mismatch, an info mark when it did not run. The detail opens behind a disclosure, so it never
- * outweighs the answer.
+ * flagged a mismatch, an info mark when it did not run. The detail opens from the title itself
+ * (`DisclosureText`, no chevron), so it never outweighs the answer; a line with no detail stays text.
  */
 export function ValidationBanner({ v }: { v: BannerFields }) {
   const t = useT()
@@ -87,15 +87,12 @@ export function ValidationBanner({ v }: { v: BannerFields }) {
             spec.kind === 'mismatch' && 'text-[var(--status-red-fg)]'
           )}
         />
-        <span className="min-w-0 flex-1">{spec.title}</span>
-        {spec.detail && (
-          <DisclosureButton
-            expanded={open}
-            controls={detailId}
-            label={open ? t('chat.validation_details_hide') : t('chat.validation_details_show')}
-            onClick={() => setOpen((value) => !value)}
-            className="h-6 w-6"
-          />
+        {spec.detail ? (
+          <DisclosureText expanded={open} controls={detailId} onClick={() => setOpen((value) => !value)}>
+            {spec.title}
+          </DisclosureText>
+        ) : (
+          <span className="min-w-0 flex-1">{spec.title}</span>
         )}
       </div>
       {open && spec.detail && (

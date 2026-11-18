@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import {
   CopyButton,
-  DisclosureButton,
+  DisclosureText,
   DocumentsIcon,
   ImageIcon,
   InfoIcon,
@@ -330,27 +330,21 @@ function researchSteps(actions: TrailStep[] | undefined): TrailStep[] {
   )
 }
 
-/** The searches behind a finished agent turn, behind a disclosure titled by their count, where the live trail stood. */
+/**
+ * The searches behind a finished agent turn, where the live trail stood: folded behind their count, which is the
+ * button itself (`DisclosureText`, no chevron), as Ghostwriter draws its steps.
+ */
 function AgentTrailDisclosure({ steps }: { steps: TrailStep[] }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const listId = useId()
   return (
     <div className="mb-3 text-xs text-muted-foreground" data-testid="agent-trail">
-      <div className="flex items-center gap-2">
-        <span className="flex-1">
-          {t(steps.length === 1 ? 'chat.agent_trail_steps_one' : 'chat.agent_trail_steps_other', {
-            count: steps.length
-          })}
-        </span>
-        <DisclosureButton
-          expanded={open}
-          controls={listId}
-          label={open ? t('chat.agent_trail_hide') : t('chat.agent_trail_show')}
-          onClick={() => setOpen((value) => !value)}
-          className="h-6 w-6"
-        />
-      </div>
+      <DisclosureText expanded={open} controls={listId} onClick={() => setOpen((value) => !value)}>
+        {t(steps.length === 1 ? 'chat.agent_trail_steps_one' : 'chat.agent_trail_steps_other', {
+          count: steps.length
+        })}
+      </DisclosureText>
       {open && <TrailSteps id={listId} steps={steps} className="mt-2" />}
     </div>
   )
