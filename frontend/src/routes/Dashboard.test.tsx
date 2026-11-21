@@ -170,10 +170,18 @@ describe('Dashboard automatic deletion card', () => {
   })
 
   it('shows what is due, with its date', async () => {
-    vi.stubGlobal('fetch', retentionFetch(365))
-    renderDashboard()
+    // The fixture's deadline is fixed, so the clock is too: once it has passed,
+    // the card says "at the next run" instead of the date.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-01T12:00:00Z'))
+    try {
+      vi.stubGlobal('fetch', retentionFetch(365))
+      renderDashboard()
 
-    const card = await screen.findByRole('region', { name: /automatic deletion/i })
-    expect(within(card).getByRole('listitem')).toHaveTextContent(/memo\.pdf.*Deleted on Nov 21, 2026/)
+      const card = await screen.findByRole('region', { name: /automatic deletion/i })
+      expect(within(card).getByRole('listitem')).toHaveTextContent(/memo\.pdf.*Deleted on Nov 21, 2026/)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -104,6 +104,7 @@ wheels/*.whl
 !docs/**/*.md
 !frontend/src/lib/
 !frontend/index.html
+!frontend/public/*.png
 !scripts/
 !scripts/bundle_images.sh
 !scripts/bundle-lib.sh
