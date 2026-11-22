@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RetentionCard } from './RetentionCard'
@@ -35,10 +35,18 @@ function renderCard() {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
 describe('RetentionCard', () => {
+  // The fixtures' deadlines are fixed, so the clock is too: once one has
+  // passed, the card says "at the next run" instead of its date.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-01T12:00:00Z'))
+  })
+
   it("renders the owner's due items grouped by collection", async () => {
     vi.stubGlobal(
       'fetch',
