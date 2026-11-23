@@ -79,8 +79,8 @@ identifiers, with provider-specific fallbacks.
 | `EMBED_MODEL` | `bge-m3` (ollama) / `BAAI/bge-m3` (vllm) / `text-embedding-3-small` (openai) | Dense text embedding model. |
 | `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. The image bakes the snapshot at build time (same-named build arg); on a `uv run` host, populate it with `uv run load-models`. |
 | `SPARSE_MODEL` | `BAAI/bge-m3` | Sparse retrieval model. Same value on every provider — sparse encoding is always a remote call (`RemoteSparseEncoder`), so there is no per-provider default to pick. |
-| `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
-| `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
+| `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.8-27B-FP8` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
+| `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.8-27B-FP8` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
 | `TRANSLATE_MODEL` | inherits `TEXT_MODEL` | Model used for on-demand, display-time snippet translation (`POST /translate`). Reuses the shared chat endpoint — there is no separate translation runtime and no `TRANSLATE_API_BASE`. |
 

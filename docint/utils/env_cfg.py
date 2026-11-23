@@ -1325,8 +1325,8 @@ def load_model_env(
 
     if inference_provider == "vllm":
         default_embed_model = "BAAI/bge-m3"
-        default_text_model = "Qwen/Qwen3.5-2B"
-        default_vision_model = "Qwen/Qwen3.5-2B"
+        default_text_model = "Qwen/Qwen3.8-27B-FP8"
+        default_vision_model = "Qwen/Qwen3.8-27B-FP8"
 
     if inference_provider == "openai":
         default_embed_model = "text-embedding-3-small"

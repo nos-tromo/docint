@@ -475,6 +475,24 @@ def test_load_model_env_uses_vllm_sparse_default(
     assert cfg.sparse_model == "BAAI/bge-m3"
 
 
+def test_load_model_env_vllm_chat_defaults_are_vllm_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On vllm the chat and vision defaults are the model vllm-service serves.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    monkeypatch.delenv("TEXT_MODEL", raising=False)
+    monkeypatch.delenv("VISION_MODEL", raising=False)
+
+    cfg = load_model_env()
+
+    assert cfg.text_model == "Qwen/Qwen3.8-27B-FP8"
+    assert cfg.vision_model == "Qwen/Qwen3.8-27B-FP8"
+
+
 def test_load_model_env_reads_no_ner_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

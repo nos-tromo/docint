@@ -41,7 +41,7 @@ extra context a new user needs to understand what they just started.
    ```bash
    # Using the federation's vllm-service router
    OPENAI_API_KEY=<the router's master key>
-   TEXT_MODEL=Qwen/Qwen3.5-2B
+   TEXT_MODEL=Qwen/Qwen3.8-27B-FP8
 
    # Using the OpenAI API
    INFERENCE_PROVIDER=openai
