@@ -160,7 +160,6 @@ def _pipeline(
     )
     pipeline = DocumentIngestionPipeline(
         data_dir=data_dir,
-        ner_model=None,
         progress_callback=None,
         hate_speech_model=cast(Any, model),
     )

@@ -82,7 +82,6 @@ identifiers, with provider-specific fallbacks.
 | `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | General vision model — captions and tags images, and reads them when no `OCR_MODEL` is set. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
-| `NER_MODEL` | `gliner-community/gliner_large-v2.5` | GLiNER NER model. |
 | `TRANSLATE_MODEL` | inherits `TEXT_MODEL` | Model used for on-demand, display-time snippet translation (`POST /translate`). Reuses the shared chat endpoint — there is no separate translation runtime and no `TRANSLATE_API_BASE`. |
 
 ## Document OCR — `OcrClientConfig`

@@ -53,7 +53,7 @@ def _pipeline(tmp_path: Path, **overrides: Any) -> DocumentIngestionPipeline:
     Returns:
         DocumentIngestionPipeline: The constructed pipeline.
     """
-    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, ner_model=None, progress_callback=None, **overrides)
+    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, progress_callback=None, **overrides)
     pipeline.image_ingestion_service = cast(Any, SimpleNamespace())
     return pipeline
 

@@ -4650,22 +4650,13 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         hate_speech_enabled = load_hate_speech_env().enabled if hate_speech is None else hate_speech
-        ner_enabled = self.ner_enabled if ner is None else ner
-        use_llm_ner = ner_enabled and self.openai_inference_provider.lower() in {"openai"}
-
-        shared_text_model: OpenAI | None = None
-        if use_llm_ner or hate_speech_enabled:
-            shared_text_model = self.text_model
-
-        ner_model = shared_text_model if use_llm_ner else None
-        hate_speech_model = shared_text_model if hate_speech_enabled else None
+        hate_speech_model: OpenAI | None = self.text_model if hate_speech_enabled else None
 
         if self._image_ingestion_service is None:
             self._image_ingestion_service = ImageIngestionService()
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
-            ner_model=ner_model,
             progress_callback=progress_callback,
             hate_speech_model=hate_speech_model,
             ner_override=ner,

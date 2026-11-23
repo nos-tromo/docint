@@ -1279,7 +1279,6 @@ class ModelConfig:
 
     embed_model: str
     embed_tokenizer_repo: str
-    ner_model: str
     rerank_model: str
     sparse_model: str
     text_model: str
@@ -1289,7 +1288,6 @@ class ModelConfig:
 
 def load_model_env(
     default_embed_model: str = "bge-m3",
-    default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "BAAI/bge-m3",
     default_text_model: str = "gpt-oss:20b",
@@ -1300,7 +1298,6 @@ def load_model_env(
     Args:
         default_embed_model(str): Default embedding model identifier for
             Ollama-compatible embeddings.
-        default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
         default_text_model (str): Default text model identifier.
@@ -1312,7 +1309,6 @@ def load_model_env(
         - embed_tokenizer_repo (str): HF repo id of the tokenizer used
           for offline token counting at ingestion time. Empty when
           tokenization happens on the provider side (e.g. ``openai``).
-        - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier, served remotely.
           Always ``BAAI/bge-m3`` regardless of ``INFERENCE_PROVIDER`` — sparse
@@ -1342,7 +1338,6 @@ def load_model_env(
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         embed_tokenizer_repo=os.getenv("EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo),
-        ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
         text_model=text_model,
