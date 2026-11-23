@@ -29,9 +29,7 @@ def _pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DocumentIngest
         A ``DocumentIngestionPipeline`` whose ``ImageIngestionService`` construction
         and manifest opening are stubbed out.
     """
-    pipeline = DocumentIngestionPipeline(
-        data_dir=tmp_path, ner_model=None, progress_callback=None, target_collection="c"
-    )
+    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, progress_callback=None, target_collection="c")
     # Isolate _run_standalone_media from real services/disk: it constructs an
     # ImageIngestionService and opens a SQLite manifest before delegating.
     monkeypatch.setattr(pipe_mod, "ImageIngestionService", lambda *a, **k: object())

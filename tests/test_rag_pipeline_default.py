@@ -452,7 +452,6 @@ def _enriching_pipeline(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> Docu
 
     pipeline = DocumentIngestionPipeline(
         data_dir=data_dir,
-        ner_model=None,
         progress_callback=None,
         hate_speech_model=cast(Any, _VerdictModel()),
     )

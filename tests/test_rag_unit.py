@@ -1921,11 +1921,11 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
     assert filtered[0].metadata.get("file_hash") == fresh_hash
 
 
-def test_build_ingestion_pipeline_reuses_text_model_for_ner_and_hate_speech(
+def test_build_ingestion_pipeline_gives_the_text_model_to_hate_speech_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """LLM-NER and hate-speech should share one cached text model instance.
+    """Hate speech gets the cached text model; NER never takes an LLM.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -1962,15 +1962,15 @@ def test_build_ingestion_pipeline_reuses_text_model_for_ner_and_hate_speech(
     pipeline = rag._build_ingestion_pipeline()
 
     assert len(created) == 1
-    assert pipeline.ner_model is created[0]
+    assert not hasattr(pipeline, "ner_model")
     assert pipeline.hate_speech_model is created[0]
 
 
-def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
+def test_build_ingestion_pipeline_ner_alone_creates_no_text_model(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Non-OpenAI provider should not wire LLM NER model into the pipeline.
+    """NER on without hate speech creates no text model, on any provider.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -1979,12 +1979,12 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     rag = RAG(qdrant_collection="test")
     rag.data_dir = tmp_path
     rag.ner_enabled = True
-    rag.openai_inference_provider = "ollama"
+    rag.openai_inference_provider = "openai"
 
     monkeypatch.setattr(
         rag_module,
         "load_hate_speech_env",
-        lambda: types.SimpleNamespace(enabled=True),
+        lambda: types.SimpleNamespace(enabled=False),
     )
 
     created: list[object] = []
@@ -2006,9 +2006,8 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
 
     pipeline = rag._build_ingestion_pipeline()
 
-    assert pipeline.ner_model is None
-    assert pipeline.hate_speech_model is created[0]
-    assert len(created) == 1
+    assert created == []
+    assert pipeline.hate_speech_model is None
 
 
 def test_build_ingestion_pipeline_wires_remote_ner_extractor(

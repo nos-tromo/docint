@@ -105,9 +105,7 @@ def _pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, hierarchical: 
     monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
     monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
     model = SimpleNamespace(complete=lambda prompt, **kwargs: SimpleNamespace(text=_reply(prompt)))
-    pipeline = DocumentIngestionPipeline(
-        data_dir=tmp_path, ner_model=None, progress_callback=None, hate_speech_model=cast(Any, model)
-    )
+    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, progress_callback=None, hate_speech_model=cast(Any, model))
     pipeline._load_node_parsers()
     pipeline.entity_extractor = _extractor
     return pipeline

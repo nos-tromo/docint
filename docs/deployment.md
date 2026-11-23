@@ -225,7 +225,7 @@ where it differs from the default, the model:
 
 ```bash
 OPENAI_API_KEY=<the router's master key>
-TEXT_MODEL=Qwen/Qwen3.5-2B
+TEXT_MODEL=Qwen/Qwen3.8-27B-FP8
 ```
 
 See [configuration.md](configuration.md) for every variable. A handful
@@ -275,8 +275,8 @@ To run both on a single host with a shared network:
 
    ```bash
    OPENAI_API_KEY=<the router's master key>
-   TEXT_MODEL=Qwen/Qwen3.5-2B
-   VISION_MODEL=Qwen/Qwen3.5-2B
+   TEXT_MODEL=Qwen/Qwen3.8-27B-FP8
+   VISION_MODEL=Qwen/Qwen3.8-27B-FP8
    EMBED_MODEL=BAAI/bge-m3
    SPARSE_MODEL=BAAI/bge-m3
    RERANK_MODEL=BAAI/bge-reranker-v2-m3

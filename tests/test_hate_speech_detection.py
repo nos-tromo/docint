@@ -182,9 +182,7 @@ def _pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: _Recording
     monkeypatch.setattr(pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig())
     monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
     monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
-    pipeline = DocumentIngestionPipeline(
-        data_dir=tmp_path, ner_model=None, progress_callback=None, hate_speech_model=cast(Any, model)
-    )
+    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, progress_callback=None, hate_speech_model=cast(Any, model))
     pipeline.entity_extractor = None
     return pipeline
 

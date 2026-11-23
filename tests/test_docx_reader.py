@@ -203,7 +203,7 @@ def test_all_binary_supported_filetypes_have_a_reader(tmp_path: Path) -> None:
     # SimpleDirectoryReader rejects an empty input dir at construction.
     (tmp_path / "seed.txt").write_text("seed", encoding="utf-8")
 
-    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, ner_model=None, progress_callback=None)
+    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, progress_callback=None)
     # Avoid the real ImageIngestionService (it probes the remote CLIP service at
     # construction); _load_doc_readers short-circuits on a truthy stub.
     pipeline.image_ingestion_service = cast(Any, SimpleNamespace())

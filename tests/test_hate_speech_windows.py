@@ -263,7 +263,6 @@ def _pipeline(
     monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        ner_model=None,
         progress_callback=progress.append if progress is not None else None,
         hate_speech_model=cast(Any, model),
     )

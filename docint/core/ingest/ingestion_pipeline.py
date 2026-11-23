@@ -305,7 +305,6 @@ class DocumentIngestionPipeline:
 
     # --- Constructor args ---
     data_dir: Path
-    ner_model: OpenAI | None
     progress_callback: Callable[[str], None] | None
     hate_speech_model: OpenAI | None = None
     # Per-request enrichment overrides: None keeps the deployment env default

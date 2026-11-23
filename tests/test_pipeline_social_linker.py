@@ -35,9 +35,7 @@ def test_pipeline_skips_consumed_and_yields_linker_documents(tmp_path: Path, mon
 
     monkeypatch.setattr("docint.core.ingest.social_linker.SocialLinker.run", fake_run)
 
-    pipeline = DocumentIngestionPipeline(
-        data_dir=tmp_path, ner_model=None, progress_callback=None, target_collection="c"
-    )
+    pipeline = DocumentIngestionPipeline(data_dir=tmp_path, progress_callback=None, target_collection="c")
     pipeline._load_doc_readers()
     batches = list(pipeline._iter_loaded_documents())
     loaded = [doc for batch in batches for doc in batch]
@@ -99,7 +97,6 @@ def test_pipeline_skips_nested_media_the_real_linker_consumed(tmp_path: Path, mo
     monkeypatch.setattr(DocumentIngestionPipeline, "_open_ingest_manifest", lambda self: _StubManifest())
     pipeline = DocumentIngestionPipeline(
         data_dir=batch,
-        ner_model=None,
         progress_callback=None,
         target_collection="c",
         image_ingestion_service=images,
@@ -160,7 +157,6 @@ def test_prefilter_leaves_claimed_files_to_the_linker(tmp_path: Path, monkeypatc
     monkeypatch.setattr(DocumentIngestionPipeline, "_open_ingest_manifest", lambda self: _StubManifest())
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        ner_model=None,
         progress_callback=None,
         target_collection="c",
         image_ingestion_service=images,
