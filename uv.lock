@@ -407,7 +407,7 @@ wheels = [
 
 [[package]]
 name = "docint"
-version = "2.18.0"
+version = "2.18.1"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
