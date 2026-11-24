@@ -1,5 +1,6 @@
 // Reads the shipped files from disk, so this test needs Node's types.
 /// <reference types="node" />
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,16 +21,27 @@ function hslToHex(h: number, s: number, l: number): string {
   return `#${channel(0)}${channel(8)}${channel(4)}`
 }
 
+/**
+ * The `?v=` a head link carries: the first 8 hex digits of the file's SHA-256.
+ * A browser keeps a favicon by its URL, whatever the cache headers say, so a
+ * redrawn icon has to arrive under a new one.
+ */
+function version(file: string): string {
+  return createHash('sha256').update(readFileSync(join(publicDir, file))).digest('hex').slice(0, 8)
+}
+
 describe('favicon', () => {
-  it('links the SVG icon, its PNG fallback and the touch icon in the page head', () => {
+  it('links the SVG icon, its PNG fallback and the touch icon in the page head, versioned by content', () => {
     const head = indexHtml.split('</head>')[0]
-    expect(head).toContain('<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />')
-    expect(head).toContain('<link rel="icon" href="/favicon.svg" type="image/svg+xml" />')
-    expect(head).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png" />')
+    expect(head).toContain(
+      `<link rel="icon" href="/favicon-32.png?v=${version('favicon-32.png')}" type="image/png" sizes="32x32" />`,
+    )
+    expect(head).toContain(`<link rel="icon" href="/favicon.svg?v=${version('favicon.svg')}" type="image/svg+xml" />`)
+    expect(head).toContain(`<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=${version('apple-touch-icon.png')}" />`)
   })
 
   it('ships every file the page head links', () => {
-    const hrefs = [...indexHtml.matchAll(/<link rel="(?:icon|apple-touch-icon)" href="\/([^"]+)"/g)].map((m) => m[1])
+    const hrefs = [...indexHtml.matchAll(/<link rel="(?:icon|apple-touch-icon)" href="\/([^"?]+)/g)].map((m) => m[1])
     expect(hrefs).toHaveLength(3)
     for (const href of hrefs) expect(readFileSync(join(publicDir, href)).byteLength).toBeGreaterThan(0)
   })
